@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>对话</title>
+  <style>
+    :root { color-scheme:light; --ink:#342d29; --muted:#81766f; --line:rgba(116,93,78,.16); --paper:rgba(255,253,249,.94); --mine:#eee6e1; --accent:#9b5f4c; }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; }
+    body { font-family:system-ui,-apple-system,"HarmonyOS Sans SC",sans-serif; color:var(--ink); background:#fffaf5; }
+    body::before { content:""; position:fixed; inset:0; z-index:-1; background:radial-gradient(circle at 96% 20%,rgba(255,199,144,.38),transparent 27%),radial-gradient(circle at 7% 55%,rgba(219,188,255,.30),transparent 32%),radial-gradient(circle at 74% 84%,rgba(183,221,255,.31),transparent 34%); }
+    .app { height:100%; padding:16px 28px 24px; display:flex; flex-direction:column; gap:16px; }
+    header { flex:0 0 40px; display:flex; align-items:center; gap:12px; }
+    .connection { margin:0; color:var(--muted); font-size:13px; }
+    .connect { margin-left:auto; flex-shrink:0; border:1px solid var(--line); border-radius:14px; padding:7px 12px; background:var(--paper); color:var(--accent); cursor:pointer; }
+    .connect:disabled { opacity:.5; cursor:default; }
+    .brand { width:38px; height:38px; display:grid; place-items:center; color:var(--accent); font-size:22px; font-weight:800; transform:skew(-8deg); }
+    .history { flex:1; min-height:0; overflow-y:auto; padding:8px 12px 8px; display:flex; flex-direction:column; gap:12px; scrollbar-width:none; }
+    .history > :first-child { margin-top:auto; }
+    .row { display:flex; width:100%; flex-shrink:0; }
+    .row.mine { justify-content:flex-end; }
+    .bubble { max-width:85%; padding:13px 15px; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:0 8px 22px rgba(78,57,44,.035); font-size:16px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .mine .bubble { background:var(--mine); border-color:transparent; border-bottom-right-radius:8px; }
+    .peer-row .bubble { border-bottom-left-radius:8px; }
+    .pending { color:var(--muted); }
+    .error { color:#a24535; }
+    .dock { flex-shrink:0; min-height:64px; display:flex; align-items:center; gap:12px; padding:6px 8px 6px 18px; border:1px solid var(--line); border-radius:32px; background:rgba(255,255,255,.9); box-shadow:0 10px 28px rgba(70,49,37,.09); }
+    textarea { flex:1; min-width:0; max-height:104px; resize:none; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:16px; line-height:24px; padding:8px 0; }
+    textarea::placeholder { color:#9a918b; }
+    .send { flex:0 0 52px; width:52px; height:52px; display:grid; place-items:center; border:0; border-radius:50%; background:var(--accent); color:white; font-size:27px; line-height:1; cursor:pointer; }
+    .send:disabled { background:#d2cfcc; cursor:default; }
+    .send:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header><div class="brand" aria-hidden="true">A</div><p id="connection" class="connection" role="status">正在准备…</p><button id="connect" class="connect" type="button" disabled>连接</button></header>
+    <section id="history" class="history" aria-label="聊天记录" aria-live="polite"></section>
+    <form id="composer" class="dock">
+      <textarea id="prompt" rows="1" maxlength="1000" placeholder="输入消息…" aria-label="输入消息"></textarea>
+      <button id="send" class="send" type="submit" aria-label="发送" disabled>↑</button>
+    </form>
+  </main>
+  <script>
+    const historyView=document.getElementById('history');
+    const promptInput=document.getElementById('prompt');
+    const sendButton=document.getElementById('send');
+    const connectButton=document.getElementById('connect');
+    connectButton.addEventListener('click',()=>window.chatBridge.connect());
+    // Explicit clicks can retry; automatic focus restoration must not reopen dialogs.
+    let allowFocusPreparation=true;
+    function prepareFromInput(){
+      if(!allowFocusPreparation)return;
+      allowFocusPreparation=false;
+      window.chatBridge.prepare();
+    }
+    promptInput.addEventListener('pointerdown',()=>{allowFocusPreparation=true;prepareFromInput();});
+    promptInput.addEventListener('focus',prepareFromInput);
+    document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
+    let busy=false, available=false, reply=null, pendingText='正在等待推理端回复';
+    function scrollLatest(){historyView.scrollTop=historyView.scrollHeight;}
+    function bubble(text,mine){
+      const row=document.createElement('div'); row.className='row '+(mine?'mine':'peer-row');
+      const content=document.createElement('div'); content.className='bubble'; content.textContent=text;
+      row.appendChild(content);historyView.appendChild(row);scrollLatest();return content;
+    }
+    function updateButton(){sendButton.disabled=!busy&&(!available||!promptInput.value.trim());sendButton.textContent=busy?'■':'↑';sendButton.setAttribute('aria-label',busy?'停止生成':'发送');}
+    promptInput.addEventListener('input',()=>{promptInput.style.height='auto';promptInput.style.height=Math.min(promptInput.scrollHeight,104)+'px';updateButton();});
+    document.getElementById('composer').addEventListener('submit',(event)=>{
+      event.preventDefault();
+      if(busy){window.chatBridge.stop();sendButton.disabled=true;sendButton.setAttribute('aria-label','正在停止');return;}
+      const text=promptInput.value.trim();if(!text)return;
+      try{
+        const error=window.chatBridge.send(text);
+        if(error){bubble(error,false).classList.add('error');return;}
+        bubble(text,true);reply=bubble(pendingText,false);reply.classList.add('pending');
+        busy=true;promptInput.value='';promptInput.style.height='auto';promptInput.blur();updateButton();
+      }catch(error){bubble('暂时无法发送，请重新打开应用。',false).classList.add('error');}
+    });
+    promptInput.addEventListener('keydown',(event)=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();document.getElementById('composer').requestSubmit();}});
+    window.onNativeEvent=(event)=>{
+      if(event.kind==='connection'){available=event.available===true;if(typeof event.pendingText==='string')pendingText=event.pendingText;document.getElementById('connection').textContent=event.text;connectButton.textContent=event.connectLabel||'连接';connectButton.disabled=event.connecting===true;updateButton();return;}
+      if(event.kind==='remote-start'){bubble(event.text,true);reply=bubble('正在推理中',false);reply.classList.add('pending');busy=true;updateButton();return;}
+      if(!reply)return;
+      if(event.kind==='text'){reply.classList.remove('pending');reply.textContent=event.text;}
+      if(event.kind==='done'){
+        reply.classList.remove('pending');
+        if(event.text)reply.textContent=event.text;
+        reply.classList.toggle('error',event.error===true);busy=false;updateButton();
+      }
+      scrollLatest();
+    };
+  </script>
+</body>
+</html>

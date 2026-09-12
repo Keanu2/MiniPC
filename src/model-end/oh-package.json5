@@ -1,0 +1,6 @@
+{
+  "modelVersion": "6.1.0",
+  "description": "Standalone Appless peer-chat UI demo.",
+  "dependencies": {},
+  "devDependencies": {}
+}

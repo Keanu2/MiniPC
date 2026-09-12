@@ -1,0 +1,8 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Static peer-chat UI.",
+  "dependencies": {
+    "libgewu_probe.so": "file:./src/main/cpp/types/libgewu_probe"
+  }
+}

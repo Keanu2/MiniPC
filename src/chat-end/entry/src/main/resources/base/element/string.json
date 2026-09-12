@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "Appless peer-chat UI demo" },
+    { "name": "EntryAbility_label", "value": "Appless Chat UI" },
+    { "name": "nearby_permission_reason", "value": "连接您的附近手机，发送问题并接收模型回复" }
+  ]
+}

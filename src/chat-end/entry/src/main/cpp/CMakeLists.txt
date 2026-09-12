@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.5.0)
+project(GewuProbe)
+set(CMAKE_CXX_STANDARD 17)
+add_library(gewu_probe SHARED gewu_probe.cpp)
+target_link_libraries(gewu_probe PUBLIC libace_napi.z.so libqos.so libhilog_ndk.z.so)
