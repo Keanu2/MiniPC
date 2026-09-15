@@ -6,7 +6,7 @@
 
 模型目录：`getApplicationContext().filesDir/models/Qwen2.5-7B-Instruct-Q4_N_0`，包含匹配的api_config.json、params和tokenizer.json。backend=knpu，max_ctx=2048。
 
-HTML仅向ArkTS暴露发送/停止动作；模型路径和请求参数由App构造，消息通过JSON传输并以textContent渲染。每个请求创建独立Native session并在结束时销毁。保留完整的最近几轮问答作为下一次请求历史（最多3轮且受字符预算裁剪）；界面历史只在本次运行内保存。
+HTML仅向ArkTS暴露发送/停止动作；模型路径和请求参数由App构造，消息通过JSON传输并以textContent渲染。每个进行中的请求占用一路独立 GEWU session（CreateSession → SubmitRequest → DestroySession），最多两路并行；不要在同一 session 上叠两个 Submit。NPU 会分时执行，两路同时生成时单路更慢，并不是 2× 吞吐。保留完整的最近几轮问答作为下一次请求历史（最多3轮且受字符预算裁剪）；界面历史只在本次运行内保存。
 
 消息输入最多1000字符、单次请求max_tokens=256，不设固定Decode时间截断。切后台或页面退出时取消正在进行的推理。此版本已用0391完成真实UI验证，其他设备需单独部署对应模型并验收。
 
@@ -31,7 +31,7 @@ App私有目录的gewu-chat.jsonl保留最近一次请求诊断日志。旧gewuP
 
 首次在0391点“启用近场”并允许附近设备权限；再在2938点“连接”并授权。只有多个可信候选时显示设备选择。DeviceManager返回可信设备列表，本应用不执行异账号发现绑定，也不把可信列表宣称为已按账号过滤。两端保持前台亮屏。
 
-2938创建协同会话，0391的EntryAbility.onCollaborate校验并接收；等聊天页面加载后完成hello/hello_ack。request/cancel与delta/done/error通过sendMessage传送：JSON按UTF-8字节切成480字节块并Base64封装，单条低于1KB，接收后校验重组再执行原聊天业务。保留请求ID、连接epoch、单模型忙状态和独立历史。
+2938创建协同会话，0391的EntryAbility.onCollaborate校验并接收；等聊天页面加载后完成hello/hello_ack。request/cancel与delta/done/error通过sendMessage传送：JSON按UTF-8字节切成480字节块并Base64封装，单条低于1KB，接收后校验重组再执行原聊天业务。两台聊天手机可同时向模型端发问并各自流式收答；模型端本机输入仍一次一路。满两路时新请求返回“已有两路推理正在进行”。准备协同只检查模型文件，不因一路已在生成而拒绝第二台设备。某台聊天手机断开时只取消该连接上的推理。
 
 会话由Ability持有，页面订阅。退后台、手动断开或会话失效结束连接；客户端保留已收到内容，模型端取消该远端请求。再次连接需用户点击，不重放问题，不循环拉起对端。连接握手20秒、未完成分片15秒期限仅适用于通信，模型生成无固定Decode截断。
 

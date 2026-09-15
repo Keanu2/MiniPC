@@ -13,6 +13,8 @@ function setup() {
   const channel = {
     isConnected: () => connected, isConnecting: () => false, operation: () => operation,
     devices: async () => behavior.devices,
+    computeDevices: async () => behavior.devices,
+    bindNearby: async device => device,
     connect: async (id, expected) => { assert.equal(id, 'current'); assert.equal(expected, operation); connections++; await behavior.connect(); },
     waitUntilConnected: () => behavior.wait(), checkService: () => { checks++; return behavior.check(); },
     disconnect: () => { disconnects++; operation++; connected = false; },
@@ -25,7 +27,9 @@ function setup() {
     } } };
     if (name === '@kit.ArkTS') return { util: { generateRandomUUID: () => 'request-1' } };
     if (name === '@kit.PerformanceAnalysisKit') return { hilog: { info() {} } };
-    if (name === '../nearby/NearbyChannel') return { nearbyChannel: channel };
+    if (name === '../nearby/NearbyChannel' || name === '../nearby/LinkEnhanceChannel') {
+      return { nearbyChannel: channel };
+    }
     if (name === '../nearby/NearbyConfig') return { IS_SERVER: false };
     if (name === '../nearby/LocalChat') return { LocalChat: class {} };
     return {};

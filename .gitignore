@@ -23,5 +23,10 @@ tools/signing/
 0391-模型端源码/
 2938-聊天端源码/
 tools/jdk/
+tools/jdk17.zip
+tools/hap-unpack/
 src/*-signed.hap
 *.signed.hap
+
+# Device screenshots, hilog dumps, and one-off probes
+_model_xfer/

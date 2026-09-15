@@ -2,6 +2,8 @@
   "string": [
     { "name": "module_desc", "value": "Appless peer-chat UI demo" },
     { "name": "EntryAbility_label", "value": "Appless Chat UI" },
-    { "name": "nearby_permission_reason", "value": "连接您的附近手机，发送问题并接收模型回复" }
+    { "name": "nearby_permission_reason", "value": "连接您的附近手机，发送问题并接收模型回复" },
+    { "name": "bluetooth_permission_reason", "value": "通过近场蓝牙连接已组网的模型手机" },
+    { "name": "location_permission_reason", "value": "扫描附近蓝牙地址以连接模型手机" }
   ]
 }

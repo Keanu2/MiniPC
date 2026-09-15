@@ -4,7 +4,7 @@ import { promptAction } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { LocalChat, ChatUpdate } from '../nearby/LocalChat';
-import { nearbyChannel } from '../nearby/NearbyChannel';
+import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
 import { WireMessage, ChatMessage } from '../nearby/ChatProtocol';
 import { IS_SERVER } from '../nearby/NearbyConfig';
 
@@ -29,7 +29,10 @@ struct Index {
   private readonly controller: webview.WebviewController = new webview.WebviewController();
   private bridge: ChatBridge = new ChatBridge((text: string): string => this.send(text),
     () => this.stop(), () => { this.connectNearby(); }, () => {
-      if (!IS_SERVER) this.ensureCollaborationReady();
+      if (!IS_SERVER) {
+        this.autoConnect = true;
+        this.ensureCollaborationReady(true);
+      }
     });
   private channel = nearbyChannel;
   private connecting: boolean = false;
@@ -37,6 +40,8 @@ struct Index {
   private serviceReady: boolean = false;
   private preparedOperation: number = -1;
   private selectedDeviceId: string = '';
+  private autoConnect: boolean = true;
+  private connectManual: boolean = false;
   private model: LocalChat | null = null;
   private pageReady: boolean = false;
   private connectionError: string = '';
@@ -61,18 +66,32 @@ struct Index {
     this.channel.unsubscribe();
   }
 
-  private connectNearby(): void {
-    if (this.preparation !== null) return;
-    if (this.channel.isConnected()) { this.channel.disconnect(); return; }
-    this.ensureCollaborationReady();
+  onPageShow(): void {
+    if (this.pageReady && this.autoConnect) this.ensureCollaborationReady(this.connectManual);
   }
 
-  private ensureCollaborationReady(): Promise<void> {
+  private connectNearby(): void {
+    if (this.preparation !== null) return;
+    if (this.channel.isConnected()) {
+      this.autoConnect = false;
+      this.channel.disconnect();
+      this.showConnection();
+      return;
+    }
+    this.autoConnect = true;
+    this.ensureCollaborationReady(true);
+  }
+
+  private ensureCollaborationReady(manual: boolean = false): Promise<void> {
     if (this.activeId) return Promise.resolve();
     if (this.preparation !== null) return this.preparation;
-    if (this.serviceReady && this.channel.isConnected() && this.preparedOperation === this.channel.operation()) {
+    if (IS_SERVER && this.preparedOperation === this.channel.operation() && this.serviceReady) {
       return Promise.resolve();
     }
+    if (!IS_SERVER && this.serviceReady && this.channel.isConnected() && this.preparedOperation === this.channel.operation()) {
+      return Promise.resolve();
+    }
+    this.connectManual = manual;
     this.connecting = true;
     const operation = this.channel.operation();
     this.connectionError = '';
@@ -82,25 +101,38 @@ struct Index {
   }
 
   private async prepareCollaboration(operation: number): Promise<void> {
-    hilog.info(0, 'NearbyChat', 'prepare begin operation=%{public}d', operation);
+    hilog.info(0, 'NearbyChat', 'prepare begin operation=%{public}d manual=%{public}s',
+      operation, String(this.connectManual));
     try {
-      if (IS_SERVER) { await this.channel.prepare(); return; }
+      if (IS_SERVER) {
+        await this.channel.prepare();
+        this.serviceReady = true;
+        this.preparedOperation = operation;
+        return;
+      }
       if (!this.channel.isConnected() && !this.channel.isConnecting()) {
-        const devices = await this.channel.devices();
+        let devices = await this.channel.computeDevices();
         if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (devices.length === 0) throw new Error('未发现附近设备。请保持两端Wi-Fi和蓝牙开启后重试。');
-        let index = this.selectedDeviceId ? devices.findIndex(device => device.deviceId === this.selectedDeviceId) : 0;
-        if (index < 0) throw new Error('上次选择的模型手机已离线，请恢复设备后重试。');
-        if (!this.selectedDeviceId && devices.length > 1) {
+        if (devices.length === 0 && this.connectManual) devices = await this.channel.devices();
+        if (operation !== this.channel.operation() || !this.pageReady) return;
+        if (devices.length === 0) {
+          throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
+        }
+        let index = 0;
+        if (this.selectedDeviceId) {
+          const found = devices.findIndex(device => device.deviceId === this.selectedDeviceId);
+          if (found >= 0) index = found;
+        }
+        if (this.connectManual && !this.selectedDeviceId && devices.length > 1) {
           const buttons: [promptAction.Button, promptAction.Button?, promptAction.Button?,
             promptAction.Button?, promptAction.Button?, promptAction.Button?] = [
-            { text: devices[0].deviceName || '未命名设备', color: '#9b5f4c' }
+            { text: '算力 · ' + (devices[0].deviceName || '未命名设备') + ' · ' + devices[0].deviceId.slice(-4), color: '#9b5f4c' }
           ];
           for (let i = 1; i < Math.min(devices.length, 6); i++) {
-            buttons.push({ text: devices[i].deviceName || '未命名设备', color: '#9b5f4c' });
+            buttons.push({ text: '算力 · ' + (devices[i].deviceName || '未命名设备') + ' · ' + devices[i].deviceId.slice(-4), color: '#9b5f4c' });
           }
           const selection = await this.getUIContext().getPromptAction().showActionMenu({
-            title: '选择要绑定的手机', buttons: buttons
+            title: '选择算力设备', buttons: buttons
           });
           index = selection.index;
         }
@@ -139,10 +171,10 @@ struct Index {
   private showConnection(): void {
     const connected = this.channel?.isConnected() === true;
     const ready = connected && this.serviceReady && this.preparedOperation === this.channel.operation();
-    this.emit({ kind: 'connection', text: this.connectionError || (this.connecting ? '正在准备协同…' :
+    this.emit({ kind: 'connection', text: this.connectionError || (this.connecting ? (this.channel.getStatus() || '正在准备协同…') :
       (!IS_SERVER && ready ? '协同已就绪' : this.channel.getStatus())),
       available: IS_SERVER || ready, pendingText: IS_SERVER ? '正在推理中' : '正在等待推理端回复',
-      connectLabel: connected ? '断开' : (IS_SERVER ? '启用近场' : '重试'),
+      connectLabel: connected ? '断开' : (IS_SERVER ? '启用近场' : '连接'),
       connecting: this.connecting || this.channel.isConnecting() });
   }
 
@@ -249,9 +281,12 @@ struct Index {
       this.finish(stopped ? this.answer + (this.answer ? '\n\n' : '') + '已停止生成' :
         (this.answer || '模型没有返回内容，请重试。'), !stopped && !this.answer);
     } else if (message.type === 'error') {
-      this.serviceReady = false;
-      this.connectionError = message.error || '请求失败，请点击输入框重试。';
-      this.finish(this.connectionError, true);
+      const capacity = (message.error || '').indexOf('两路推理') >= 0;
+      if (!capacity) {
+        this.serviceReady = false;
+        this.connectionError = message.error || '请求失败，请点击输入框重试。';
+      }
+      this.finish(message.error || '请求失败，请点击输入框重试。', true);
       this.showConnection();
     }
   }
@@ -289,6 +324,7 @@ struct Index {
             (message: WireMessage, epoch: number) => this.receive(message, epoch),
             (connected: boolean, epoch: number) => this.connectionChanged(connected, epoch));
           this.showConnection();
+          if (this.autoConnect) this.ensureCollaborationReady(false);
         })
         .onLoadIntercept((event) => !event.data.getRequestUrl().startsWith('resource://rawfile/'))
         .width('100%').height('100%').backgroundColor('#FFF9F4')

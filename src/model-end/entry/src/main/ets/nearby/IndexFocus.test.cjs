@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const ts = require(process.argv[2] || '/Applications/DevEco-Studio.app/Contents/tools/ohpm/node_modules/typescript/lib/typescript.js');
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
-function setup() {
+function setup(isServer) {
   let connected = false, operation = 0, connections = 0, disconnects = 0, checks = 0;
   const events = [], sent = [];
   const behavior = { devices: [{ deviceId: 'stable', networkId: 'current', deviceName: '模型手机' }],
@@ -13,8 +13,10 @@ function setup() {
   const channel = {
     isConnected: () => connected, isConnecting: () => false, operation: () => operation,
     devices: async () => behavior.devices,
+    computeDevices: async () => behavior.devices,
     connect: async (id, expected) => { assert.equal(id, 'current'); assert.equal(expected, operation); connections++; await behavior.connect(); },
     waitUntilConnected: () => behavior.wait(), checkService: () => { checks++; return behavior.check(); },
+    connectedCount: () => connected ? 1 : 0, hasEpoch: () => connected, peerInfos: () => [],
     disconnect: () => { disconnects++; operation++; connected = false; },
     getStatus: () => connected ? '近场已连接' : '未连接',
     send: async message => { sent.push(message); return true; }
@@ -25,8 +27,10 @@ function setup() {
     } } };
     if (name === '@kit.ArkTS') return { util: { generateRandomUUID: () => 'request-1' } };
     if (name === '@kit.PerformanceAnalysisKit') return { hilog: { info() {} } };
-    if (name === '../nearby/NearbyChannel') return { nearbyChannel: channel };
-    if (name === '../nearby/NearbyConfig') return { IS_SERVER: false };
+    if (name === '../nearby/NearbyChannel' || name === '../nearby/LinkEnhanceChannel') {
+      return { nearbyChannel: channel };
+    }
+    if (name === '../nearby/NearbyConfig') return { IS_SERVER: !!isServer };
     if (name === '../nearby/LocalChat') return { LocalChat: class {} };
     return {};
   } };
@@ -99,5 +103,46 @@ function setup() {
   elements.composer.handlers.submit({ preventDefault() {} });
   assert.equal(elements.prompt.value, '保留草稿', 'native readiness rejection preserves draft');
   window.onNativeEvent({ kind: 'connection', available: true }); assert.equal(elements.send.disabled, false);
+  window.onNativeEvent({ kind: 'remote-start', text: '远端问题', requestId: 'r1' });
+  assert.equal(elements.send.disabled, false, 'remote stream must not lock composer');
+  assert.equal(elements.send.textContent, '↑');
   console.log('PASS: HTML pointer/focus dedup, automatic focus no retry, explicit click/Tab retries, send availability and draft preservation');
+}
+
+{
+  const s = setup(true);
+  const callbacks = new Map();
+  s.page.model = {
+    start(messages, cb, id) {
+      if (callbacks.size >= 2) return '已有两路推理正在进行，请稍后再发。';
+      callbacks.set(id, cb);
+      return '';
+    },
+    isBusy() { return callbacks.size >= 2; },
+    readinessError() { return ''; },
+    cancel(id) {
+      const cb = callbacks.get(id);
+      if (!cb) return;
+      callbacks.delete(id);
+      cb({ kind: 'done', text: '已停止生成', finishReason: 'cancelled' });
+    }
+  };
+  s.page.pageReady = true;
+  s.page.receive({ type: 'prepare', requestId: 'p1' }, 1);
+  assert.equal(s.sent.at(-1).type, 'prepared');
+  assert.equal(s.sent.at(-1).error, undefined);
+  s.page.receive({ type: 'request', requestId: 'r1', messages: [{ role: 'user', content: 'A' }] }, 1);
+  s.page.receive({ type: 'request', requestId: 'r2', messages: [{ role: 'user', content: 'B' }] }, 2);
+  assert.equal(s.page.jobs.length, 2);
+  s.page.receive({ type: 'prepare', requestId: 'p2' }, 2);
+  assert.equal(s.sent.at(-1).type, 'prepared', 'prepare stays ready while two jobs run');
+  assert.equal(s.sent.at(-1).error, undefined);
+  s.page.receive({ type: 'request', requestId: 'r3', messages: [{ role: 'user', content: 'C' }] }, 1);
+  assert.equal(s.sent.at(-1).type, 'error');
+  assert(s.sent.at(-1).error.includes('两路'));
+  s.channel.hasEpoch = epoch => epoch === 2;
+  s.page.connectionChanged(true, 1);
+  assert.equal(s.page.jobs.length, 1);
+  assert.equal(s.page.jobs[0].id, 'r2');
+  console.log('PASS: two peer jobs in parallel, prepare not gated, third rejected, disconnect cancels only that epoch');
 }

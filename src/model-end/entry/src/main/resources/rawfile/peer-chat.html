@@ -4,42 +4,58 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-  <title>对话</title>
+  <title>算力</title>
   <style>
-    :root { color-scheme:light; --ink:#342d29; --muted:#81766f; --line:rgba(116,93,78,.16); --paper:rgba(255,253,249,.94); --mine:#eee6e1; --accent:#9b5f4c; }
+    :root { color-scheme:light; --ink:#342d29; --muted:#81766f; --line:rgba(116,93,78,.16); --paper:rgba(255,253,249,.94); --mine:#eee6e1; --accent:#9b5f4c; --ok:#3d7a5a; --busy:#b56a2b; }
     * { box-sizing:border-box; }
     html,body { width:100%; height:100%; margin:0; overflow:hidden; }
     body { font-family:system-ui,-apple-system,"HarmonyOS Sans SC",sans-serif; color:var(--ink); background:#fffaf5; }
     body::before { content:""; position:fixed; inset:0; z-index:-1; background:radial-gradient(circle at 96% 20%,rgba(255,199,144,.38),transparent 27%),radial-gradient(circle at 7% 55%,rgba(219,188,255,.30),transparent 32%),radial-gradient(circle at 74% 84%,rgba(183,221,255,.31),transparent 34%); }
-    .app { height:100%; padding:16px 28px 24px; display:flex; flex-direction:column; gap:16px; }
+    .app { height:100%; padding:16px 22px 20px; display:flex; flex-direction:column; gap:12px; }
     header { flex:0 0 40px; display:flex; align-items:center; gap:12px; }
-    .connection { margin:0; color:var(--muted); font-size:13px; }
+    .connection { margin:0; color:var(--muted); font-size:13px; line-height:1.35; }
     .connect { margin-left:auto; flex-shrink:0; border:1px solid var(--line); border-radius:14px; padding:7px 12px; background:var(--paper); color:var(--accent); cursor:pointer; }
     .connect:disabled { opacity:.5; cursor:default; }
-    .brand { width:38px; height:38px; display:grid; place-items:center; color:var(--accent); font-size:22px; font-weight:800; transform:skew(-8deg); }
-    .history { flex:1; min-height:0; overflow-y:auto; padding:8px 12px 8px; display:flex; flex-direction:column; gap:12px; scrollbar-width:none; }
-    .history > :first-child { margin-top:auto; }
-    .row { display:flex; width:100%; flex-shrink:0; }
-    .row.mine { justify-content:flex-end; }
-    .bubble { max-width:85%; padding:13px 15px; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:0 8px 22px rgba(78,57,44,.035); font-size:16px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .mine .bubble { background:var(--mine); border-color:transparent; border-bottom-right-radius:8px; }
-    .peer-row .bubble { border-bottom-left-radius:8px; }
-    .pending { color:var(--muted); }
+    .brand { width:38px; height:38px; display:grid; place-items:center; color:var(--accent); font-size:13px; font-weight:800; }
+    .stats { display:flex; gap:8px; flex-wrap:wrap; }
+    .stat { padding:6px 10px; border:1px solid var(--line); border-radius:12px; background:var(--paper); font-size:12px; color:var(--muted); }
+    .stat b { color:var(--ink); font-weight:650; }
+    .section { font-size:12px; color:var(--muted); margin:2px 2px 0; }
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .card { border:1px solid var(--line); border-radius:16px; background:var(--paper); padding:12px 14px; box-shadow:0 8px 22px rgba(78,57,44,.035); }
+    .card.task { cursor:pointer; }
+    .row1 { display:flex; align-items:baseline; gap:8px; }
+    .name { font-weight:650; font-size:15px; }
+    .tag { margin-left:auto; font-size:12px; color:var(--ok); }
+    .tag.wait { color:var(--muted); }
+    .tag.run { color:var(--busy); }
+    .tag.err { color:#a24535; }
+    .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; }
+    .id { margin:6px 0 0; font-size:12px; color:var(--muted); word-break:break-all; font-variant-numeric:tabular-nums; }
+    .q { margin:8px 0 0; font-size:13px; color:var(--ink); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .card.open .q { display:block; }
+    .body { display:none; margin-top:10px; padding-top:10px; border-top:1px solid var(--line); white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.5; max-height:42vh; overflow:auto; }
+    .card.open .body { display:block; }
+    .empty { color:var(--muted); font-size:13px; padding:8px 4px; }
     .error { color:#a24535; }
+    #history { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:12px; scrollbar-width:none; }
     .dock { flex-shrink:0; min-height:64px; display:flex; align-items:center; gap:12px; padding:6px 8px 6px 18px; border:1px solid var(--line); border-radius:32px; background:rgba(255,255,255,.9); box-shadow:0 10px 28px rgba(70,49,37,.09); }
     textarea { flex:1; min-width:0; max-height:104px; resize:none; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:16px; line-height:24px; padding:8px 0; }
     textarea::placeholder { color:#9a918b; }
     .send { flex:0 0 52px; width:52px; height:52px; display:grid; place-items:center; border:0; border-radius:50%; background:var(--accent); color:white; font-size:27px; line-height:1; cursor:pointer; }
     .send:disabled { background:#d2cfcc; cursor:default; }
-    .send:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
   </style>
 </head>
 <body>
   <main class="app">
-    <header><div class="brand" aria-hidden="true">A</div><p id="connection" class="connection" role="status">正在准备…</p><button id="connect" class="connect" type="button" disabled>连接</button></header>
-    <section id="history" class="history" aria-label="聊天记录" aria-live="polite"></section>
+    <header><div class="brand" aria-hidden="true">算力</div><p id="connection" class="connection" role="status">正在准备…</p><button id="connect" class="connect" type="button" disabled>启用近场</button></header>
+    <div class="stats" id="stats"></div>
+    <div class="section">已连接设备</div>
+    <div class="list" id="devices"></div>
+    <div class="section">推理任务</div>
+    <section id="history" class="list" aria-label="推理任务" aria-live="polite"></section>
     <form id="composer" class="dock">
-      <textarea id="prompt" rows="1" maxlength="1000" placeholder="输入消息…" aria-label="输入消息"></textarea>
+      <textarea id="prompt" rows="1" maxlength="1000" placeholder="本机提问…" aria-label="本机提问"></textarea>
       <button id="send" class="send" type="submit" aria-label="发送" disabled>↑</button>
     </form>
   </main>
@@ -48,8 +64,9 @@
     const promptInput=document.getElementById('prompt');
     const sendButton=document.getElementById('send');
     const connectButton=document.getElementById('connect');
+    const statsView=document.getElementById('stats');
+    const devicesView=document.getElementById('devices');
     connectButton.addEventListener('click',()=>window.chatBridge.connect());
-    // Explicit clicks can retry; automatic focus restoration must not reopen dialogs.
     let allowFocusPreparation=true;
     function prepareFromInput(){
       if(!allowFocusPreparation)return;
@@ -59,39 +76,115 @@
     promptInput.addEventListener('pointerdown',()=>{allowFocusPreparation=true;prepareFromInput();});
     promptInput.addEventListener('focus',prepareFromInput);
     document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
-    let busy=false, available=false, reply=null, pendingText='正在等待推理端回复';
-    function scrollLatest(){historyView.scrollTop=historyView.scrollHeight;}
-    function bubble(text,mine){
-      const row=document.createElement('div'); row.className='row '+(mine?'mine':'peer-row');
-      const content=document.createElement('div'); content.className='bubble'; content.textContent=text;
-      row.appendChild(content);historyView.appendChild(row);scrollLatest();return content;
+    let available=false, pendingText='正在推理中';
+    let jobs=[], devices=[], running=0, capacity=2, openIds={};
+    function localRunning(){return jobs.some(job=>job.running&&job.source==='本机');}
+    function clock(ms){
+      const sec=Math.max(0,Math.round(ms/100)/10);
+      return sec.toFixed(1)+'s';
     }
-    function updateButton(){sendButton.disabled=!busy&&(!available||!promptInput.value.trim());sendButton.textContent=busy?'■':'↑';sendButton.setAttribute('aria-label',busy?'停止生成':'发送');}
+    function esc(text){
+      return String(text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function updateButton(){
+      const local=localRunning();
+      sendButton.disabled=!local&&(!available||!promptInput.value.trim());
+      sendButton.textContent=local?'■':'↑';
+      sendButton.setAttribute('aria-label',local?'停止生成':'发送');
+    }
+    function renderStats(){
+      if(!statsView)return;
+      statsView.innerHTML='<span class="stat">连接 <b>'+devices.length+'</b></span>'+
+        '<span class="stat">推理 <b>'+running+'</b> / '+capacity+'</span>';
+    }
+    function renderDevices(){
+      if(!devicesView)return;
+      if(!devices.length){devicesView.innerHTML='<div class="empty">还没有聊天手机连上来</div>';return;}
+      devicesView.innerHTML=devices.map((device,index)=>{
+        const state=device.ready?'已连接':'连接中';
+        const extra=device.jobs>0?(' · '+device.jobs+' 路任务'):'';
+        const title=device.name&&device.name!=='聊天设备'?device.name:('聊天设备'+(index+1));
+        return '<div class="card"><div class="row1"><span class="name">'+esc(title)+
+          '</span><span class="tag'+(device.ready?'':' wait')+'">'+state+extra+'</span></div>'+
+          (device.id?'<div class="id">'+esc(device.id)+'</div>':'')+'</div>';
+      }).join('');
+    }
+    function renderJobs(){
+      if(!jobs.length){historyView.innerHTML='<div class="empty">暂无推理任务</div>';return;}
+      historyView.innerHTML=jobs.map(job=>{
+        const open=openIds[job.id]?' open':'';
+        const tag=job.error?'失败':(job.running?'进行中':'已完成');
+        const klass=job.error?'err':(job.running?'run':'');
+        const first=job.firstAt?('首字 '+clock(job.firstAt-job.startedAt)):'等待首字';
+        const body=job.answer||pendingText;
+        return '<article class="card task'+open+'" data-id="'+esc(job.id)+'"><div class="row1"><span class="name">'+
+          esc(job.source||'任务')+'</span><span class="tag '+klass+'">'+tag+'</span></div>'+
+          '<div class="meta"><span>'+clock(job.elapsedMs)+'</span><span>'+job.chars+' 字</span><span>'+first+
+          '</span></div><div class="q">'+esc(job.question||'')+'</div><div class="body'+(job.error?' error':'')+'">'+
+          esc(body)+'</div></article>';
+      }).join('');
+    }
+    function render(){renderStats();renderDevices();renderJobs();updateButton();}
+    historyView.addEventListener('click',event=>{
+      const card=event.target.closest('.task');
+      if(!card)return;
+      const id=card.getAttribute('data-id');
+      openIds[id]=!openIds[id];
+      card.classList.toggle('open',openIds[id]);
+    });
     promptInput.addEventListener('input',()=>{promptInput.style.height='auto';promptInput.style.height=Math.min(promptInput.scrollHeight,104)+'px';updateButton();});
     document.getElementById('composer').addEventListener('submit',(event)=>{
       event.preventDefault();
-      if(busy){window.chatBridge.stop();sendButton.disabled=true;sendButton.setAttribute('aria-label','正在停止');return;}
+      if(localRunning()){window.chatBridge.stop();sendButton.disabled=true;sendButton.setAttribute('aria-label','正在停止');return;}
       const text=promptInput.value.trim();if(!text)return;
       try{
         const error=window.chatBridge.send(text);
-        if(error){bubble(error,false).classList.add('error');return;}
-        bubble(text,true);reply=bubble(pendingText,false);reply.classList.add('pending');
-        busy=true;promptInput.value='';promptInput.style.height='auto';promptInput.blur();updateButton();
-      }catch(error){bubble('暂时无法发送，请重新打开应用。',false).classList.add('error');}
+        if(error){
+          jobs.unshift({id:'err-'+Date.now(),source:'本机',question:text,answer:error,chars:0,startedAt:Date.now(),
+            firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
+          render();return;
+        }
+        promptInput.value='';promptInput.style.height='auto';promptInput.blur();updateButton();
+      }catch(error){
+        jobs.unshift({id:'err-'+Date.now(),source:'本机',question:text,answer:'暂时无法发送，请重新打开应用。',chars:0,
+          startedAt:Date.now(),firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
+        render();
+      }
     });
     promptInput.addEventListener('keydown',(event)=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();document.getElementById('composer').requestSubmit();}});
     window.onNativeEvent=(event)=>{
-      if(event.kind==='connection'){available=event.available===true;if(typeof event.pendingText==='string')pendingText=event.pendingText;document.getElementById('connection').textContent=event.text;connectButton.textContent=event.connectLabel||'连接';connectButton.disabled=event.connecting===true;updateButton();return;}
-      if(event.kind==='remote-start'){bubble(event.text,true);reply=bubble('正在推理中',false);reply.classList.add('pending');busy=true;updateButton();return;}
-      if(!reply)return;
-      if(event.kind==='text'){reply.classList.remove('pending');reply.textContent=event.text;}
-      if(event.kind==='done'){
-        reply.classList.remove('pending');
-        if(event.text)reply.textContent=event.text;
-        reply.classList.toggle('error',event.error===true);busy=false;updateButton();
+      if(event.kind==='connection'){
+        available=event.available===true;
+        if(typeof event.pendingText==='string')pendingText=event.pendingText;
+        document.getElementById('connection').textContent=event.text;
+        connectButton.textContent=event.connectLabel||'启用近场';
+        connectButton.disabled=event.connecting===true;
+        updateButton();return;
       }
-      scrollLatest();
+      if(event.kind==='dashboard'){
+        if(typeof event.text==='string'&&event.text)document.getElementById('connection').textContent=event.text;
+        if(event.connectLabel)connectButton.textContent=event.connectLabel;
+        if(event.connecting===true||event.connecting===false)connectButton.disabled=event.connecting===true;
+        available=true;
+        devices=event.devices||[];
+        jobs=event.jobs||[];
+        running=typeof event.running==='number'?event.running:jobs.filter(job=>job.running).length;
+        capacity=event.capacity||2;
+        render();return;
+      }
+      if(event.kind==='remote-start'){updateButton();return;}
+      if(event.kind==='done'&&!event.requestId){updateButton();}
     };
+    if(typeof setInterval==='function')setInterval(()=>{
+      let dirty=false;
+      for(const job of jobs){
+        if(!job.running||!job.startedAt)continue;
+        job.elapsedMs=Date.now()-job.startedAt;
+        dirty=true;
+      }
+      if(dirty)renderJobs();
+    },400);
+    render();
   </script>
 </body>
 </html>

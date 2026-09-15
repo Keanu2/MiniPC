@@ -1,4 +1,4 @@
-export const start: (modelPath: string, request: string, logPath: string) => boolean;
+export const start: (modelPath: string, request: string, logPath: string) => number;
 export const takeEvents: () => string[];
-export const complete: () => void;
-export const cancel: () => void;
+export const complete: (jobId?: number) => void;
+export const cancel: (jobId?: number) => void;

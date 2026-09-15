@@ -16,6 +16,16 @@
         "name": "ohos.permission.DISTRIBUTED_DATASYNC",
         "reason": "$string:nearby_permission_reason",
         "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+      },
+      {
+        "name": "ohos.permission.ACCESS_BLUETOOTH",
+        "reason": "$string:bluetooth_permission_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+      },
+      {
+        "name": "ohos.permission.APPROXIMATELY_LOCATION",
+        "reason": "$string:location_permission_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
       }
     ],
     "abilities": [{
