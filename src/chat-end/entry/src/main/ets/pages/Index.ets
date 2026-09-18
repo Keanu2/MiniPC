@@ -111,37 +111,34 @@ struct Index {
         return;
       }
       if (!this.channel.isConnected() && !this.channel.isConnecting()) {
-        let devices = await this.channel.computeDevices();
+        await this.channel.computeDevices();
         if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (devices.length === 0 && this.connectManual) devices = await this.channel.devices();
-        if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (devices.length === 0) {
+        const ads = this.channel.advertisedComputes();
+        if (ads.length === 0) {
           throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
         }
         let index = 0;
         if (this.selectedDeviceId) {
-          const found = devices.findIndex(device => device.deviceId === this.selectedDeviceId);
+          const found = ads.findIndex(item => item.mac === this.selectedDeviceId);
           if (found >= 0) index = found;
         }
-        if (this.connectManual && !this.selectedDeviceId && devices.length > 1) {
+        if (this.connectManual && !this.selectedDeviceId && ads.length > 1) {
           const buttons: [promptAction.Button, promptAction.Button?, promptAction.Button?,
             promptAction.Button?, promptAction.Button?, promptAction.Button?] = [
-            { text: '算力 · ' + (devices[0].deviceName || '未命名设备') + ' · ' + devices[0].deviceId.slice(-4), color: '#9b5f4c' }
+            { text: '算力 · ' + ads[0].name, color: '#9b5f4c' }
           ];
-          for (let i = 1; i < Math.min(devices.length, 6); i++) {
-            buttons.push({ text: '算力 · ' + (devices[i].deviceName || '未命名设备') + ' · ' + devices[i].deviceId.slice(-4), color: '#9b5f4c' });
+          for (let i = 1; i < Math.min(ads.length, 6); i++) {
+            buttons.push({ text: '算力 · ' + ads[i].name, color: '#9b5f4c' });
           }
           const selection = await this.getUIContext().getPromptAction().showActionMenu({
-            title: '选择算力设备', buttons: buttons
+            title: '选择可用算力设备', buttons: buttons
           });
           index = selection.index;
         }
         if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (index < 0 || index >= devices.length) return;
-        this.selectedDeviceId = devices[index].deviceId;
-        const bound = await this.channel.bindNearby(devices[index]);
-        if (operation !== this.channel.operation() || !this.pageReady) return;
-        await this.channel.connect(bound.networkId!, operation);
+        if (index < 0 || index >= ads.length) return;
+        this.selectedDeviceId = ads[index].mac;
+        await this.channel.connectAdvertiser(ads[index].mac, operation);
       }
       if (!await this.channel.waitUntilConnected()) throw new Error(this.channel.getStatus());
       if (operation !== this.channel.operation() || !this.pageReady) return;

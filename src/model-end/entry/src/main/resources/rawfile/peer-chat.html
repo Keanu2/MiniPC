@@ -12,6 +12,7 @@
     body { font-family:system-ui,-apple-system,"HarmonyOS Sans SC",sans-serif; color:var(--ink); background:#fffaf5; }
     body::before { content:""; position:fixed; inset:0; z-index:-1; background:radial-gradient(circle at 96% 20%,rgba(255,199,144,.38),transparent 27%),radial-gradient(circle at 7% 55%,rgba(219,188,255,.30),transparent 32%),radial-gradient(circle at 74% 84%,rgba(183,221,255,.31),transparent 34%); }
     .app { height:100%; padding:16px 22px 20px; display:flex; flex-direction:column; gap:12px; }
+    @media (min-width: 960px) { .app { max-width: 1180px; margin: 0 auto; padding: 24px 32px 28px; } }
     header { flex:0 0 40px; display:flex; align-items:center; gap:12px; }
     .connection { margin:0; color:var(--muted); font-size:13px; line-height:1.35; }
     .connect { margin-left:auto; flex-shrink:0; border:1px solid var(--line); border-radius:14px; padding:7px 12px; background:var(--paper); color:var(--accent); cursor:pointer; }

@@ -9,6 +9,7 @@ export interface WireMessage {
   text?: string;
   finishReason?: string;
   error?: string;
+  peerRole?: string;
 }
 
 const PROTOCOL = 'nearby-chat-v1';
@@ -17,7 +18,9 @@ const MAX_FRAME = 65536;
 // Validate before forwarding anything to the model or UI.
 export function validMessage(m: WireMessage): boolean {
   if (m === null || typeof m !== 'object' || m.protocol !== PROTOCOL || typeof m.type !== 'string') return false;
-  if (['hello', 'hello_ack'].includes(m.type)) return true;
+  if (['hello', 'hello_ack'].includes(m.type)) {
+    return m.peerRole === undefined || m.peerRole === 'compute' || m.peerRole === 'chat';
+  }
   if (typeof m.requestId !== 'string' || m.requestId.length === 0 || m.requestId.length > 128) return false;
   if (m.type === 'cancel' || m.type === 'prepare') return true;
   if (m.type === 'prepared') return m.error === undefined ||

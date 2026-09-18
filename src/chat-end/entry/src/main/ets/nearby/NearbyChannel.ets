@@ -208,7 +208,7 @@ export class NearbyChannel {
       'bindLevel': 3,
       'bindType': 1,
       'targetPkgName': BUNDLE,
-      'appName': 'Appless Chat UI',
+      'appName': 'MiniPC 聊天',
       'appOperation': '绑定近场聊天',
       'customDescription': 'PIN码认证'
     };

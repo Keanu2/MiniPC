@@ -14,6 +14,8 @@ function setup(isServer) {
     isConnected: () => connected, isConnecting: () => false, operation: () => operation,
     devices: async () => behavior.devices,
     computeDevices: async () => behavior.devices,
+    hasComputeHits: () => !!behavior.hits,
+    connectToAdvertisers: async () => { connections++; await behavior.connect(); },
     connect: async (id, expected) => { assert.equal(id, 'current'); assert.equal(expected, operation); connections++; await behavior.connect(); },
     waitUntilConnected: () => behavior.wait(), checkService: () => { checks++; return behavior.check(); },
     connectedCount: () => connected ? 1 : 0, hasEpoch: () => connected, peerInfos: () => [],
@@ -71,6 +73,9 @@ function setup(isServer) {
   assert.equal(offline.sent.length, 0); assert.equal(offline.page.serviceReady, false);
   offline.behavior.devices = [{ deviceId: 'stable', networkId: 'current', deviceName: '模型手机' }];
   await offline.page.ensureCollaborationReady(); assert(offline.page.serviceReady);
+  const unnamed = setup(); unnamed.behavior.devices = []; unnamed.behavior.hits = true;
+  await unnamed.page.ensureCollaborationReady(); assert(unnamed.page.serviceReady);
+  assert.equal(unnamed.counts().connections, 1);
   const stale = setup(), pending = deferred(); stale.behavior.check = () => pending.promise;
   const old = stale.page.ensureCollaborationReady(); await flush();
   stale.channel.disconnect(); pending.resolve(''); await old;

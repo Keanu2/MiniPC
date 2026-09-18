@@ -1,5 +1,6 @@
 import { UIAbility, AbilityConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import probe from 'libgewu_probe.so';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
@@ -22,7 +23,14 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    windowStage.loadContent('pages/Index');
+    windowStage.loadContent('pages/Index', (err) => {
+      if (err || deviceInfo.deviceType !== '2in1') return;
+      try {
+        const win = windowStage.getMainWindowSync();
+        win.setWindowLimits({ minWidth: 720, minHeight: 520 }).catch(() => {});
+        win.resize(1180, 760).catch(() => {});
+      } catch (_) {}
+    });
   }
 
   onForeground(): void { nearbyChannel.resume(); }

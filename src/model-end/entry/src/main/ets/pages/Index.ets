@@ -159,35 +159,37 @@ struct Index {
         return;
       }
       if (!this.channel.isConnected() && !this.channel.isConnecting()) {
-        let devices = await this.channel.computeDevices();
-        if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (devices.length === 0 && this.connectManual) devices = await this.channel.devices();
+        const devices = await this.channel.computeDevices();
         if (operation !== this.channel.operation() || !this.pageReady) return;
         if (devices.length === 0) {
-          throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
-        }
-        let index = 0;
-        if (this.selectedDeviceId) {
-          const found = devices.findIndex(device => device.deviceId === this.selectedDeviceId);
-          if (found >= 0) index = found;
-        }
-        if (this.connectManual && !this.selectedDeviceId && devices.length > 1) {
-          const buttons: [promptAction.Button, promptAction.Button?, promptAction.Button?,
-            promptAction.Button?, promptAction.Button?, promptAction.Button?] = [
-            { text: '算力 · ' + (devices[0].deviceName || '未命名设备'), color: '#9b5f4c' }
-          ];
-          for (let i = 1; i < Math.min(devices.length, 6); i++) {
-            buttons.push({ text: '算力 · ' + (devices[i].deviceName || '未命名设备'), color: '#9b5f4c' });
+          if (!this.channel.hasComputeHits()) {
+            throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
           }
-          const selection = await this.getUIContext().getPromptAction().showActionMenu({
-            title: '选择算力设备', buttons: buttons
-          });
-          index = selection.index;
+          await this.channel.connectToAdvertisers(operation);
+        } else {
+          let index = 0;
+          if (this.selectedDeviceId) {
+            const found = devices.findIndex(device => device.deviceId === this.selectedDeviceId);
+            if (found >= 0) index = found;
+          }
+          if (this.connectManual && !this.selectedDeviceId && devices.length > 1) {
+            const buttons: [promptAction.Button, promptAction.Button?, promptAction.Button?,
+              promptAction.Button?, promptAction.Button?, promptAction.Button?] = [
+              { text: '算力 · ' + (devices[0].deviceName || '未命名设备'), color: '#9b5f4c' }
+            ];
+            for (let i = 1; i < Math.min(devices.length, 6); i++) {
+              buttons.push({ text: '算力 · ' + (devices[i].deviceName || '未命名设备'), color: '#9b5f4c' });
+            }
+            const selection = await this.getUIContext().getPromptAction().showActionMenu({
+              title: '选择算力设备', buttons: buttons
+            });
+            index = selection.index;
+          }
+          if (operation !== this.channel.operation() || !this.pageReady) return;
+          if (index < 0 || index >= devices.length) return;
+          this.selectedDeviceId = devices[index].deviceId;
+          await this.channel.connect(devices[index].networkId!, operation);
         }
-        if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (index < 0 || index >= devices.length) return;
-        this.selectedDeviceId = devices[index].deviceId;
-        await this.channel.connect(devices[index].networkId!, operation);
       }
       if (!await this.channel.waitUntilConnected()) throw new Error(this.channel.getStatus());
       if (operation !== this.channel.operation() || !this.pageReady) return;
