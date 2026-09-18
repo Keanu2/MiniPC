@@ -1,14 +1,14 @@
-# 本地 GEWU 聊天 App
+# 本地 GEWU 算力 App
 
-启动后直接进入聊天页，输入问题后右侧显示用户气泡，Qwen2.5-7B通过GEWU流式更新左侧气泡。已移除右上设备信息和静态预览说明。生成期间发送按钮变为停止按钮，完成或停止后可继续发送。
+启动后直接进入算力页，显示已连接设备和推理任务。Qwen2.5-7B通过GEWU生成本机或近场请求；点击任务可展开生成内容。本机提问时发送按钮变为停止按钮，完成或停止后可继续发送。
 
 ## 模型与调用
 
 模型目录：`getApplicationContext().filesDir/models/Qwen2.5-7B-Instruct-Q4_N_0`，包含匹配的api_config.json、params和tokenizer.json。backend=knpu，max_ctx=2048。
 
-HTML仅向ArkTS暴露发送/停止动作；模型路径和请求参数由App构造，消息通过JSON传输并以textContent渲染。每个进行中的请求占用一路独立 GEWU session（CreateSession → SubmitRequest → DestroySession），不在应用层写死并行路数；不要在同一 session 上叠两个 Submit。NPU 会分时执行，多路同时生成时单路更慢，并不是线性吞吐。保留完整的最近几轮问答作为下一次请求历史（最多3轮且受字符预算裁剪）；界面历史只在本次运行内保存。
+HTML仅向ArkTS暴露发送/停止动作；模型路径和请求参数由App构造，消息通过JSON传输并以textContent渲染。每个请求创建独立Native session并在结束时销毁。多台聊天端可同时发问并各自流式收答；本机输入仍一次一路。保留完整的最近几轮问答作为下一次请求历史（最多3轮且受字符预算裁剪）；界面历史只在本次运行内保存。
 
-消息输入最多1000字符、单次请求max_tokens=256，不设固定Decode时间截断。切后台或页面退出时取消正在进行的推理。此版本已用0391完成真实UI验证，其他设备需单独部署对应模型并验收。
+消息输入最多1000字符、单次请求max_tokens=256，不设固定Decode时间截断。切后台或页面退出时取消正在进行的推理。
 
 ## 构建与测试
 
@@ -20,28 +20,11 @@ c++ -std=c++17 -pthread entry/src/main/cpp/tests/gewu_probe_lifecycle.cpp -o /tm
 /tmp/gewu-chat-test
 ```
 
-模型不进入HAP或Git；构建产物位于entry/build/default/outputs/default，安装需要有效签名。Native模拟测试覆盖重复请求、忙状态、取消、同步及迟到回调、错误后重试。真机已验证发送→流式气泡、带历史的第二轮、停止→再次发送。
-
-App私有目录的gewu-chat.jsonl保留最近一次请求诊断日志。旧gewuProbe启动参数诊断入口已移除，普通启动即可通过聊天页操作。
+模型不进入HAP或Git；构建产物位于entry/build/default/outputs/default，安装需要有效签名。
 
 
 ## 同账号近场模式
 
-0391是模型端（NearbyConfig.ets中IS_SERVER=true），2938是聊天端（false）。两机登录同一个华为账号，开启Wi-Fi和蓝牙；连接由系统分布式组网和abilityConnectionManager提供，应用不使用固定IP、TCP端口、热点配置或TCP回退。
+模型端（NearbyConfig.ets中IS_SERVER=true）和聊天端两机登录同一个华为账号，开启Wi-Fi和蓝牙；连接由系统分布式组网和abilityConnectionManager提供。
 
-首次在0391点“启用近场”并允许附近设备权限；再在2938点“连接”并授权。只有多个可信候选时显示设备选择。DeviceManager返回可信设备列表，本应用不执行异账号发现绑定，也不把可信列表宣称为已按账号过滤。两端保持前台亮屏。
-
-2938创建协同会话，0391的EntryAbility.onCollaborate校验并接收；等聊天页面加载后完成hello/hello_ack。request/cancel与delta/done/error通过sendMessage传送：JSON按UTF-8字节切成480字节块并Base64封装，单条低于1KB，接收后校验重组再执行原聊天业务。多台聊天手机可同时向模型端发问并各自流式收答；模型端本机输入仍一次一路。GEWU 开不出新 session 时新请求返回“模型繁忙，请稍后再发”。准备协同只检查模型文件，不因已有生成而拒绝其它设备。某台聊天手机断开时只取消该连接上的推理。
-
-会话由Ability持有，页面订阅。退后台、手动断开或会话失效结束连接；客户端保留已收到内容，模型端取消该远端请求。再次连接需用户点击，不重放问题，不循环拉起对端。连接握手20秒、未完成分片15秒期限仅适用于通信，模型生成无固定Decode截断。
-
-测试：
-
-```bash
-node entry/src/main/ets/nearby/ChatProtocol.test.cjs
-node entry/src/main/ets/nearby/NearbyChannel.test.cjs
-```
-
-2026-09-09：双角色ArkTS构建、协议/会话mock、Native生命周期回归及HAP签名验证通过；softbus-server-signed.hap、softbus-client-signed.hap已覆盖安装对应手机。真实软总线聊天及排除USB/热点影响的无线验收待完成，不能以mock或系统组网替代。
-
-旧TCP实现及其当前使用说明已删除；历史TCP验收保留在算力互联项目历史文档与Git中。
+模型端点“启用近场”并允许附近设备权限；再在聊天端点“连接”并授权。只有多个可信候选时显示设备选择。DeviceManager返回可信设备列表，本应用不执行异账号发现绑定，也不把可信列表宣称为已按账号过滤。两端保持前台亮屏。
