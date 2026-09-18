@@ -2,7 +2,7 @@
 
 HarmonyOS 一台 PC 跑模型，其它手机当聊天端，靠近场组网后协同。
 
-版本记录见 [CHANGELOG.md](CHANGELOG.md)。当前里程碑：[`v0.2-nearfield`](https://github.com/Keanu2/MiniPC/releases/tag/v0.2-nearfield)。
+版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 目录
 
