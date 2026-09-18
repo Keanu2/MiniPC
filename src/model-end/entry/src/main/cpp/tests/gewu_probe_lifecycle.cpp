@@ -50,10 +50,10 @@ int main() {
     assert(creates == 20 && submits == 20 && destroys == 20);
     auto oldContext = savedContext;
     mode = 3; holdCreate = true; inCreate = false;
-    assert(start()); assert(start()); assert(!start());
+    assert(start()); assert(start()); assert(start());
     while (!inCreate) std::this_thread::yield();
     Notify(true); holdCreate = false; WaitDone();
-    assert(submits == 20 && destroys == 22); // two jobs cancelled before submit
+    assert(submits == 20 && destroys == 23); // three jobs cancelled before submit
     mode = 1; assert(start()); WaitDone(); // create failure still allows retry
     mode = 2; assert(start()); WaitDone(); // submit failure destroys session
     const int submittedBefore = submits.load();
@@ -67,7 +67,8 @@ int main() {
     mode = 3;
     const uintptr_t a = start();
     const uintptr_t b = start();
-    assert(a && b && a != b && !start());
+    const uintptr_t c = start();
+    assert(a && b && c && a != b && b != c && a != c);
     Notify(true); WaitDone();
     mode = 0;
     assert(Begin("/does-not-exist", "{}", (root / "events.jsonl").string())); WaitDone();
@@ -77,5 +78,5 @@ int main() {
         State().log.close();
     }
     std::filesystem::remove_all(root);
-    std::cout << "PASS repeated requests, two concurrent jobs, busy, pre-submit cancellation, synchronous callbacks, failures, late callbacks, retry\n";
+    std::cout << "PASS repeated requests, concurrent jobs, pre-submit cancellation, synchronous callbacks, failures, late callbacks, retry\n";
 }

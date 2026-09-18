@@ -119,11 +119,10 @@ function setup(isServer) {
   const callbacks = new Map();
   s.page.model = {
     start(messages, cb, id) {
-      if (callbacks.size >= 2) return '已有两路推理正在进行，请稍后再发。';
       callbacks.set(id, cb);
       return '';
     },
-    isBusy() { return callbacks.size >= 2; },
+    isBusy() { return callbacks.size > 0; },
     readinessError() { return ''; },
     cancel(id) {
       const cb = callbacks.get(id);
@@ -143,11 +142,11 @@ function setup(isServer) {
   assert.equal(s.sent.at(-1).type, 'prepared', 'prepare stays ready while two jobs run');
   assert.equal(s.sent.at(-1).error, undefined);
   s.page.receive({ type: 'request', requestId: 'r3', messages: [{ role: 'user', content: 'C' }] }, 1);
-  assert.equal(s.sent.at(-1).type, 'error');
-  assert(s.sent.at(-1).error.includes('两路'));
+  assert.equal(s.page.jobs.length, 3, 'third peer job is accepted without a fixed cap');
+  assert.notEqual(s.sent.at(-1).type, 'error');
   s.channel.hasEpoch = epoch => epoch === 2;
   s.page.connectionChanged(true, 1);
   assert.equal(s.page.jobs.length, 1);
   assert.equal(s.page.jobs[0].id, 'r2');
-  console.log('PASS: two peer jobs in parallel, prepare not gated, third rejected, disconnect cancels only that epoch');
+  console.log('PASS: three peer jobs in parallel, prepare not gated, disconnect cancels only that epoch');
 }

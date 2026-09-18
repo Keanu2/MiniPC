@@ -12,10 +12,9 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <memory>
 #include <vector>
 #include <sys/stat.h>
-
-constexpr int kMaxJobs = 2;
 
 struct Job {
     uintptr_t id = 0;
@@ -30,7 +29,7 @@ struct Probe {
     std::mutex mutex;
     std::condition_variable wake;
     bool started = false;
-    Job jobs[kMaxJobs];
+    std::vector<std::unique_ptr<Job>> jobs;
     std::ofstream log;
     std::vector<std::string> events;
     uintptr_t nextId = 0;
@@ -95,15 +94,29 @@ static std::string Quote(const std::string& value)
 static int RunningCountLocked(Probe& state)
 {
     int count = 0;
-    for (const Job& job : state.jobs) if (job.running) ++count;
+    for (const auto& job : state.jobs) if (job && job->running) ++count;
     return count;
 }
 
 static Job* FindJobLocked(Probe& state, uintptr_t id)
 {
     if (id == 0) return nullptr;
-    for (Job& job : state.jobs) if (job.running && job.id == id) return &job;
+    for (auto& job : state.jobs) {
+        if (job && job->running && job->id == id) return job.get();
+    }
     return nullptr;
+}
+
+static Job* OccupyJobLocked(Probe& state)
+{
+    for (auto& job : state.jobs) {
+        if (job && !job->running) {
+            *job = Job{};
+            return job.get();
+        }
+    }
+    state.jobs.push_back(std::make_unique<Job>());
+    return state.jobs.back().get();
 }
 
 static void EventLocked(Probe& state, uintptr_t id, const std::string& event, const std::string& payload)
@@ -148,7 +161,7 @@ static void FinishJob(Job& job, const std::string& reason)
     state.started = RunningCountLocked(state) > 0;
 }
 
-static void Run(std::string modelPath, std::string request, uintptr_t id, int slot)
+static void Run(std::string modelPath, std::string request, uintptr_t id, Job* owned)
 {
     auto& state = State();
     for (const char* name : {"api_config.json", "tokenizer.json", "params"}) {
@@ -158,7 +171,7 @@ static void Run(std::string modelPath, std::string request, uintptr_t id, int sl
         char firstByte = 0;
         if (stat(path.c_str(), &details) != 0 || !file.get(firstByte)) {
             Event(id, "file_error", name);
-            FinishJob(state.jobs[slot], "model_unreadable");
+            FinishJob(*owned, "model_unreadable");
             return;
         }
         Event(id, "file_readable", std::string(name) + " bytes=" + std::to_string(details.st_size));
@@ -171,15 +184,14 @@ static void Run(std::string modelPath, std::string request, uintptr_t id, int sl
     Event(id, "create", std::to_string(created.error));
     Event(id, "mem_after_create", ReadMem());
     if (created.error != OH_QOS_GEWU_OK) {
-        FinishJob(state.jobs[slot], "create_failed");
+        FinishJob(*owned, "create_failed");
         return;
     }
     bool shouldSubmit = false;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
-        Job& job = state.jobs[slot];
-        if (job.id == id && !job.cancelled) {
-            job.active = true;
+        if (owned->id == id && !owned->cancelled) {
+            owned->active = true;
             shouldSubmit = true;
         }
     }
@@ -190,35 +202,27 @@ static void Run(std::string modelPath, std::string request, uintptr_t id, int sl
         Event(id, "submit", std::to_string(submitted.error));
         if (submitted.error == OH_QOS_GEWU_OK) {
             std::unique_lock<std::mutex> lock(state.mutex);
-            Job& job = state.jobs[slot];
-            state.wake.wait(lock, [&job, id] {
-                return job.id != id || job.completed || job.cancelled;
+            state.wake.wait(lock, [owned, id] {
+                return owned->id != id || owned->completed || owned->cancelled;
             });
-            bool abort = job.id == id && job.cancelled && !job.completed;
-            job.active = false;
+            bool abort = owned->id == id && owned->cancelled && !owned->completed;
+            owned->active = false;
             lock.unlock();
             if (abort) Event(id, "abort", std::to_string(OH_QoS_GewuAbortRequest(created.session, submitted.request)));
         }
     }
     {
         std::lock_guard<std::mutex> lock(state.mutex);
-        if (state.jobs[slot].id == id) state.jobs[slot].active = false;
+        if (owned->id == id) owned->active = false;
     }
     Event(id, "destroy", std::to_string(OH_QoS_GewuDestroySession(created.session)));
-    FinishJob(state.jobs[slot], "closed");
+    FinishJob(*owned, "closed");
 }
 
 static uintptr_t Begin(const std::string& modelPath, const std::string& request, const std::string& path)
 {
     auto& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
-    int slot = -1;
-    int running = 0;
-    for (int i = 0; i < kMaxJobs; ++i) {
-        if (state.jobs[i].running) ++running;
-        else if (slot < 0) slot = i;
-    }
-    if (running >= kMaxJobs || slot < 0) return 0;
     if (!state.log.is_open()) {
         state.log.clear();
         state.log.open(path, std::ios::out | std::ios::trunc);
@@ -226,16 +230,15 @@ static uintptr_t Begin(const std::string& modelPath, const std::string& request,
         state.t0 = NowMs();
         EventLocked(state, 0, "log_open", ReadMem());
     }
-    Job& job = state.jobs[slot];
-    job = Job{};
-    job.id = ++state.nextId;
-    job.running = true;
+    Job* job = OccupyJobLocked(state);
+    job->id = ++state.nextId;
+    job->running = true;
     state.started = true;
-    const uintptr_t id = job.id;
+    const uintptr_t id = job->id;
     try {
-        std::thread(Run, modelPath, request, id, slot).detach();
+        std::thread(Run, modelPath, request, id, job).detach();
     } catch (...) {
-        job.running = false;
+        job->running = false;
         state.started = RunningCountLocked(state) > 0;
         return 0;
     }
@@ -260,10 +263,10 @@ static void Notify(bool cancel)
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         if (!state.started) return;
-        for (Job& job : state.jobs) {
-            if (!job.running) continue;
-            if (cancel) { job.cancelled = true; job.active = false; }
-            else job.completed = true;
+        for (auto& item : state.jobs) {
+            if (!item || !item->running) continue;
+            if (cancel) { item->cancelled = true; item->active = false; }
+            else item->completed = true;
         }
     }
     state.wake.notify_all();

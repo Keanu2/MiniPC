@@ -18,7 +18,6 @@ interface PageEvent {
   pendingText?: string;
   requestId?: string;
   running?: number;
-  capacity?: number;
   devices?: DeviceView[];
   jobs?: JobView[];
 }
@@ -265,7 +264,6 @@ struct Index {
       connectLabel: this.serviceReady ? '停用近场' : '启用近场',
       connecting: this.connecting || this.channel.isConnecting(),
       running: this.jobs.length,
-      capacity: 2,
       devices: devices,
       jobs: views
     });
@@ -471,8 +469,8 @@ struct Index {
       this.finish(stopped ? this.answer + (this.answer ? '\n\n' : '') + '已停止生成' :
         (this.answer || '模型没有返回内容，请重试。'), !stopped && !this.answer);
     } else if (message.type === 'error') {
-      const capacity = (message.error || '').indexOf('两路推理') >= 0;
-      if (!capacity) {
+      const busy = (message.error || '').indexOf('请稍后再发') >= 0;
+      if (!busy) {
         this.serviceReady = false;
         this.connectionError = message.error || '请求失败，请点击输入框重试。';
       }

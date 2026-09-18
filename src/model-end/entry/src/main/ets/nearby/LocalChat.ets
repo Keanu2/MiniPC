@@ -17,8 +17,6 @@ interface Job {
   callback: ((update: ChatUpdate) => void) | undefined;
 }
 
-const MAX_JOBS = 2;
-
 export class LocalChat {
   private filesDir: string;
   private timer: number = -1;
@@ -26,7 +24,7 @@ export class LocalChat {
   private jobs: Job[] = [];
 
   constructor(filesDir: string) { this.filesDir = filesDir; }
-  isBusy(): boolean { return this.jobs.length >= MAX_JOBS; }
+  isBusy(): boolean { return this.jobs.length > 0; }
   activeCount(): number { return this.jobs.length; }
 
   // Basic readiness only: leave GEWU initialization to the actual request.
@@ -48,7 +46,6 @@ export class LocalChat {
 
   start(messages: ChatMessage[], callback: (update: ChatUpdate) => void, requestId: string = ''): string {
     if (this.closed) return '模型服务已关闭。';
-    if (this.jobs.length >= MAX_JOBS) return '已有两路推理正在进行，请稍后再发。';
     if (messages.length === 0) return '请输入问题。';
     const request: ChatRequest = { type: 'qwen2', messages: messages, stream: true, max_tokens: 256 };
     let nativeId = 0;
@@ -56,7 +53,7 @@ export class LocalChat {
       nativeId = probe.start(this.filesDir + '/models/Qwen2.5-7B-Instruct-Q4_N_0', JSON.stringify(request),
         this.filesDir + '/gewu-chat.jsonl');
     } catch (_) { return '无法启动模型，请确认模型文件已部署。'; }
-    if (nativeId <= 0) return '已有两路推理正在进行，请稍后再发。';
+    if (nativeId <= 0) return '模型繁忙，请稍后再发。';
     this.jobs.push({
       requestId: requestId, nativeId: nativeId, cancelled: false, answer: '', failure: '',
       finishReason: '', callback: callback

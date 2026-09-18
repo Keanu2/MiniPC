@@ -78,7 +78,7 @@
     promptInput.addEventListener('focus',prepareFromInput);
     document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
     let available=false, pendingText='正在推理中';
-    let jobs=[], devices=[], running=0, capacity=2, openIds={};
+    let jobs=[], devices=[], running=0, openIds={};
     function localRunning(){return jobs.some(job=>job.running&&job.source==='本机');}
     function clock(ms){
       const sec=Math.max(0,Math.round(ms/100)/10);
@@ -96,7 +96,7 @@
     function renderStats(){
       if(!statsView)return;
       statsView.innerHTML='<span class="stat">连接 <b>'+devices.length+'</b></span>'+
-        '<span class="stat">推理 <b>'+running+'</b> / '+capacity+'</span>';
+        '<span class="stat">推理 <b>'+running+'</b></span>';
     }
     function renderDevices(){
       if(!devicesView)return;
@@ -170,7 +170,6 @@
         devices=event.devices||[];
         jobs=event.jobs||[];
         running=typeof event.running==='number'?event.running:jobs.filter(job=>job.running).length;
-        capacity=event.capacity||2;
         render();return;
       }
       if(event.kind==='remote-start'){updateButton();return;}
