@@ -78,7 +78,32 @@ assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello', peerRole: 'oth
 now += 1000000000;
 assert.doesNotThrow(() => expiry.checkExpiry(), 'completed message never creates an inference timeout');
 assert.equal(expiry.receive(encodeMessage({ type: 'done', requestId: 'r' }, 'after_idle')[0]).type, 'done');
-console.log('PASS: UTF-8 roundtrip, <1KiB envelopes, out-of-order/replay, conflicting duplicates/counts, schema/base64/byte/count/pending limits, incomplete-only timeout, clear, malformed UTF-8');
+const info = {
+  protocol: 'nearby-chat-v1', type: 'deviceInfo', requestId: 'info-1', name: '算力', model: 'Qwen',
+  memUsage: 40, memAvail: 1000, memTotal: 2000, modelRequests: 1, peerRole: 'compute'
+};
+assert(validMessage(info));
+assert(!validMessage({ ...info, peerRole: 'other' }));
+assert.equal(new MessageAssembler().receive(encodeMessage({
+  type: 'deviceInfo', requestId: 'info-1', name: '算力', model: 'Qwen', memUsage: 40, peerRole: 'compute'
+}, 'info')[0]).model, 'Qwen');
+const sync = {
+  protocol: 'nearby-chat-v1', type: 'deviceInfoSync', requestId: 'sync-1',
+  devices: [{ id: 'self', name: '本机', role: 'self', model: 'Qwen', memUsage: 10, modelRequests: 0 }]
+};
+assert(validMessage(sync));
+assert(!validMessage({ ...sync, devices: null }));
+assert(validMessage({
+  protocol: 'nearby-chat-v1', type: 'request', requestId: 'r',
+  messages: [{ role: 'user', content: 'hi' }], sched: true
+}));
+assert(!validMessage({
+  protocol: 'nearby-chat-v1', type: 'request', requestId: 'r',
+  messages: [{ role: 'user', content: 'hi' }], sched: 'yes'
+}));
+assert(validMessage({ protocol: 'nearby-chat-v1', type: 'done', requestId: 'r', source: '来自本机 Qwen' }));
+assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'done', requestId: 'r', source: 'x'.repeat(257) }));
+console.log('PASS: UTF-8 roundtrip, <1KiB envelopes, out-of-order/replay, conflicting duplicates/counts, schema/base64/byte/count/pending limits, incomplete-only timeout, clear, malformed UTF-8, deviceInfo/sched/source');
 for (const type of ['prepare', 'prepared']) {
   const message = { protocol: 'nearby-chat-v1', type, requestId: 'prepare-1' };
   assert(validMessage(message));

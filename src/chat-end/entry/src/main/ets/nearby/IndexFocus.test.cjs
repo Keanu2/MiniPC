@@ -30,7 +30,7 @@ function setup() {
     getStatus: () => connected ? '近场已连接' : '未连接',
     send: async message => { sent.push(message); return true; }
   };
-  const context = { exports: {}, Error, require(name) {
+  const context = { exports: {}, Error, Map, Promise, JSON, require(name) {
     if (name === '@kit.ArkWeb') return { webview: { WebviewController: class {
       async runJavaScript(script) { events.push(JSON.parse(script.slice('window.onNativeEvent('.length, -1))); }
     } } };
@@ -40,7 +40,43 @@ function setup() {
       return { nearbyChannel: channel };
     }
     if (name === '../nearby/NearbyConfig') return { IS_SERVER: false };
-    if (name === '../nearby/LocalChat') return { LocalChat: class {} };
+    if (name === '../nearby/LocalChat') return { LocalChat: class { hasModel() { return false; } isBusy() { return false; } } };
+    if (name === '../nearby/LlmTransport') return { LocalLlmTransport: class {
+      constructor(chat) { this.chat = chat; }
+      start(messages, cb) { return this.chat.start(messages, cb); }
+      cancel() { this.chat.cancel(); }
+      readinessError() { return this.chat.hasModel ? this.chat.hasModel() ? '' : this.chat.readinessError() : ''; }
+    } };
+    if (name === '../nearby/ImageAttach') return { pickJpegDataUrl: async () => '' };
+    if (name === '../nearby/DeviceInfo') return {
+      formatComputeStatus(entry) {
+        if (!entry) return '';
+        const model = entry.model && entry.model.length > 0 ? entry.model : '无模型';
+        const parts = [model];
+        if (entry.memUsage !== undefined && entry.memUsage >= 0) parts.push('内存 ' + String(entry.memUsage) + '%');
+        if (entry.modelRequests !== undefined && entry.modelRequests >= 0) parts.push('推理 ' + String(entry.modelRequests));
+        return parts.join(' · ');
+      },
+      fromDeviceInfoMessage(message) {
+        return {
+          id: message.id || '', name: message.name || '', role: message.role || 'compute',
+          memTotal: message.memTotal, memAvail: message.memAvail, memUsage: message.memUsage,
+          model: message.model || '', modelRequests: message.modelRequests, ready: true
+        };
+      },
+      peerDisplayName(entry) {
+        if (entry.role === 'self' || entry.name === '本机') return '算力';
+        return entry.name || '算力';
+      },
+      buildSelfEntry(hasModel, running) {
+        return { name: '本机', id: 'self', role: 'chat', model: hasModel ? 'Qwen' : '',
+          modelRequests: running, memUsage: 12, memAvail: 1000, memTotal: 2000 };
+      },
+      toDeviceInfoReply: (id, entry) => ({
+        type: 'deviceInfo', requestId: id, name: entry.name, model: entry.model || '',
+        memUsage: entry.memUsage, modelRequests: entry.modelRequests, peerRole: 'chat'
+      })
+    };
     return {};
   } };
   let source = fs.readFileSync(__dirname + '/../pages/Index.ets', 'utf8');
@@ -67,6 +103,10 @@ function setup() {
   assert.equal(c.page.send('真实问题'), ''); await flush();
   assert.equal(c.sent.length, 1); assert.equal(c.sent[0].type, 'request');
   assert.equal(c.sent[0].messages[0].content, '真实问题');
+  c.page.receive({ type: 'delta', requestId: 'request-1', text: '你好' }, 1);
+  c.page.receive({ type: 'done', requestId: 'request-1', finishReason: 'stop', source: '由算力设备1推理' }, 1);
+  assert(c.events.at(-1).text.includes('你好'));
+  assert(c.events.at(-1).text.includes('由算力设备1推理'));
   for (const error of ['模型忙', '模型文件缺失']) {
     const f = setup(); f.behavior.check = async () => error;
     await f.page.ensureCollaborationReady(); assert.equal(f.page.serviceReady, false);
@@ -95,15 +135,22 @@ function setup() {
 })().catch(error => { console.error(error); process.exitCode = 1; });
 // Execute the actual HTML event handlers with a small DOM stub.
 {
-  const makeElement = () => ({ handlers: {}, value: '', style: {}, classList: { add() {}, remove() {}, toggle() {} },
-    addEventListener(type, fn) { this.handlers[type] = fn; }, setAttribute() {}, appendChild() {}, blur() {} });
-  const elements = Object.fromEntries(['history', 'prompt', 'send', 'connect', 'composer', 'connection'].map(id => [id, makeElement()]));
+  const makeElement = () => {
+    const el = { handlers: {}, value: '', style: {}, attrs: {}, classList: { add() {}, remove() {}, toggle() {} },
+      addEventListener(type, fn) { this.handlers[type] = fn; },
+      setAttribute(k, v) { this.attrs[k] = v; },
+      getAttribute(k) { return this.attrs[k]; },
+      appendChild() {}, blur() {} };
+    return el;
+  };
+  const elements = Object.fromEntries(['history', 'prompt', 'send', 'connect', 'composer', 'connection',
+    'pick', 'preview', 'previewImg', 'previewClear'].map(id => [id, makeElement()]));
   const document = { handlers: {}, getElementById: id => elements[id], createElement: makeElement,
     addEventListener(type, fn) { this.handlers[type] = fn; } };
   let preparations = 0;
   const window = { chatBridge: { prepare() { preparations++; }, connect() {}, send() { return '协同尚未准备完成'; } } };
   const html = fs.readFileSync(__dirname + '/../../resources/rawfile/peer-chat.html', 'utf8');
-  vm.runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window });
+  vm.runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window, Date });
   elements.prompt.handlers.pointerdown(); elements.prompt.handlers.focus();
   assert.equal(preparations, 1, 'pointer and resulting focus only prepare once');
   elements.prompt.handlers.focus(); assert.equal(preparations, 1, 'automatic restored focus never retries');
@@ -115,5 +162,47 @@ function setup() {
   elements.composer.handlers.submit({ preventDefault() {} });
   assert.equal(elements.prompt.value, '保留草稿', 'native readiness rejection preserves draft');
   window.onNativeEvent({ kind: 'connection', available: true }); assert.equal(elements.send.disabled, false);
+  let picked = 0, sent = '';
+  window.chatBridge.pickImage = () => { picked++; };
+  window.chatBridge.send = (text) => { sent = text; return ''; };
+  elements.pick.handlers.click();
+  assert.equal(picked, 1);
+  window.onNativeEvent({ kind: 'image', text: 'data:image/jpeg;base64,xx' });
+  elements.prompt.value = '';
+  assert.equal(elements.send.disabled, false, 'image alone enables send');
+  elements.composer.handlers.submit({ preventDefault() {} });
+  assert.equal(sent, '请描述这张图片。');
+  window.onNativeEvent({ kind: 'done', text: '收到' });
+  elements.prompt.value = '这是什么';
+  window.onNativeEvent({ kind: 'image', text: 'data:image/jpeg;base64,yy' });
+  elements.composer.handlers.submit({ preventDefault() {} });
+  assert.equal(sent, '（附图）这是什么');
   console.log('PASS: HTML pointer/focus dedup, automatic focus no retry, explicit click/Tab retries, send availability and draft preservation');
+}
+
+{
+  const local = setup();
+  let started = 0;
+  local.page.model = {
+    hasModel: () => true,
+    isBusy: () => started > 0,
+    start() { started++; return ''; },
+    cancel() {},
+    readinessError: () => ''
+  };
+  assert.equal(local.page.send('本地问题'), '');
+  assert.equal(local.sent.length, 0, 'local model must not send nearby request');
+  assert.equal(started, 1);
+  const info = setup();
+  info.page.receive({ type: 'deviceInfo', requestId: 'info-1', name: '算力A', model: 'Qwen',
+    memUsage: 33, modelRequests: 2 }, 1);
+  assert(info.events.every(event => !String(event.text || '').includes('Qwen')));
+  info.page.receive({ type: 'deviceInfoSync', requestId: 'sync-1', devices: [
+    { name: '本机', model: 'Qwen', memUsage: 10, modelRequests: 1, role: 'self' }
+  ] }, 1);
+  assert(info.events.every(event => !String(event.text || '').includes('算力')));
+  info.page.receive({ type: 'deviceInfo', requestId: 'q1' }, 1);
+  assert.equal(info.sent.at(-1).type, 'deviceInfo');
+  assert.equal(info.sent.at(-1).model, '');
+  console.log('PASS: local-if-model send, deviceInfo status without active request');
 }

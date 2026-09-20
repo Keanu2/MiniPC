@@ -62,16 +62,19 @@ class PeerInfo {
   peerId: string = '';
   ready: boolean = false;
   name: string = '';
+  role: string = '';
 }
 
 class Peer {
   epoch: number;
   peerId: string;
   slot: number = 0;
+  computeSlot: number = 0;
   connection: linkEnhance.Connection;
   ready: boolean = false;
   opened: boolean = false;
   hello: boolean = false;
+  role: string = '';
   pending: number = 0;
   sequence: number = 0;
   timer: number = -1;
@@ -112,6 +115,7 @@ export class LinkEnhanceChannel {
   private peers: Peer[] = [];
   private lastHits: BleHit[] = [];
   private slotIds: string[] = [];
+  private computeSlotIds: string[] = [];
   private epoch: number = 0;
   private lifecycle: number = 0;
   private foreground: boolean = true;
@@ -141,10 +145,27 @@ export class LinkEnhanceChannel {
       info.epoch = peer.epoch;
       info.peerId = peer.peerId;
       info.ready = peer.ready;
-      info.name = '聊天设备' + String(peer.slot > 0 ? peer.slot : (result.length + 1));
+      info.role = peer.role;
+      if (peer.role === 'compute') {
+        if (peer.computeSlot === 0) peer.computeSlot = this.computeSlot(peer.peerId);
+        info.name = '算力设备' + String(peer.computeSlot);
+      } else {
+        info.name = '聊天设备' + String(peer.slot > 0 ? peer.slot : (result.length + 1));
+      }
       result.push(info);
     }
     return result;
+  }
+  peerRole(epoch: number): string {
+    const peer = this.peers.find((item: Peer) => item.epoch === epoch);
+    return peer === undefined ? '' : peer.role;
+  }
+  localName(): string {
+    try {
+      const name = btConnection.getLocalName();
+      if (name && name.length > 0) return name;
+    } catch (_) {}
+    return '算力设备';
   }
   private peerName(peerId: string): string {
     try {
@@ -421,6 +442,25 @@ export class LinkEnhanceChannel {
     throw new Error('增强连接失败：未找到可用的蓝牙地址。');
   }
 
+  /** 算力机再连其它算力广播，供调度选点。失败忽略。 */
+  async connectOtherComputes(operation: number = this.lifecycle): Promise<void> {
+    if (!IS_SERVER) return;
+    this.checkOperation(operation);
+    let localName = '';
+    try { localName = btConnection.getLocalName(); } catch (_) {}
+    this.lastHits = await this.scanHits(COMPUTE_SCAN_MS, true);
+    this.checkOperation(operation);
+    const macs = this.advertiserMacs('');
+    for (const mac of macs) {
+      this.checkOperation(operation);
+      if (mac.length === 0) continue;
+      if (this.peers.some((item: Peer) => item.peerId === mac)) continue;
+      const hit = this.lastHits.find((item: BleHit) => item.mac === mac);
+      if (hit !== undefined && localName.length > 0 && namesMatch(localName, this.hitName(hit))) continue;
+      await this.tryConnect('compute', mac);
+    }
+  }
+
   private hitName(hit: BleHit): string {
     if (hit.name.length > 0) return hit.name;
     try { return btConnection.getRemoteDeviceName(hit.mac); } catch (_) { return ''; }
@@ -542,6 +582,14 @@ export class LinkEnhanceChannel {
     return this.slotIds.length;
   }
 
+  private computeSlot(peerId: string): number {
+    for (let i = 0; i < this.computeSlotIds.length; i++) {
+      if (this.computeSlotIds[i] === peerId) return i + 2;
+    }
+    this.computeSlotIds.push(peerId);
+    return this.computeSlotIds.length + 1;
+  }
+
   private attach(incoming: linkEnhance.Connection, peerId: string, fromServer: boolean): Peer {
     const peer = new Peer(++this.epoch, peerId, incoming);
     peer.slot = this.deviceSlot(peerId);
@@ -569,7 +617,7 @@ export class LinkEnhanceChannel {
     }, 1000);
     hilog.info(0, 'NearbyChat', 'le-attach epoch=%{public}d peer=%{public}s server=%{public}s',
       peer.epoch, peerId, String(fromServer));
-    this.opened(peer);
+    this.opened(peer, fromServer);
     return peer;
   }
 
@@ -577,10 +625,10 @@ export class LinkEnhanceChannel {
     return this.peers.indexOf(peer) >= 0;
   }
 
-  private opened(peer: Peer): void {
+  private opened(peer: Peer, fromServer: boolean): void {
     if (!this.holds(peer) || peer.opened) return;
     peer.opened = true;
-    if (!IS_SERVER) this.write(peer, { type: 'hello', peerRole: 'chat' });
+    if (!fromServer) this.write(peer, { type: 'hello', peerRole: IS_SERVER ? 'compute' : 'chat' });
   }
 
   private receive(peer: Peer, message: WireMessage): void {
@@ -588,10 +636,14 @@ export class LinkEnhanceChannel {
     hilog.info(0, 'NearbyChat', 'le-recv type=%{public}s epoch=%{public}d peer=%{public}s ready=%{public}s',
       message.type, peer.epoch, peer.peerId, String(peer.ready));
     if (!peer.ready) {
-      if (IS_SERVER && message.type === 'hello' && !peer.hello) {
+      if (message.type === 'hello' && !peer.hello) {
         peer.hello = true;
+        peer.role = message.peerRole === 'compute' ? 'compute' : 'chat';
+        if (peer.role === 'compute' && peer.computeSlot === 0) peer.computeSlot = this.computeSlot(peer.peerId);
         if (this.onMessage !== null) this.acknowledge(peer);
-      } else if (!IS_SERVER && message.type === 'hello_ack' && peer.opened) {
+      } else if (message.type === 'hello_ack' && peer.opened) {
+        peer.role = 'compute';
+        if (peer.computeSlot === 0) peer.computeSlot = this.computeSlot(peer.peerId);
         this.ready(peer);
       } else { this.drop(peer, '对端不是兼容的聊天应用。'); }
       return;
@@ -600,7 +652,9 @@ export class LinkEnhanceChannel {
       if (message.requestId === peer.serviceId) this.completeServiceCheck(peer, message.error || '');
       return;
     }
-    const allowed = IS_SERVER ? ['prepare', 'request', 'cancel'] : ['delta', 'done', 'error'];
+    const allowed = IS_SERVER ?
+      ['prepare', 'request', 'cancel', 'deviceInfo', 'deviceInfoSync', 'delta', 'done', 'error'] :
+      ['delta', 'done', 'error', 'deviceInfo', 'deviceInfoSync'];
     if (!allowed.includes(message.type) || this.onMessage === null) {
       hilog.warn(0, 'NearbyChat', 'le-ignore type=%{public}s epoch=%{public}d', message.type, peer.epoch);
       return;

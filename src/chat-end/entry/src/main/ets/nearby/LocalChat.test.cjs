@@ -34,11 +34,13 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(__dirname + '/LocalChat.et
 }).outputText, context);
 const { LocalChat } = context.exports;
 const chat = new LocalChat('/files');
+assert.equal(chat.hasModel(), true);
 assert.equal(chat.readinessError(), '');
-assert.equal(opened.length, 3);
+assert.equal(opened.length, 6);
 assert.equal(starts, 0, 'readiness must never start GEWU');
 for (const name of names) {
   missing = name;
+  assert.equal(chat.hasModel(), false);
   assert(chat.readinessError().includes(name));
 }
 missing = '';

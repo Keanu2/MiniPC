@@ -4,9 +4,12 @@ import { promptAction } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { LocalChat, ChatUpdate } from '../nearby/LocalChat';
+import { LocalLlmTransport } from '../nearby/LlmTransport';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
-import { WireMessage, ChatMessage } from '../nearby/ChatProtocol';
+import { WireMessage, ChatMessage, DeviceInfoEntry } from '../nearby/ChatProtocol';
+import { buildSelfEntry, toDeviceInfoReply } from '../nearby/DeviceInfo';
 import { IS_SERVER } from '../nearby/NearbyConfig';
+import { pickJpegDataUrl } from '../nearby/ImageAttach';
 
 interface PageEvent { kind: string; text: string; error?: boolean; available?: boolean; connectLabel?: string; connecting?: boolean; pendingText?: string; }
 class ChatBridge {
@@ -14,13 +17,16 @@ class ChatBridge {
   private onStop: () => void;
   private onConnect: () => void;
   private onPrepare: () => void;
-  constructor(send: (text: string) => string, stop: () => void, connect: () => void, prepare: () => void) {
-    this.onSend = send; this.onStop = stop; this.onConnect = connect; this.onPrepare = prepare;
+  private onPick: () => void;
+  constructor(send: (text: string) => string, stop: () => void, connect: () => void, prepare: () => void,
+    pick: () => void) {
+    this.onSend = send; this.onStop = stop; this.onConnect = connect; this.onPrepare = prepare; this.onPick = pick;
   }
   send(text: string): string { return this.onSend(text); }
   stop(): void { this.onStop(); }
   connect(): void { this.onConnect(); }
   prepare(): void { this.onPrepare(); }
+  pickImage(): void { this.onPick(); }
 }
 
 @Entry
@@ -33,7 +39,7 @@ struct Index {
         this.autoConnect = true;
         this.ensureCollaborationReady(true);
       }
-    });
+    }, () => { this.pickImage(); });
   private channel = nearbyChannel;
   private connecting: boolean = false;
   private preparation: Promise<void> | null = null;
@@ -43,6 +49,7 @@ struct Index {
   private autoConnect: boolean = true;
   private connectManual: boolean = false;
   private model: LocalChat | null = null;
+  private transport: LocalLlmTransport | null = null;
   private pageReady: boolean = false;
   private connectionError: string = '';
   private activeId: string = '';
@@ -53,10 +60,9 @@ struct Index {
   private history: ChatMessage[] = [];
 
   aboutToAppear(): void {
-    if (IS_SERVER) {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      this.model = new LocalChat(context.getApplicationContext().filesDir);
-    }
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    this.model = new LocalChat(context.getApplicationContext().filesDir);
+    this.transport = new LocalLlmTransport(this.model);
   }
 
   aboutToDisappear(): void {
@@ -165,12 +171,18 @@ struct Index {
     this.controller.runJavaScript('window.onNativeEvent(' + JSON.stringify(event) + ')').catch(() => this.stop());
   }
 
+  private hasLocalModel(): boolean {
+    return this.model !== null && this.model.hasModel();
+  }
+
   private showConnection(): void {
     const connected = this.channel?.isConnected() === true;
     const ready = connected && this.serviceReady && this.preparedOperation === this.channel.operation();
-    this.emit({ kind: 'connection', text: this.connectionError || (this.connecting ? (this.channel.getStatus() || '正在准备协同…') :
-      (!IS_SERVER && ready ? '协同已就绪' : this.channel.getStatus())),
-      available: IS_SERVER || ready, pendingText: IS_SERVER ? '正在推理中' : '正在等待推理端回复',
+    const local = this.hasLocalModel();
+    const text = this.connectionError || (this.connecting ? (this.channel.getStatus() || '正在准备协同…') :
+      (local && !connected ? '本机模型已就绪' : (!IS_SERVER && ready ? '协同已就绪' : this.channel.getStatus())));
+    this.emit({ kind: 'connection', text: text,
+      available: local || IS_SERVER || ready, pendingText: local ? '正在推理中' : '正在等待推理端回复',
       connectLabel: connected ? '断开' : (IS_SERVER ? '启用近场' : '连接'),
       connecting: this.connecting || this.channel.isConnecting() });
   }
@@ -181,6 +193,7 @@ struct Index {
     if (connected) this.connectionError = '';
     else this.serviceReady = false;
     if (!connected && this.activeId) {
+      if (this.hasLocalModel() && !this.peerRequest) return this.showConnection();
       if (!IS_SERVER) this.finish(this.answer + (this.answer ? '\n\n' : '') + '连接已中断，请连接后重新发送。', true);
       else if (this.peerRequest && this.activeEpoch === epoch) this.model?.cancel();
     }
@@ -198,11 +211,21 @@ struct Index {
     return recent.concat([user]);
   }
 
+  private pickImage(): void {
+    if (this.activeId) return;
+    pickJpegDataUrl().then((dataUrl: string) => {
+      if (dataUrl.length === 0) return;
+      this.emit({ kind: 'image', text: dataUrl });
+    }).catch(() => {
+      this.emit({ kind: 'image-error', text: '图片读取失败，请重试。' });
+    });
+  }
+
   private send(text: string): string {
     if (typeof text !== 'string' || !text.trim()) return '请输入问题。';
-    if (text.length > 1000) return '这条消息太长，请缩短后再发送。';
+    if (text.length > 1100) return '这条消息太长，请缩短后再发送。';
     if (this.activeId || this.model?.isBusy()) return '模型正在回答上一条问题，请稍后再发。';
-    if (!IS_SERVER && (!this.channel.isConnected() || !this.serviceReady ||
+    if (!this.hasLocalModel() && !IS_SERVER && (!this.channel.isConnected() || !this.serviceReady ||
       this.preparedOperation !== this.channel.operation())) {
       this.ensureCollaborationReady();
       return '协同尚未准备完成，请就绪后发送。';
@@ -210,7 +233,7 @@ struct Index {
     const question = text.trim();
     const messages = this.recentMessages(question);
     const id = util.generateRandomUUID();
-    if (IS_SERVER) {
+    if (IS_SERVER || this.hasLocalModel()) {
       const error = this.startLocal(id, messages, false, 0);
       if (error) return error;
     } else {
@@ -224,7 +247,9 @@ struct Index {
 
   private startLocal(id: string, messages: ChatMessage[], peer: boolean, epoch: number): string {
     if (this.activeId || !this.model || this.model.isBusy()) return '模型正在回答上一条问题，请稍后再发。';
-    const error = this.model.start(messages, (update: ChatUpdate) => this.localUpdate(id, update));
+    const error = this.transport !== null ?
+      this.transport.start(messages, (update: ChatUpdate) => this.localUpdate(id, update)) :
+      this.model.start(messages, (update: ChatUpdate) => this.localUpdate(id, update));
     if (error) return error;
     this.activeId = id; this.activeEpoch = epoch; this.peerRequest = peer;
     this.answer = ''; this.question = messages[messages.length - 1].content;
@@ -251,7 +276,23 @@ struct Index {
     this.finish(update.text, !!update.error);
   }
 
+  private selfEntry(): DeviceInfoEntry {
+    const running = this.model !== null && this.model.isBusy() ? 1 : 0;
+    return buildSelfEntry(this.hasLocalModel(), running, '本机', 'self');
+  }
+
+  private replyDeviceInfo(requestId: string, epoch: number): void {
+    this.channel.send(toDeviceInfoReply(requestId, this.selfEntry()), epoch);
+  }
+
   private receive(message: WireMessage, epoch: number): void {
+    if (message.type === 'deviceInfo') {
+      if (message.requestId && message.memUsage === undefined && message.model === undefined) {
+        this.replyDeviceInfo(message.requestId, epoch);
+      }
+      return;
+    }
+    if (message.type === 'deviceInfoSync') return;
     if (IS_SERVER) {
       if (message.type === 'prepare' && message.requestId) {
         const error = this.activeId ? '模型正在回答，请稍后点击输入框重试。' :
@@ -276,7 +317,9 @@ struct Index {
       const stopped = message.finishReason === 'cancelled';
       if (!stopped && this.answer) this.remember();
       this.finish(stopped ? this.answer + (this.answer ? '\n\n' : '') + '已停止生成' :
-        (this.answer || '模型没有返回内容，请重试。'), !stopped && !this.answer);
+        ((this.answer || '模型没有返回内容，请重试。') +
+          (message.source && message.source.length > 0 ? '\n\n' + message.source : '')),
+        !stopped && !this.answer);
     } else if (message.type === 'error') {
       const busy = (message.error || '').indexOf('请稍后再发') >= 0;
       if (!busy) {
@@ -300,7 +343,7 @@ struct Index {
 
   private stop(): void {
     if (!this.activeId) return;
-    if (IS_SERVER) this.model?.cancel();
+    if (IS_SERVER || this.hasLocalModel()) this.model?.cancel();
     else {
       const id = this.activeId;
       this.channel?.send({ type: 'cancel', requestId: id }).then((sent: boolean) => {
@@ -314,7 +357,7 @@ struct Index {
       Web({ src: $rawfile('peer-chat.html'), controller: this.controller })
         .javaScriptAccess(true)
         .domStorageAccess(false)
-        .javaScriptProxy({ object: this.bridge, name: 'chatBridge', methodList: ['send', 'stop', 'connect', 'prepare'], controller: this.controller })
+        .javaScriptProxy({ object: this.bridge, name: 'chatBridge', methodList: ['send', 'stop', 'connect', 'prepare', 'pickImage'], controller: this.controller })
         .onPageEnd(() => {
           this.pageReady = true;
           this.channel.subscribe(

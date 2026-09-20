@@ -20,11 +20,16 @@ export class LocalChat {
 
   constructor(filesDir: string) { this.filesDir = filesDir; }
   isBusy(): boolean { return this.busy; }
+  hasModel(): boolean { return this.modelFileError() === ''; }
 
   // Basic readiness only: leave GEWU initialization to the actual request.
   readinessError(): string {
     if (this.closed) return '模型服务已关闭。';
     if (this.busy) return '上一条回复还未结束。';
+    return this.modelFileError();
+  }
+
+  private modelFileError(): string {
     for (const name of ['api_config.json', 'params', 'tokenizer.json']) {
       try {
         const file = fileIo.openSync(this.filesDir + '/models/Qwen2.5-7B-Instruct-Q4_N_0/' + name,

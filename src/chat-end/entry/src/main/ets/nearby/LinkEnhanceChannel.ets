@@ -589,7 +589,7 @@ export class LinkEnhanceChannel {
       if (message.requestId === peer.serviceId) this.completeServiceCheck(peer, message.error || '');
       return;
     }
-    const allowed = IS_SERVER ? ['prepare', 'request', 'cancel'] : ['delta', 'done', 'error'];
+    const allowed = IS_SERVER ? ['prepare', 'request', 'cancel'] : ['delta', 'done', 'error', 'deviceInfo', 'deviceInfoSync'];
     if (!allowed.includes(message.type) || this.onMessage === null) {
       hilog.warn(0, 'NearbyChat', 'le-ignore type=%{public}s epoch=%{public}d', message.type, peer.epoch);
       return;

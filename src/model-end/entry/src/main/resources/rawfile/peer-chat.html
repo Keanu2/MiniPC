@@ -3,62 +3,104 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
   <title>算力</title>
   <style>
-    :root { color-scheme:light; --ink:#342d29; --muted:#81766f; --line:rgba(116,93,78,.16); --paper:rgba(255,253,249,.94); --mine:#eee6e1; --accent:#9b5f4c; --ok:#3d7a5a; --busy:#b56a2b; }
+    :root { color-scheme:light; --ink:#1b2240; --muted:#6b7390; --line:rgba(60,80,160,.12); --paper:#ffffff; --accent:#3d5bdb; --bg:#eef1f8; --ok:#1a9b6a; --wait:#c98412; --err:#c4473a; --busy:#3d5bdb; }
     * { box-sizing:border-box; }
     html,body { width:100%; height:100%; margin:0; overflow:hidden; }
-    body { font-family:system-ui,-apple-system,"HarmonyOS Sans SC",sans-serif; color:var(--ink); background:#fffaf5; }
-    body::before { content:""; position:fixed; inset:0; z-index:-1; background:radial-gradient(circle at 96% 20%,rgba(255,199,144,.38),transparent 27%),radial-gradient(circle at 7% 55%,rgba(219,188,255,.30),transparent 32%),radial-gradient(circle at 74% 84%,rgba(183,221,255,.31),transparent 34%); }
-    .app { height:100%; padding:16px 22px 20px; display:flex; flex-direction:column; gap:12px; }
-    @media (min-width: 960px) { .app { max-width: 1180px; margin: 0 auto; padding: 24px 32px 28px; } }
-    header { flex:0 0 40px; display:flex; align-items:center; gap:12px; }
-    .connection { margin:0; color:var(--muted); font-size:13px; line-height:1.35; }
-    .connect { margin-left:auto; flex-shrink:0; border:1px solid var(--line); border-radius:14px; padding:7px 12px; background:var(--paper); color:var(--accent); cursor:pointer; }
-    .connect:disabled { opacity:.5; cursor:default; }
-    .brand { width:38px; height:38px; display:grid; place-items:center; color:var(--accent); font-size:13px; font-weight:800; }
-    .stats { display:flex; gap:8px; flex-wrap:wrap; }
-    .stat { padding:6px 10px; border:1px solid var(--line); border-radius:12px; background:var(--paper); font-size:12px; color:var(--muted); }
-    .stat b { color:var(--ink); font-weight:650; }
-    .section { font-size:12px; color:var(--muted); margin:2px 2px 0; }
+    body { font-family:system-ui,-apple-system,"HarmonyOS Sans SC",sans-serif; color:var(--ink); background:var(--bg); }
+    .app { height:100%; padding:14px 16px 16px; display:flex; flex-direction:column; gap:10px; }
+    @media (min-width: 960px) { .app { max-width: 1180px; margin: 0 auto; padding: 22px 28px; } }
+    header { flex:0 0 auto; display:flex; align-items:center; gap:10px; }
+    .brand { width:36px; height:36px; flex-shrink:0; }
+    .head { min-width:0; flex:1; }
+    h1 { margin:0; font-size:17px; font-weight:700; }
+    .status { margin:3px 0 0; display:inline-flex; align-items:center; gap:6px; padding:2px 8px 2px 6px; border-radius:999px; background:rgba(255,255,255,.85); color:var(--muted); font-size:12px; line-height:18px; }
+    .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
+    .status.ok { color:var(--ok); background:rgba(26,155,106,.1); }
+    .status.wait { color:var(--wait); background:rgba(201,132,18,.12); }
+    .status.err { color:var(--err); background:rgba(196,71,58,.1); }
+    .connect { margin-left:auto; flex-shrink:0; border:0; border-radius:16px; padding:8px 12px; background:#fff; color:var(--accent); font-size:13px; font-weight:650; cursor:pointer; }
+    .connect:disabled { opacity:.45; cursor:default; }
+    .stats { display:flex; gap:8px; }
+    .stat { flex:1; max-width:200px; padding:10px 12px; border-radius:16px; background:#fff; display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+    .stat span { font-size:12px; color:var(--muted); }
+    .stat b { font-size:20px; font-weight:720; color:var(--ink); }
+    .section { font-size:12px; color:var(--muted); font-weight:650; padding:2px 2px 0; }
     .list { display:flex; flex-direction:column; gap:8px; }
-    .card { border:1px solid var(--line); border-radius:16px; background:var(--paper); padding:12px 14px; box-shadow:0 8px 22px rgba(78,57,44,.035); }
-    .card.task { cursor:pointer; }
-    .row1 { display:flex; align-items:baseline; gap:8px; }
-    .name { font-weight:650; font-size:15px; }
-    .tag { margin-left:auto; font-size:12px; color:var(--ok); }
+    #devices { max-height:30vh; overflow-y:auto; }
+    .card { border-radius:16px; background:var(--paper); padding:12px 14px; box-shadow:0 8px 20px rgba(28,36,72,.04); }
+    .card.task { cursor:pointer; border-left:3px solid transparent; }
+    .card.task.run { border-left-color:var(--busy); }
+    .card.task.err { border-left-color:var(--err); }
+    .row1 { display:flex; align-items:center; gap:8px; }
+    .mark { width:8px; height:8px; border-radius:50%; flex-shrink:0; background:var(--accent); }
+    .mark.chat { background:#0f8a74; }
+    .mark.self { background:#3d5bdb; }
+    .name { font-weight:650; font-size:15px; min-width:0; flex:1; }
+    .name em { font-style:normal; }
+    .name .to { color:var(--muted); font-weight:500; padding:0 6px; }
+    .tag { margin-left:auto; font-size:12px; font-weight:650; color:var(--ok); flex-shrink:0; }
     .tag.wait { color:var(--muted); }
     .tag.run { color:var(--busy); }
-    .tag.err { color:#a24535; }
-    .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; }
-    .id { margin:6px 0 0; font-size:12px; color:var(--muted); word-break:break-all; font-variant-numeric:tabular-nums; }
-    .q { margin:8px 0 0; font-size:13px; color:var(--ink); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .tag.err { color:var(--err); }
+    .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .mem { display:inline-flex; align-items:center; gap:6px; }
+    .mem i { display:block; width:52px; height:4px; border-radius:4px; background:#e6eaf4; overflow:hidden; }
+    .mem i b { display:block; height:100%; background:var(--accent); border-radius:4px; }
+    .q { margin:8px 0 0; font-size:14px; color:var(--ink); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .card.open .q { display:block; }
+    .pic-tag { display:inline-block; margin-right:6px; padding:1px 6px; border-radius:8px; background:#eef1f8; color:var(--muted); font-size:11px; }
+    .photo { width:120px; height:120px; object-fit:cover; border-radius:12px; display:block; margin:8px 0 0; }
     .body { display:none; margin-top:10px; padding-top:10px; border-top:1px solid var(--line); white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.5; max-height:42vh; overflow:auto; }
     .card.open .body { display:block; }
-    .empty { color:var(--muted); font-size:13px; padding:8px 4px; }
-    .error { color:#a24535; }
-    #history { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:12px; scrollbar-width:none; }
-    .dock { flex-shrink:0; min-height:64px; display:flex; align-items:center; gap:12px; padding:6px 8px 6px 18px; border:1px solid var(--line); border-radius:32px; background:rgba(255,255,255,.9); box-shadow:0 10px 28px rgba(70,49,37,.09); }
-    textarea { flex:1; min-width:0; max-height:104px; resize:none; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:16px; line-height:24px; padding:8px 0; }
-    textarea::placeholder { color:#9a918b; }
-    .send { flex:0 0 52px; width:52px; height:52px; display:grid; place-items:center; border:0; border-radius:50%; background:var(--accent); color:white; font-size:27px; line-height:1; cursor:pointer; }
-    .send:disabled { background:#d2cfcc; cursor:default; }
+    .empty { color:var(--muted); font-size:13px; padding:10px 4px; text-align:center; }
+    .error { color:var(--err); }
+    #history { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px; scrollbar-width:none; }
+    .sheet { flex-shrink:0; display:flex; flex-direction:column; gap:8px; }
+    .preview { display:none; align-items:center; gap:10px; padding:8px 10px; border-radius:16px; background:#fff; }
+    .preview.show { display:flex; }
+    .preview img { width:44px; height:44px; object-fit:cover; border-radius:10px; }
+    .preview span { flex:1; font-size:13px; color:var(--muted); }
+    .preview-clear { width:28px; height:28px; border:0; border-radius:50%; background:#eef1f8; color:var(--muted); font-size:16px; cursor:pointer; }
+    .dock { min-height:58px; display:flex; align-items:flex-end; gap:8px; padding:6px; border-radius:24px; background:#fff; box-shadow:0 10px 28px rgba(28,36,72,.08); }
+    .pick,.send { flex:0 0 44px; width:44px; height:44px; display:grid; place-items:center; border:0; border-radius:50%; cursor:pointer; padding:0; color:var(--accent); background:#e8edfb; }
+    .pick:disabled,.send:disabled { opacity:.4; cursor:default; }
+    .send { background:var(--accent); color:#fff; }
+    .send:disabled { background:#c9cedc; color:#fff; opacity:1; }
+    textarea { flex:1; min-width:0; max-height:104px; resize:none; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:16px; line-height:24px; padding:10px 4px; }
+    textarea::placeholder { color:#8b93ab; }
   </style>
 </head>
 <body>
   <main class="app">
-    <header><div class="brand" aria-hidden="true">算力</div><p id="connection" class="connection" role="status">正在准备…</p><button id="connect" class="connect" type="button" disabled>启用近场</button></header>
+    <header>
+      <svg class="brand" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="12" fill="#3d5bdb"/><circle cx="11" cy="18" r="3" fill="#fff"/><circle cx="25" cy="12" r="3" fill="#fff"/><circle cx="25" cy="24" r="3" fill="#fff"/><path stroke="#fff" stroke-width="1.6" d="M13.6 16.8 22.4 13.2M13.6 19.2 22.4 22.8"/></svg>
+      <div class="head"><h1>算力</h1><p id="connection" class="status wait" role="status">正在准备…</p></div>
+      <button id="connect" class="connect" type="button" disabled>启用近场</button>
+    </header>
     <div class="stats" id="stats"></div>
-    <div class="section">已连接设备</div>
+    <div class="section">附近设备</div>
     <div class="list" id="devices"></div>
-    <div class="section">推理任务</div>
+    <div class="section">任务</div>
     <section id="history" class="list" aria-label="推理任务" aria-live="polite"></section>
-    <form id="composer" class="dock">
-      <textarea id="prompt" rows="1" maxlength="1000" placeholder="本机提问…" aria-label="本机提问"></textarea>
-      <button id="send" class="send" type="submit" aria-label="发送" disabled>↑</button>
-    </form>
+    <div class="sheet">
+      <div id="preview" class="preview">
+        <img id="previewImg" alt="已选图片">
+        <span>已选图片，可一起发送</span>
+        <button id="previewClear" class="preview-clear" type="button" aria-label="移除图片">×</button>
+      </div>
+      <form id="composer" class="dock">
+        <button id="pick" class="pick" type="button" aria-label="添加图片">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm-1.5 3.2a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4zM5.5 17l4.2-5.2 2.6 3.1 1.8-2.2L18.5 17z"/></svg>
+        </button>
+        <textarea id="prompt" rows="1" maxlength="1000" placeholder="本机提问…" aria-label="本机提问"></textarea>
+        <button id="send" class="send" type="submit" aria-label="发送" disabled>
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3.2 20.8 21 12 3.2 3.2l-.2 7.2L13 12l-10 1.6z"/></svg>
+        </button>
+      </form>
+    </div>
   </main>
   <script>
     const historyView=document.getElementById('history');
@@ -67,7 +109,15 @@
     const connectButton=document.getElementById('connect');
     const statsView=document.getElementById('stats');
     const devicesView=document.getElementById('devices');
+    const pickButton=document.getElementById('pick');
+    const preview=document.getElementById('preview');
+    const previewImg=document.getElementById('previewImg');
+    const previewClear=document.getElementById('previewClear');
+    const statusView=document.getElementById('connection');
+    const ICO_SEND='<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3.2 20.8 21 12 3.2 3.2l-.2 7.2L13 12l-10 1.6z"/></svg>';
+    const ICO_STOP='<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>';
     connectButton.addEventListener('click',()=>window.chatBridge.connect());
+    pickButton.addEventListener('click',()=>window.chatBridge.pickImage());
     let allowFocusPreparation=true;
     function prepareFromInput(){
       if(!allowFocusPreparation)return;
@@ -77,9 +127,21 @@
     promptInput.addEventListener('pointerdown',()=>{allowFocusPreparation=true;prepareFromInput();});
     promptInput.addEventListener('focus',prepareFromInput);
     document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
-    let available=false, pendingText='正在推理中';
+    let available=false, pendingText='正在生成…', pendingImage='';
     let jobs=[], devices=[], running=0, openIds={};
-    function localRunning(){return jobs.some(job=>job.running&&job.source==='本机');}
+    function localRunning(){return jobs.some(job=>job.running&&job.local===true);}
+    function setStatus(text, connecting, isAvailable){
+      const err=/失败|未发现|无法|错误|中断/.test(text||'');
+      statusView.className='status '+(connecting?'wait':(isAvailable?'ok':(err?'err':'wait')));
+      statusView.textContent=connecting?'连接中':(isAvailable?'已就绪':(text||'未连接'));
+      statusView.title=text||'';
+    }
+    function setPendingImage(dataUrl){
+      pendingImage=dataUrl||'';
+      if(pendingImage){previewImg.src=pendingImage;preview.classList.add('show');}
+      else{previewImg.src='';preview.classList.remove('show');}
+      updateButton();
+    }
     function clock(ms){
       const sec=Math.max(0,Math.round(ms/100)/10);
       return sec.toFixed(1)+'s';
@@ -87,42 +149,58 @@
     function esc(text){
       return String(text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
+    function shortModel(name){
+      if(!name)return '无模型';
+      return String(name).replace(/-Instruct.*$/,'').replace(/-Q4.*$/,'');
+    }
     function updateButton(){
       const local=localRunning();
-      sendButton.disabled=!local&&(!available||!promptInput.value.trim());
-      sendButton.textContent=local?'■':'↑';
+      sendButton.disabled=!local&&(!available||(!promptInput.value.trim()&&!pendingImage));
+      sendButton.innerHTML=local?ICO_STOP:ICO_SEND;
       sendButton.setAttribute('aria-label',local?'停止生成':'发送');
+      pickButton.disabled=local;
     }
     function renderStats(){
       if(!statsView)return;
-      statsView.innerHTML='<span class="stat">连接 <b>'+devices.length+'</b></span>'+
-        '<span class="stat">推理 <b>'+running+'</b></span>';
+      const chats=devices.filter(device=>device.role!=='self'&&device.role!=='compute').length;
+      statsView.innerHTML='<div class="stat"><span>聊天机</span><b>'+chats+'</b></div>'+
+        '<div class="stat"><span>推理中</span><b>'+running+'</b></div>';
     }
     function renderDevices(){
       if(!devicesView)return;
-      if(!devices.length){devicesView.innerHTML='<div class="empty">还没有聊天手机连上来</div>';return;}
+      if(!devices.length){devicesView.innerHTML='<div class="empty">等待聊天手机连入</div>';return;}
       devicesView.innerHTML=devices.map((device,index)=>{
-        const state=device.ready?'已连接':'连接中';
-        const extra=device.jobs>0?(' · '+device.jobs+' 路任务'):'';
-        const title=device.name&&device.name!=='聊天设备'?device.name:('聊天设备'+(index+1));
-        return '<div class="card"><div class="row1"><span class="name">'+esc(title)+
-          '</span><span class="tag'+(device.ready?'':' wait')+'">'+state+extra+'</span></div>'+
-          (device.id?'<div class="id">'+esc(device.id)+'</div>':'')+'</div>';
+        const title=device.role==='self'?'算力设备1':(device.role==='compute'?
+          (device.name||'算力设备'):(device.name&&device.name!=='聊天设备'?device.name:('聊天设备'+(index+1))));
+        const mark=device.role==='self'?'self':(device.role==='compute'?'':'chat');
+        const tag=!device.ready?'连接中':(device.jobs>0?'推理中':'在线');
+        const klass=!device.ready?'wait':(device.jobs>0?'run':'');
+        const mem=typeof device.memUsage==='number'&&device.memUsage>=0?device.memUsage:-1;
+        return '<div class="card"><div class="row1"><span class="mark '+mark+'"></span><span class="name">'+esc(title)+
+          '</span><span class="tag '+klass+'">'+tag+'</span></div><div class="meta"><span>'+esc(shortModel(device.model))+
+          '</span>'+(mem>=0?'<span class="mem">内存 <i><b style="width:'+Math.min(100,mem)+'%"></b></i>'+mem+'%</span>':'')+
+          '</div></div>';
       }).join('');
     }
     function renderJobs(){
-      if(!jobs.length){historyView.innerHTML='<div class="empty">暂无推理任务</div>';return;}
+      if(!jobs.length){historyView.innerHTML='<div class="empty">还没有任务。本机提问或等聊天机发来。</div>';return;}
       historyView.innerHTML=jobs.map(job=>{
         const open=openIds[job.id]?' open':'';
         const tag=job.error?'失败':(job.running?'进行中':'已完成');
         const klass=job.error?'err':(job.running?'run':'');
         const first=job.firstAt?('首字 '+clock(job.firstAt-job.startedAt)):'等待首字';
         const body=job.answer||pendingText;
-        return '<article class="card task'+open+'" data-id="'+esc(job.id)+'"><div class="row1"><span class="name">'+
-          esc(job.source||'任务')+'</span><span class="tag '+klass+'">'+tag+'</span></div>'+
+        const origin=job.origin||'本机';
+        const worker=job.source||'算力设备';
+        const raw=job.question||'';
+        const pictured=!!job.image||raw.indexOf('（附图）')===0;
+        const question=raw.replace(/^（附图）/,'');
+        return '<article class="card task '+klass+open+'" data-id="'+esc(job.id)+'"><div class="row1"><span class="name"><em>'+
+          esc(origin)+'</em><span class="to">→</span>'+esc(worker)+'</span><span class="tag '+klass+'">'+tag+'</span></div>'+
+          (job.image?'<img class="photo" src="'+esc(job.image)+'" alt="图片">':'')+
+          '<div class="q">'+(pictured?'<span class="pic-tag">附图</span>':'')+esc(question)+'</div>'+
           '<div class="meta"><span>'+clock(job.elapsedMs)+'</span><span>'+job.chars+' 字</span><span>'+first+
-          '</span></div><div class="q">'+esc(job.question||'')+'</div><div class="body'+(job.error?' error':'')+'">'+
-          esc(body)+'</div></article>';
+          '</span></div><div class="body'+(job.error?' error':'')+'">'+esc(body)+'</div></article>';
       }).join('');
     }
     function render(){renderStats();renderDevices();renderJobs();updateButton();}
@@ -133,21 +211,24 @@
       openIds[id]=!openIds[id];
       card.classList.toggle('open',openIds[id]);
     });
+    previewClear.addEventListener('click',()=>setPendingImage(''));
     promptInput.addEventListener('input',()=>{promptInput.style.height='auto';promptInput.style.height=Math.min(promptInput.scrollHeight,104)+'px';updateButton();});
     document.getElementById('composer').addEventListener('submit',(event)=>{
       event.preventDefault();
       if(localRunning()){window.chatBridge.stop();sendButton.disabled=true;sendButton.setAttribute('aria-label','正在停止');return;}
-      const text=promptInput.value.trim();if(!text)return;
+      const text=promptInput.value.trim();
+      if(!text&&!pendingImage)return;
+      const question=text?(pendingImage?('（附图）'+text):text):'请描述这张图片。';
       try{
-        const error=window.chatBridge.send(text);
+        const error=window.chatBridge.send(question);
         if(error){
-          jobs.unshift({id:'err-'+Date.now(),source:'本机',question:text,answer:error,chars:0,startedAt:Date.now(),
+          jobs.unshift({id:'err-'+Date.now(),source:'算力设备1',origin:'本机',local:true,image:pendingImage,question:question,answer:error,chars:0,startedAt:Date.now(),
             firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
           render();return;
         }
-        promptInput.value='';promptInput.style.height='auto';promptInput.blur();updateButton();
+        promptInput.value='';promptInput.style.height='auto';promptInput.blur();setPendingImage('');
       }catch(error){
-        jobs.unshift({id:'err-'+Date.now(),source:'本机',question:text,answer:'暂时无法发送，请重新打开应用。',chars:0,
+        jobs.unshift({id:'err-'+Date.now(),source:'算力设备1',origin:'本机',local:true,question:question,answer:'暂时无法发送，请重新打开应用。',chars:0,
           startedAt:Date.now(),firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
         render();
       }
@@ -156,14 +237,20 @@
     window.onNativeEvent=(event)=>{
       if(event.kind==='connection'){
         available=event.available===true;
-        if(typeof event.pendingText==='string')pendingText=event.pendingText;
-        document.getElementById('connection').textContent=event.text;
+        if(typeof event.pendingText==='string')pendingText='正在生成…';
+        setStatus(event.text,event.connecting===true,available);
         connectButton.textContent=event.connectLabel||'启用近场';
         connectButton.disabled=event.connecting===true;
         updateButton();return;
       }
+      if(event.kind==='image'){setPendingImage(event.text);return;}
+      if(event.kind==='image-error'){
+        jobs.unshift({id:'err-'+Date.now(),source:'算力设备1',origin:'本机',local:true,question:'添加图片',answer:event.text,chars:0,
+          startedAt:Date.now(),firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
+        render();return;
+      }
       if(event.kind==='dashboard'){
-        if(typeof event.text==='string'&&event.text)document.getElementById('connection').textContent=event.text;
+        if(typeof event.text==='string'&&event.text)setStatus(event.text,event.connecting===true,true);
         if(event.connectLabel)connectButton.textContent=event.connectLabel;
         if(event.connecting===true||event.connecting===false)connectButton.disabled=event.connecting===true;
         available=true;

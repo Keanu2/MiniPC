@@ -1,6 +1,17 @@
 import { util } from '@kit.ArkTS';
 
 export interface ChatMessage { role: string; content: string; }
+export interface DeviceInfoEntry {
+  id?: string;
+  name?: string;
+  role?: string;
+  memTotal?: number;
+  memAvail?: number;
+  memUsage?: number;
+  model?: string;
+  modelRequests?: number;
+  ready?: boolean;
+}
 export interface WireMessage {
   protocol?: string;
   type: string;
@@ -10,10 +21,51 @@ export interface WireMessage {
   finishReason?: string;
   error?: string;
   peerRole?: string;
+  sched?: boolean;
+  source?: string;
+  name?: string;
+  memTotal?: number;
+  memAvail?: number;
+  memUsage?: number;
+  model?: string;
+  modelRequests?: number;
+  devices?: DeviceInfoEntry[];
 }
 
 const PROTOCOL = 'nearby-chat-v1';
 const MAX_FRAME = 65536;
+
+function validOptionalString(value: string | undefined, max: number): boolean {
+  return value === undefined || (typeof value === 'string' && value.length <= max);
+}
+
+function validOptionalNumber(value: number | undefined): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function validDeviceEntry(entry: DeviceInfoEntry): boolean {
+  if (entry === null || typeof entry !== 'object') return false;
+  return validOptionalString(entry.id, 128) && validOptionalString(entry.name, 128) &&
+    (entry.role === undefined || entry.role === 'chat' || entry.role === 'compute' || entry.role === 'self') &&
+    validOptionalNumber(entry.memTotal) && validOptionalNumber(entry.memAvail) &&
+    validOptionalNumber(entry.memUsage) && validOptionalString(entry.model, 128) &&
+    validOptionalNumber(entry.modelRequests);
+}
+
+function validDeviceInfo(m: WireMessage): boolean {
+  return validOptionalString(m.name, 128) && validOptionalString(m.model, 128) &&
+    validOptionalNumber(m.memTotal) && validOptionalNumber(m.memAvail) &&
+    validOptionalNumber(m.memUsage) && validOptionalNumber(m.modelRequests) &&
+    (m.peerRole === undefined || m.peerRole === 'compute' || m.peerRole === 'chat');
+}
+
+function validDeviceInfoSync(m: WireMessage): boolean {
+  if (!Array.isArray(m.devices) || m.devices.length > 8) return false;
+  for (const entry of m.devices) {
+    if (!validDeviceEntry(entry)) return false;
+  }
+  return true;
+}
 
 // Validate before forwarding anything to the model or UI.
 export function validMessage(m: WireMessage): boolean {
@@ -26,10 +78,15 @@ export function validMessage(m: WireMessage): boolean {
   if (m.type === 'prepared') return m.error === undefined ||
     (typeof m.error === 'string' && m.error.length <= 2048);
   if (m.type === 'delta') return typeof m.text === 'string' && m.text.length <= 16000;
-  if (m.type === 'done') return m.finishReason === undefined ||
-    (typeof m.finishReason === 'string' && m.finishReason.length <= 128);
+  if (m.type === 'done') {
+    return (m.finishReason === undefined || (typeof m.finishReason === 'string' && m.finishReason.length <= 128)) &&
+      (m.source === undefined || (typeof m.source === 'string' && m.source.length <= 256));
+  }
   if (m.type === 'error') return typeof m.error === 'string' && m.error.length <= 2048;
+  if (m.type === 'deviceInfo') return validDeviceInfo(m);
+  if (m.type === 'deviceInfoSync') return validDeviceInfoSync(m);
   if (m.type !== 'request' || !Array.isArray(m.messages) || m.messages.length === 0 || m.messages.length > 7) return false;
+  if (m.sched !== undefined && m.sched !== true && m.sched !== false) return false;
   let length = 0;
   for (const message of m.messages) {
     if (message === null || typeof message !== 'object' ||
