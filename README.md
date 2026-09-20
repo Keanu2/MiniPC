@@ -1,6 +1,6 @@
 # MiniPC
 
-一台手机跑 Qwen，旁边几台当聊天端，靠蓝牙近场连上就能问。两个独立 HAP，不是一个 App 里切角色。
+算力协同，由算力端和聊天端组成，靠蓝牙近场连接。具有两个独立 HAP。
 
 现在的版本是 [v0.3-cluster](https://github.com/Keanu2/MiniPC/releases/tag/v0.3-cluster)。改过什么看 [CHANGELOG.md](CHANGELOG.md)。
 
