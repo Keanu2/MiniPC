@@ -9,7 +9,9 @@
 
 ## [Unreleased]
 
-（下一版改动写在这里。）
+### Removed
+
+- 去掉两端过时的 `PACKAGE_INFO.md`（2026-09-10 源码快照：旧设备号、SoftBus HAP 哈希、旧 git 分支）。说明只保留根目录 README 和本文件。
 
 ## [v0.3-cluster] - 2026-09-20
 

@@ -1,6 +1,6 @@
 # MiniPC 近场聊天
 
-HarmonyOS 两台独立 HAP：一台算力机跑 Qwen，若干聊天机靠近场连上去提问。版本记录见 [CHANGELOG.md](CHANGELOG.md)，**每次改功能先写 Unreleased**，不要只改代码。
+HarmonyOS 两台独立 HAP：一台算力机跑 Qwen，若干聊天机靠近场连上去提问。说明只放这里和 [CHANGELOG.md](CHANGELOG.md)，不要再加源码包快照。**每次改功能先写 Unreleased**，不要只改代码。
 
 当前版本：**[v0.3-cluster](https://github.com/Keanu2/MiniPC/releases/tag/v0.3-cluster)**（2026-09-20）。
 
