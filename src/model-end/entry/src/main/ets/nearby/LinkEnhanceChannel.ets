@@ -4,7 +4,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { connection as btConnection, ble } from '@kit.ConnectivityKit';
 import { util } from '@kit.ArkTS';
-import { encodeMessage, MessageAssembler, WireMessage } from './ChatProtocol';
+import { encodeMessage, MessageAssembler, WireMessage } from '../protocol/ChatProtocol';
 import { COMPUTE_ADV_TYPE, COMPUTE_MANUFACTURE_ID, IS_SERVER } from './NearbyConfig';
 
 const BUNDLE = 'com.jiuwen.registrychatui';

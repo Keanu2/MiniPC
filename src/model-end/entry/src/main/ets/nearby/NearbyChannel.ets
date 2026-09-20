@@ -2,7 +2,7 @@ import { abilityConnectionManager as acm, distributedDeviceManager as dm } from 
 import { abilityAccessCtrl, common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { encodeMessage, MessageAssembler, WireMessage } from './ChatProtocol';
+import { encodeMessage, MessageAssembler, WireMessage } from '../protocol/ChatProtocol';
 import { IS_SERVER } from './NearbyConfig';
 
 const BUNDLE = 'com.jiuwen.registrychatui';

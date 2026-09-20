@@ -27,7 +27,7 @@ function setup(server) {
     destroyAbilityConnectionSession: id => destroyed.push(id)
   };
   const modules = {};
-  const load = file => {
+  const load = (file, fromDir) => {
     const context = { exports: {}, Uint8Array, Date,
       setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; }, clearTimeout: id => timers.delete(id),
       setInterval: fn => { intervals.set(++nextTimer, fn); return nextTimer; }, clearInterval: id => intervals.delete(id),
@@ -41,16 +41,16 @@ function setup(server) {
         if (name === '@kit.PerformanceAnalysisKit') return { hilog: Object.fromEntries(
           ['info', 'error', 'warn'].map(level => [level, (...args) => logs.push({ level, args })])) };
         if (name === './NearbyConfig') return { IS_SERVER: server };
-        if (name === './ChatProtocol') return modules.protocol;
+        if (name === './ChatProtocol' || name === '../protocol/ChatProtocol') return modules.protocol;
         throw Error(name);
       }
     };
-    vm.runInNewContext(ts.transpileModule(fs.readFileSync(__dirname + '/' + file + '.ets', 'utf8'), {
+    vm.runInNewContext(ts.transpileModule(fs.readFileSync((fromDir || __dirname) + '/' + file + '.ets', 'utf8'), {
       compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
     }).outputText, context);
     return context.exports;
   };
-  modules.protocol = load('ChatProtocol');
+  modules.protocol = load('ChatProtocol', __dirname + '/../protocol');
   const channel = new (load('NearbyChannel').NearbyChannel)();
   channel.initialize({ applicationInfo: { accessTokenId: 1 } });
   const messages = [], states = [];

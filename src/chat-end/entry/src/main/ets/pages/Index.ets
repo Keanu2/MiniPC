@@ -3,31 +3,16 @@ import { common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { LocalChat, ChatUpdate } from '../nearby/LocalChat';
-import { LocalLlmTransport } from '../nearby/LlmTransport';
+import { LocalChat, ChatUpdate } from '../llm/LocalChat';
+import { LocalLlmTransport } from '../llm/LlmTransport';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
-import { WireMessage, ChatMessage, DeviceInfoEntry } from '../nearby/ChatProtocol';
-import { buildSelfEntry, toDeviceInfoReply } from '../nearby/DeviceInfo';
+import { WireMessage, ChatMessage, DeviceInfoEntry } from '../protocol/ChatProtocol';
+import { buildSelfEntry, toDeviceInfoReply } from '../cluster/DeviceInfo';
 import { IS_SERVER } from '../nearby/NearbyConfig';
-import { pickJpegDataUrl } from '../nearby/ImageAttach';
+import { pickJpegDataUrl } from '../media/ImageAttach';
+import { ChatBridge } from '../ui/ChatBridge';
 
 interface PageEvent { kind: string; text: string; error?: boolean; available?: boolean; connectLabel?: string; connecting?: boolean; pendingText?: string; }
-class ChatBridge {
-  private onSend: (text: string) => string;
-  private onStop: () => void;
-  private onConnect: () => void;
-  private onPrepare: () => void;
-  private onPick: () => void;
-  constructor(send: (text: string) => string, stop: () => void, connect: () => void, prepare: () => void,
-    pick: () => void) {
-    this.onSend = send; this.onStop = stop; this.onConnect = connect; this.onPrepare = prepare; this.onPick = pick;
-  }
-  send(text: string): string { return this.onSend(text); }
-  stop(): void { this.onStop(); }
-  connect(): void { this.onConnect(); }
-  prepare(): void { this.onPrepare(); }
-  pickImage(): void { this.onPick(); }
-}
 
 @Entry
 @Component

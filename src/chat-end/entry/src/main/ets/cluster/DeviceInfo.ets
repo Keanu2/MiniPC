@@ -1,5 +1,5 @@
 import { hidebug } from '@kit.PerformanceAnalysisKit';
-import { DeviceInfoEntry, WireMessage } from './ChatProtocol';
+import { DeviceInfoEntry, WireMessage } from '../protocol/ChatProtocol';
 
 export const MODEL_DIR: string = 'Qwen2.5-7B-Instruct-Q4_N_0';
 

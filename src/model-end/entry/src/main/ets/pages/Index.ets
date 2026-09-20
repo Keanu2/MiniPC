@@ -3,89 +3,20 @@ import { common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { LocalChat, ChatUpdate } from '../nearby/LocalChat';
+import { LocalChat, ChatUpdate } from '../llm/LocalChat';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
-import { WireMessage, ChatMessage, DeviceInfoEntry } from '../nearby/ChatProtocol';
+import { WireMessage, ChatMessage, DeviceInfoEntry } from '../protocol/ChatProtocol';
 import { IS_SERVER } from '../nearby/NearbyConfig';
-import { ComputeRouter, DispatchEntry, ScheduleNode, pickNode } from '../nearby/ComputeRouter';
-import { LocalLlmTransport } from '../nearby/LlmTransport';
-import { pickJpegDataUrl } from '../nearby/ImageAttach';
+import { ComputeRouter, DispatchEntry, ScheduleNode, pickNode } from '../cluster/ComputeRouter';
+import { LocalLlmTransport } from '../llm/LlmTransport';
+import { pickJpegDataUrl } from '../media/ImageAttach';
 import {
   DEVICE_INFO_POLL_MS, applyDeviceInfo, buildSelfEntry,
   toDeviceInfoReply
-} from '../nearby/DeviceInfo';
-
-interface PageEvent {
-  kind: string;
-  text: string;
-  error?: boolean;
-  available?: boolean;
-  connectLabel?: string;
-  connecting?: boolean;
-  pendingText?: string;
-  requestId?: string;
-  running?: number;
-  devices?: DeviceView[];
-  jobs?: JobView[];
-}
-interface DeviceView {
-  epoch: number;
-  name: string;
-  id: string;
-  ready: boolean;
-  jobs: number;
-  role?: string;
-  model?: string;
-  memUsage?: number;
-  modelRequests?: number;
-}
-interface JobView {
-  id: string;
-  source: string;
-  origin: string;
-  local?: boolean;
-  image?: string;
-  question: string;
-  answer: string;
-  chars: number;
-  startedAt: number;
-  firstAt: number;
-  endedAt: number;
-  running: boolean;
-  error: boolean;
-  elapsedMs: number;
-}
-interface ActiveJob {
-  id: string;
-  epoch: number;
-  peer: boolean;
-  answer: string;
-  question: string;
-  startedAt: number;
-  firstAt: number;
-  endedAt: number;
-  error: boolean;
-  source: string;
-  origin: string;
-  workerEpoch: number;
-  image: string;
-}
-class ChatBridge {
-  private onSend: (text: string) => string;
-  private onStop: () => void;
-  private onConnect: () => void;
-  private onPrepare: () => void;
-  private onPick: () => void;
-  constructor(send: (text: string) => string, stop: () => void, connect: () => void, prepare: () => void,
-    pick: () => void) {
-    this.onSend = send; this.onStop = stop; this.onConnect = connect; this.onPrepare = prepare; this.onPick = pick;
-  }
-  send(text: string): string { return this.onSend(text); }
-  stop(): void { this.onStop(); }
-  connect(): void { this.onConnect(); }
-  prepare(): void { this.onPrepare(); }
-  pickImage(): void { this.onPick(); }
-}
+} from '../cluster/DeviceInfo';
+import { chatLabel, computeLabel, workerTail } from '../cluster/DeviceLabels';
+import { ChatBridge } from '../ui/ChatBridge';
+import { ActiveJob, DeviceView, JobView, PageEvent } from '../ui/DashboardTypes';
 
 @Entry
 @Component
@@ -246,34 +177,14 @@ struct Index {
     this.controller.runJavaScript('window.onNativeEvent(' + JSON.stringify(event) + ')').catch(() => this.stop());
   }
 
-  private computeLabel(workerEpoch: number): string {
-    if (workerEpoch <= 0) return '算力设备1';
-    const peers = this.channel.peerInfos();
-    for (const info of peers) {
-      if (info.epoch === workerEpoch) return info.name || '算力设备';
-    }
-    return '算力设备';
-  }
-
-  private chatLabel(epoch: number): string {
-    const peers = this.channel.peerInfos();
-    for (const info of peers) {
-      if (info.epoch === epoch) return info.name;
-    }
-    return '聊天设备';
-  }
-
-  private workerTail(workerEpoch: number): string {
-    return '由' + this.computeLabel(workerEpoch) + '推理';
-  }
-
   private createJob(id: string, messages: ChatMessage[], peer: boolean, epoch: number, workerEpoch: number = 0,
     image: string = ''): ActiveJob {
+    const peers = this.channel.peerInfos();
     return {
       id: id, epoch: epoch, peer: peer, answer: '', question: messages[messages.length - 1].content,
       startedAt: Date.now(), firstAt: 0, endedAt: 0, error: false,
-      source: this.computeLabel(workerEpoch),
-      origin: peer ? this.chatLabel(epoch) : '本机',
+      source: computeLabel(workerEpoch, peers),
+      origin: peer ? chatLabel(epoch, peers) : '本机',
       workerEpoch: workerEpoch,
       image: peer ? '' : image
     };
@@ -608,7 +519,7 @@ struct Index {
     }
     this.channel.send({
       type: 'done', requestId: dispatch.originRequestId, finishReason: message.finishReason,
-      source: this.workerTail(dispatch.workerEpoch)
+      source: workerTail(dispatch.workerEpoch, this.channel.peerInfos())
     }, dispatch.originEpoch);
     this.completeJob(message.requestId, job === undefined ? '' : job.answer, false);
   }
@@ -691,7 +602,8 @@ struct Index {
     }
     if (job.peer) {
       const message: WireMessage = update.error ? { type: 'error', requestId: id, error: update.error } :
-        { type: 'done', requestId: id, finishReason: update.finishReason, source: this.workerTail(0) };
+        { type: 'done', requestId: id, finishReason: update.finishReason,
+          source: workerTail(0, this.channel.peerInfos()) };
       this.channel?.send(message, job.epoch);
       this.router.endSelf();
     } else if (!update.error && update.finishReason !== 'cancelled' &&

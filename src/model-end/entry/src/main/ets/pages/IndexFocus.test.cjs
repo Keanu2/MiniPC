@@ -4,8 +4,15 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require(process.argv[2] || '/Applications/DevEco-Studio.app/Contents/tools/ohpm/node_modules/typescript/lib/typescript.js');
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+function loadEts(file) {
+  const box = { exports: {}, Error, Map, Math, Number, Date, Promise, JSON };
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
+  }).outputText, box);
+  return box.exports;
+}
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
-function setup() {
+function setup(isServer) {
   let connected = false, operation = 0, connections = 0, disconnects = 0, checks = 0;
   const events = [], sent = [];
   const behavior = { devices: [{ deviceId: 'stable', networkId: 'current', deviceName: '模型手机' }],
@@ -14,23 +21,18 @@ function setup() {
     isConnected: () => connected, isConnecting: () => false, operation: () => operation,
     devices: async () => behavior.devices,
     computeDevices: async () => behavior.devices,
-    advertisedComputes: () => {
-      if (behavior.devices.length) {
-        return behavior.devices.map(device => ({ name: device.deviceName, mac: device.networkId }));
-      }
-      return behavior.hits ? [{ name: '算力设备', mac: 'aa:bb' }] : [];
-    },
     hasComputeHits: () => !!behavior.hits,
-    connectAdvertiser: async () => { connections++; await behavior.connect(); },
     connectToAdvertisers: async () => { connections++; await behavior.connect(); },
-    bindNearby: async device => device,
     connect: async (id, expected) => { assert.equal(id, 'current'); assert.equal(expected, operation); connections++; await behavior.connect(); },
     waitUntilConnected: () => behavior.wait(), checkService: () => { checks++; return behavior.check(); },
+    connectedCount: () => connected ? 1 : 0, hasEpoch: () => connected, peerInfos: () => [],
+    peerRole: () => '', connectOtherComputes: async () => {}, localName: () => '算力设备',
     disconnect: () => { disconnects++; operation++; connected = false; },
     getStatus: () => connected ? '近场已连接' : '未连接',
     send: async message => { sent.push(message); return true; }
   };
-  const context = { exports: {}, Error, Map, Promise, JSON, require(name) {
+  const context = { exports: {}, Error, Map, Math, Number, Date, Promise, JSON, setInterval() { return 1; }, clearInterval() {},
+    require(name) {
     if (name === '@kit.ArkWeb') return { webview: { WebviewController: class {
       async runJavaScript(script) { events.push(JSON.parse(script.slice('window.onNativeEvent('.length, -1))); }
     } } };
@@ -39,47 +41,46 @@ function setup() {
     if (name === '../nearby/NearbyChannel' || name === '../nearby/LinkEnhanceChannel') {
       return { nearbyChannel: channel };
     }
-    if (name === '../nearby/NearbyConfig') return { IS_SERVER: false };
-    if (name === '../nearby/LocalChat') return { LocalChat: class { hasModel() { return false; } isBusy() { return false; } } };
-    if (name === '../nearby/LlmTransport') return { LocalLlmTransport: class {
+    if (name === '../nearby/NearbyConfig') return { IS_SERVER: !!isServer };
+    if (name === '../llm/LocalChat') return { LocalChat: class {} };
+    if (name === '../llm/LlmTransport') return { LocalLlmTransport: class {
       constructor(chat) { this.chat = chat; }
-      start(messages, cb) { return this.chat.start(messages, cb); }
-      cancel() { this.chat.cancel(); }
-      readinessError() { return this.chat.hasModel ? this.chat.hasModel() ? '' : this.chat.readinessError() : ''; }
+      start(messages, cb, id) { return this.chat.start(messages, cb, id); }
+      cancel(id) { this.chat.cancel(id); }
+      readinessError() { return this.chat.readinessError(); }
     } };
-    if (name === '../nearby/ImageAttach') return { pickJpegDataUrl: async () => '' };
-    if (name === '../nearby/DeviceInfo') return {
-      formatComputeStatus(entry) {
-        if (!entry) return '';
-        const model = entry.model && entry.model.length > 0 ? entry.model : '无模型';
-        const parts = [model];
-        if (entry.memUsage !== undefined && entry.memUsage >= 0) parts.push('内存 ' + String(entry.memUsage) + '%');
-        if (entry.modelRequests !== undefined && entry.modelRequests >= 0) parts.push('推理 ' + String(entry.modelRequests));
-        return parts.join(' · ');
+    if (name === '../cluster/ComputeRouter') {
+      return loadEts(__dirname + '/../cluster/ComputeRouter.ets');
+    }
+    if (name === '../cluster/DeviceLabels') {
+      return loadEts(__dirname + '/../cluster/DeviceLabels.ets');
+    }
+    if (name === '../ui/ChatBridge') return loadEts(__dirname + '/../ui/ChatBridge.ets');
+    if (name === '../cluster/DeviceInfo') return {
+      DEVICE_INFO_POLL_MS: 3000,
+      applyDeviceInfo(target, message) {
+        if (typeof message.name === 'string' && message.name.length > 0) target.name = message.name;
+        if (typeof message.memTotal === 'number') target.memTotal = message.memTotal;
+        if (typeof message.memAvail === 'number') target.memAvail = message.memAvail;
+        if (typeof message.memUsage === 'number') target.memUsage = message.memUsage;
+        if (typeof message.model === 'string') target.model = message.model;
+        if (typeof message.modelRequests === 'number') target.modelRequests = message.modelRequests;
       },
-      fromDeviceInfoMessage(message) {
-        return {
-          id: message.id || '', name: message.name || '', role: message.role || 'compute',
-          memTotal: message.memTotal, memAvail: message.memAvail, memUsage: message.memUsage,
-          model: message.model || '', modelRequests: message.modelRequests, ready: true
-        };
+      buildSelfEntry(_dir, running) {
+        return { name: '本机', id: 'self', role: 'self', model: 'Qwen2.5-7B-Instruct-Q4_N_0',
+          modelRequests: running, memUsage: 10, memAvail: 1000, memTotal: 2000 };
       },
-      peerDisplayName(entry) {
-        if (entry.role === 'self' || entry.name === '本机') return '算力';
-        return entry.name || '算力';
-      },
-      buildSelfEntry(hasModel, running) {
-        return { name: '本机', id: 'self', role: 'chat', model: hasModel ? 'Qwen' : '',
-          modelRequests: running, memUsage: 12, memAvail: 1000, memTotal: 2000 };
-      },
+      deployedModelName: () => 'Qwen2.5-7B-Instruct-Q4_N_0',
+      formatComputeStatus: () => 'Qwen',
       toDeviceInfoReply: (id, entry) => ({
-        type: 'deviceInfo', requestId: id, name: entry.name, model: entry.model || '',
-        memUsage: entry.memUsage, modelRequests: entry.modelRequests, peerRole: 'chat'
+        type: 'deviceInfo', requestId: id, name: entry.name, model: entry.model,
+        memUsage: entry.memUsage, modelRequests: entry.modelRequests, peerRole: 'compute'
       })
     };
+    if (name === '../media/ImageAttach') return { pickJpegDataUrl: async () => '' };
     return {};
   } };
-  let source = fs.readFileSync(__dirname + '/../pages/Index.ets', 'utf8');
+  let source = fs.readFileSync(__dirname + '/Index.ets', 'utf8');
   source = source.replace(/@Entry\s+@Component\s+struct Index/, 'export class Index');
   source = source.slice(0, source.indexOf('  build() {')) + '\n}';
   vm.runInNewContext(ts.transpileModule(source, {
@@ -103,10 +104,6 @@ function setup() {
   assert.equal(c.page.send('真实问题'), ''); await flush();
   assert.equal(c.sent.length, 1); assert.equal(c.sent[0].type, 'request');
   assert.equal(c.sent[0].messages[0].content, '真实问题');
-  c.page.receive({ type: 'delta', requestId: 'request-1', text: '你好' }, 1);
-  c.page.receive({ type: 'done', requestId: 'request-1', finishReason: 'stop', source: '由算力设备1推理' }, 1);
-  assert(c.events.at(-1).text.includes('你好'));
-  assert(c.events.at(-1).text.includes('由算力设备1推理'));
   for (const error of ['模型忙', '模型文件缺失']) {
     const f = setup(); f.behavior.check = async () => error;
     await f.page.ensureCollaborationReady(); assert.equal(f.page.serviceReady, false);
@@ -144,7 +141,7 @@ function setup() {
     return el;
   };
   const elements = Object.fromEntries(['history', 'prompt', 'send', 'connect', 'composer', 'connection',
-    'pick', 'preview', 'previewImg', 'previewClear'].map(id => [id, makeElement()]));
+    'stats', 'devices', 'pick', 'preview', 'previewImg', 'previewClear'].map(id => [id, makeElement()]));
   const document = { handlers: {}, getElementById: id => elements[id], createElement: makeElement,
     addEventListener(type, fn) { this.handlers[type] = fn; } };
   let preparations = 0;
@@ -162,6 +159,9 @@ function setup() {
   elements.composer.handlers.submit({ preventDefault() {} });
   assert.equal(elements.prompt.value, '保留草稿', 'native readiness rejection preserves draft');
   window.onNativeEvent({ kind: 'connection', available: true }); assert.equal(elements.send.disabled, false);
+  window.onNativeEvent({ kind: 'remote-start', text: '远端问题', requestId: 'r1' });
+  assert.equal(elements.send.disabled, false, 'remote stream must not lock composer');
+  assert.equal(elements.send.getAttribute('aria-label'), '发送');
   let picked = 0, sent = '';
   window.chatBridge.pickImage = () => { picked++; };
   window.chatBridge.send = (text) => { sent = text; return ''; };
@@ -172,37 +172,77 @@ function setup() {
   assert.equal(elements.send.disabled, false, 'image alone enables send');
   elements.composer.handlers.submit({ preventDefault() {} });
   assert.equal(sent, '请描述这张图片。');
-  window.onNativeEvent({ kind: 'done', text: '收到' });
-  elements.prompt.value = '这是什么';
-  window.onNativeEvent({ kind: 'image', text: 'data:image/jpeg;base64,yy' });
-  elements.composer.handlers.submit({ preventDefault() {} });
-  assert.equal(sent, '（附图）这是什么');
   console.log('PASS: HTML pointer/focus dedup, automatic focus no retry, explicit click/Tab retries, send availability and draft preservation');
 }
 
 {
-  const local = setup();
-  let started = 0;
-  local.page.model = {
-    hasModel: () => true,
-    isBusy: () => started > 0,
-    start() { started++; return ''; },
-    cancel() {},
-    readinessError: () => ''
+  const s = setup(true);
+  const callbacks = new Map();
+  s.page.model = {
+    start(messages, cb, id) {
+      callbacks.set(id, cb);
+      return '';
+    },
+    isBusy() { return callbacks.size > 0; },
+    activeCount() { return callbacks.size; },
+    readinessError() { return ''; },
+    cancel(id) {
+      const cb = callbacks.get(id);
+      if (!cb) return;
+      callbacks.delete(id);
+      cb({ kind: 'done', text: '已停止生成', finishReason: 'cancelled' });
+    }
   };
-  assert.equal(local.page.send('本地问题'), '');
-  assert.equal(local.sent.length, 0, 'local model must not send nearby request');
-  assert.equal(started, 1);
-  const info = setup();
-  info.page.receive({ type: 'deviceInfo', requestId: 'info-1', name: '算力A', model: 'Qwen',
-    memUsage: 33, modelRequests: 2 }, 1);
-  assert(info.events.every(event => !String(event.text || '').includes('Qwen')));
-  info.page.receive({ type: 'deviceInfoSync', requestId: 'sync-1', devices: [
-    { name: '本机', model: 'Qwen', memUsage: 10, modelRequests: 1, role: 'self' }
-  ] }, 1);
-  assert(info.events.every(event => !String(event.text || '').includes('算力')));
-  info.page.receive({ type: 'deviceInfo', requestId: 'q1' }, 1);
-  assert.equal(info.sent.at(-1).type, 'deviceInfo');
-  assert.equal(info.sent.at(-1).model, '');
-  console.log('PASS: local-if-model send, deviceInfo status without active request');
+  s.page.pageReady = true;
+  s.page.receive({ type: 'prepare', requestId: 'p1' }, 1);
+  assert.equal(s.sent.find(item => item.type === 'prepared').error, undefined);
+  assert.equal(s.sent.filter(item => item.type === 'deviceInfo').length, 1);
+  s.page.receive({ type: 'request', requestId: 'r1', messages: [{ role: 'user', content: 'A' }] }, 1);
+  s.page.receive({ type: 'request', requestId: 'r2', messages: [{ role: 'user', content: 'B' }] }, 2);
+  assert.equal(s.page.jobs.length, 2);
+  assert.equal(s.page.jobs[0].source, '算力设备1');
+  assert.equal(s.page.jobs[0].origin.indexOf('聊天设备') >= 0 || s.page.jobs[0].origin.length > 0, true);
+  s.page.receive({ type: 'prepare', requestId: 'p2' }, 2);
+  const prepared = s.sent.filter(item => item.type === 'prepared');
+  assert.equal(prepared.at(-1).error, undefined, 'prepare stays ready while two jobs run');
+  s.page.receive({ type: 'request', requestId: 'r3', messages: [{ role: 'user', content: 'C' }] }, 1);
+  assert.equal(s.page.jobs.length, 3, 'third peer job is accepted without a fixed cap');
+  assert.notEqual(s.sent.at(-1).type, 'error');
+  s.channel.hasEpoch = epoch => epoch === 2;
+  s.page.connectionChanged(true, 1);
+  assert.equal(s.page.jobs.length, 1);
+  assert.equal(s.page.jobs[0].id, 'r2');
+  console.log('PASS: three peer jobs in parallel, prepare not gated, disconnect cancels only that epoch');
+}
+
+{
+  const s = setup(true);
+  s.page.model = {
+    start() { return ''; },
+    readinessError() { return ''; },
+    cancel() {},
+    activeCount() { return 0; }
+  };
+  s.page.pageReady = true;
+  s.channel.peerInfos = () => [{ epoch: 7, peerId: 'aa:bb', ready: true, role: 'compute', name: '算力设备2' }];
+  s.page.peerStats.set(7, { model: 'Qwen2.5-7B-Instruct-Q4_N_0', modelRequests: 0, memAvail: 8000 });
+  s.page.receive({ type: 'request', requestId: 'r1', messages: [{ role: 'user', content: 'A' }] }, 1);
+  assert.equal(s.sent.at(-1).type, 'request');
+  assert.equal(s.sent.at(-1).sched, true);
+  assert.equal(s.page.jobs[0].workerEpoch, 7);
+  assert.equal(s.page.jobs[0].source, '算力设备2');
+  s.page.receive({ type: 'request', requestId: 'r2', messages: [{ role: 'user', content: 'B' }], sched: true }, 7);
+  assert.equal(s.page.jobs.find(job => job.id === 'r2').workerEpoch, 0, 'sched request stays local');
+  s.page.receive({ type: 'delta', requestId: 'r1', text: 'hi' }, 7);
+  assert.equal(s.sent.at(-1).type, 'delta');
+  assert.equal(s.sent.at(-1).text, 'hi');
+  s.page.receive({ type: 'done', requestId: 'r1', finishReason: 'stop' }, 7);
+  assert.equal(s.sent.at(-1).type, 'done');
+  assert.equal(s.sent.at(-1).source, '由算力设备2推理');
+  s.page.receive({ type: 'deviceInfo', requestId: 'info-7', model: 'Qwen', memUsage: 41, modelRequests: 1, memAvail: 7000 }, 7);
+  assert.equal(s.page.peerStats.get(7).memUsage, 41);
+  s.page.receive({ type: 'deviceInfo', requestId: 'q1' }, 1);
+  assert.equal(s.sent.at(-1).type, 'deviceInfo');
+  assert.equal(s.sent.at(-1).model, 'Qwen2.5-7B-Instruct-Q4_N_0');
+  console.log('PASS: schedule to idle compute, sched stays local, worker reply remapped, deviceInfo poll/reply');
 }

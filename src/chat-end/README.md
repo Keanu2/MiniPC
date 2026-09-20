@@ -22,6 +22,10 @@ c++ -std=c++17 -pthread entry/src/main/cpp/tests/gewu_probe_lifecycle.cpp -o /tm
 
 模型不进入HAP或Git；构建产物位于entry/build/default/outputs/default，安装需要有效签名。
 
+## 源码分层
+
+`entry/src/main/ets`：`protocol` 消息编解码，`nearby` 近场通道与角色开关，`llm` 本机推理，`cluster` 设备信息，`media` 选图，`ui` WebView 桥，`pages` 聊天页编排。
+
 ## 同账号近场模式
 
 模型端（NearbyConfig.ets中IS_SERVER=true）和聊天端两机登录同一个华为账号，开启Wi-Fi和蓝牙；连接由系统分布式组网和abilityConnectionManager提供。

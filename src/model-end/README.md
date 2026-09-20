@@ -22,6 +22,10 @@ c++ -std=c++17 -pthread entry/src/main/cpp/tests/gewu_probe_lifecycle.cpp -o /tm
 
 模型不进入HAP或Git；构建产物位于entry/build/default/outputs/default，安装需要有效签名。
 
+## 源码分层
+
+`entry/src/main/ets`：`protocol` 消息编解码，`nearby` 近场通道与角色开关，`llm` 本机推理，`cluster` 设备信息与算力选点，`media` 选图，`ui` WebView 桥与仪表盘类型，`pages` 算力页编排。
+
 
 ## 同账号近场模式
 
