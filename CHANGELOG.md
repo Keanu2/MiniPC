@@ -4,8 +4,6 @@
 
 ## [Unreleased]
 
-- 删掉了两端那份 9 月 10 日的 `PACKAGE_INFO.md`。里面是当时的设备号和 SoftBus HAP 哈希，已经对不上了。
-
 ## [v0.3-cluster] - 2026-09-20
 
 能看见对面有没有模型、内存多少；多台算力时由模型机选谁来跑。聊天页干净了不少。
@@ -29,6 +27,11 @@
 ### Removed
 
 - 回复末尾「来自本机 Qwen2.5-7B-Instruct」那种尾巴。
+- 两端那份 9 月 10 日的 `PACKAGE_INFO.md`（旧设备号和 SoftBus HAP 哈希）。
+
+### Fixed
+
+- 相册选完图后用文件描述符解码。之前直接拿 picker 的 URI 喂给 ImageKit，真机会报「图片读取失败」；点取消也不再当成失败。
 
 选点、发现、附图这些细节 README 里有，这里不重复。两个 HAP 先保持分开；StarFlash / BLE 5 也还没上。
 
