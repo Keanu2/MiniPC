@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [v0.3-cluster] - 2026-09-20
+
+设备信息协议、算力选点、附图和源码分层。
+
 ### Added
 
 - 连上后在 `linkEnhance` 上查询并同步设备信息（名称、内存、已部署模型、推理路数），聊天端状态栏和算力仪表盘都会显示。
@@ -34,5 +38,6 @@
 - 近场不再把 `abilityConnectionManager` UIAbility 协同当作数据通道（原先一对一）。
 - 模型端界面不再混用聊天气泡；聊天端界面不变。
 
-[Unreleased]: https://github.com/Keanu2/MiniPC/compare/v0.2-nearfield...HEAD
+[Unreleased]: https://github.com/Keanu2/MiniPC/compare/v0.3-cluster...HEAD
+[v0.3-cluster]: https://github.com/Keanu2/MiniPC/releases/tag/v0.3-cluster
 [v0.2-nearfield]: https://github.com/Keanu2/MiniPC/releases/tag/v0.2-nearfield
