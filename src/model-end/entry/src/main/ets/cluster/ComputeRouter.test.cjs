@@ -1,12 +1,9 @@
 // node ComputeRouter.test.cjs [path/to/typescript/lib/typescript.js]
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const vm = require('node:vm');
-const ts = require(process.argv[2] || '/Applications/DevEco-Studio.app/Contents/tools/ohpm/node_modules/typescript/lib/typescript.js');
+const { transpile } = require('../../../../../../tests/harness.cjs');
 const context = { exports: {}, Error, Map, Math, Number };
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(__dirname + '/ComputeRouter.ets', 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
-}).outputText, context);
+vm.runInNewContext(transpile(__dirname + '/ComputeRouter.ets'), context);
 const { ScheduleNode, ComputeRouter, pickNode } = context.exports;
 function node(partial) {
   const item = new ScheduleNode();
@@ -27,12 +24,15 @@ assert.equal(pickNode([busy]).name, '忙', 'all busy still returns a modeled nod
 const router = new ComputeRouter();
 assert.equal(router.selfLoad(1), 1);
 router.beginSelf();
-assert.equal(router.selfLoad(1), 2);
+assert.equal(router.selfLoad(0), 1, 'inflight covers a job before GEWU reports it');
+assert.equal(router.selfLoad(1), 1, 'sampled job is the same inflight, not two');
 router.endSelf();
 assert.equal(router.selfLoad(1), 1);
+assert.equal(router.selfLoad(0), 0);
 const entry = { originEpoch: 1, originRequestId: 'r1', workerEpoch: 7, workerName: '算力B' };
 router.beginDispatch('r1', entry);
-assert.equal(router.workerLoad(7, 1), 2);
+assert.equal(router.workerLoad(7, 0), 1);
+assert.equal(router.workerLoad(7, 1), 1, 'peer sample plus inflight is one job');
 assert.equal(router.getDispatch('r1').workerName, '算力B');
 assert.equal(router.finishDispatch('r1').originEpoch, 1);
 assert.equal(router.workerLoad(7, 1), 1);

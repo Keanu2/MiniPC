@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const ts = require(process.argv[2] || '/Applications/DevEco-Studio.app/Contents/tools/ohpm/node_modules/typescript/lib/typescript.js');
+const { transpile } = require('../../../../../../tests/harness.cjs');
 const root = '/files/models/Qwen2.5-7B-Instruct-Q4_N_0/';
 const names = ['api_config.json', 'params', 'tokenizer.json'];
 let missing = '', unreadable = '', empty = '', starts = 0;
@@ -29,9 +29,7 @@ const context = { exports: {}, ArrayBuffer, setInterval: () => 1, clearInterval(
     closeSync(file) { closed.push(file); }
   } };
 } };
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(__dirname + '/LocalChat.ets', 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
-}).outputText, context);
+vm.runInNewContext(transpile(__dirname + '/LocalChat.ets'), context);
 const { LocalChat } = context.exports;
 const chat = new LocalChat('/files');
 assert.equal(chat.hasModel(), true);

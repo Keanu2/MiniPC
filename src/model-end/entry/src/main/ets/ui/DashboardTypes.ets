@@ -8,6 +8,7 @@ export interface PageEvent {
   pendingText?: string;
   requestId?: string;
   running?: number;
+  selfLabel?: string;
   devices?: DeviceView[];
   jobs?: JobView[];
 }
@@ -26,6 +27,8 @@ export interface DeviceView {
 
 export interface JobView {
   id: string;
+  /** Stable board identity: origin epoch + wire request id. Never sent on the wire. */
+  key: string;
   source: string;
   origin: string;
   local?: boolean;
@@ -43,6 +46,9 @@ export interface JobView {
 
 export interface ActiveJob {
   id: string;
+  /** Stable board identity: origin epoch + wire request id. Never sent on the wire. */
+  key: string;
+  /** Origin session that asked for this job; 0 for work this device started. */
   epoch: number;
   peer: boolean;
   answer: string;

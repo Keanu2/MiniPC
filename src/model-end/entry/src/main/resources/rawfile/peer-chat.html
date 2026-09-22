@@ -46,9 +46,10 @@
     .tag.run { color:var(--busy); }
     .tag.err { color:var(--err); }
     .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .mem { display:inline-flex; align-items:center; gap:6px; }
+    .mem,.jobs { display:inline-flex; align-items:center; gap:6px; }
     .mem i { display:block; width:52px; height:4px; border-radius:4px; background:#e6eaf4; overflow:hidden; }
     .mem i b { display:block; height:100%; background:var(--accent); border-radius:4px; }
+    .jobs { padding:1px 7px; border-radius:999px; background:#e8edfb; color:var(--accent); font-weight:650; }
     .q { margin:8px 0 0; font-size:14px; color:var(--ink); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .card.open .q { display:block; }
     .pic-tag { display:inline-block; margin-right:6px; padding:1px 6px; border-radius:8px; background:#eef1f8; color:var(--muted); font-size:11px; }
@@ -77,7 +78,7 @@
   <main class="app">
     <header>
       <svg class="brand" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="12" fill="#3d5bdb"/><circle cx="11" cy="18" r="3" fill="#fff"/><circle cx="25" cy="12" r="3" fill="#fff"/><circle cx="25" cy="24" r="3" fill="#fff"/><path stroke="#fff" stroke-width="1.6" d="M13.6 16.8 22.4 13.2M13.6 19.2 22.4 22.8"/></svg>
-      <div class="head"><h1>算力</h1><p id="connection" class="status wait" role="status">正在准备…</p></div>
+      <div class="head"><h1 id="title">算力</h1><p id="connection" class="status wait" role="status">正在准备…</p></div>
       <button id="connect" class="connect" type="button" disabled>启用近场</button>
     </header>
     <div class="stats" id="stats"></div>
@@ -114,6 +115,7 @@
     const previewImg=document.getElementById('previewImg');
     const previewClear=document.getElementById('previewClear');
     const statusView=document.getElementById('connection');
+    const titleView=document.getElementById('title');
     const ICO_SEND='<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3.2 20.8 21 12 3.2 3.2l-.2 7.2L13 12l-10 1.6z"/></svg>';
     const ICO_STOP='<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>';
     connectButton.addEventListener('click',()=>window.chatBridge.connect());
@@ -128,7 +130,13 @@
     promptInput.addEventListener('focus',prepareFromInput);
     document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
     let available=false, pendingText='正在生成…', pendingImage='';
-    let jobs=[], devices=[], running=0, openIds={};
+    let jobs=[], devices=[], running=0, openIds={}, selfLabel='算力设备1';
+    function setSelfLabel(label){
+      if(typeof label!=='string'||!label) return;
+      if(label==='算力设备' && /^算力设备\d+$/.test(selfLabel)) return;
+      selfLabel=label;
+      if(titleView) titleView.textContent=label;
+    }
     function localRunning(){return jobs.some(job=>job.running&&job.local===true);}
     function setStatus(text, connecting, isAvailable){
       const err=/失败|未发现|无法|错误|中断/.test(text||'');
@@ -146,12 +154,24 @@
       const sec=Math.max(0,Math.round(ms/100)/10);
       return sec.toFixed(1)+'s';
     }
+    function createdAt(ms){
+      if(!ms)return '创建时间未知';
+      const date=new Date(ms);
+      const pad=value=>String(value).padStart(2,'0');
+      return '创建 '+pad(date.getMonth()+1)+'-'+pad(date.getDate())+' '+pad(date.getHours())+':'+
+        pad(date.getMinutes())+':'+pad(date.getSeconds());
+    }
     function esc(text){
       return String(text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
     function shortModel(name){
       if(!name)return '无模型';
       return String(name).replace(/-Instruct.*$/,'').replace(/-Q4.*$/,'');
+    }
+    function publicJobName(name, role){
+      const text=String(name||'');
+      if(text==='本机'||text.indexOf('算力设备')===0||text.indexOf('聊天设备')===0) return text;
+      return role==='chat'?'聊天设备':'算力设备';
     }
     function updateButton(){
       const local=localRunning();
@@ -169,37 +189,60 @@
     function renderDevices(){
       if(!devicesView)return;
       if(!devices.length){devicesView.innerHTML='<div class="empty">等待聊天手机连入</div>';return;}
-      devicesView.innerHTML=devices.map((device,index)=>{
-        const title=device.role==='self'?'算力设备1':(device.role==='compute'?
-          (device.name||'算力设备'):(device.name&&device.name!=='聊天设备'?device.name:('聊天设备'+(index+1))));
-        const mark=device.role==='self'?'self':(device.role==='compute'?'':'chat');
-        const tag=!device.ready?'连接中':(device.jobs>0?'推理中':'在线');
-        const klass=!device.ready?'wait':(device.jobs>0?'run':'');
+      devicesView.innerHTML=devices.map(device=>{
+        const compute=device.role==='self'||device.role==='compute';
+        let title=device.name||'';
+        if(title.indexOf('算力设备')!==0&&title.indexOf('聊天设备')!==0){
+          title=device.role==='self'?(selfLabel||'算力设备'):(compute?'算力设备':'聊天设备');
+        }
+        const mark=device.role==='self'?'self':(compute?'':'chat');
+        const infer=compute?(typeof device.jobs==='number'?device.jobs:(device.modelRequests||0)):0;
+        const tag=!device.ready?'连接中':(infer>0?'推理中':'在线');
+        const klass=!device.ready?'wait':(infer>0?'run':'');
         const mem=typeof device.memUsage==='number'&&device.memUsage>=0?device.memUsage:-1;
         return '<div class="card"><div class="row1"><span class="mark '+mark+'"></span><span class="name">'+esc(title)+
           '</span><span class="tag '+klass+'">'+tag+'</span></div><div class="meta"><span>'+esc(shortModel(device.model))+
           '</span>'+(mem>=0?'<span class="mem">内存 <i><b style="width:'+Math.min(100,mem)+'%"></b></i>'+mem+'%</span>':'')+
+          (compute?'<span class="jobs">推理 '+infer+'</span>':'')+
           '</div></div>';
       }).join('');
+    }
+    function jobKey(job){
+      return String(job.key||job.id||'');
+    }
+    // The rail is rebuilt from the dashboard, but a streaming reply also arrives as
+    // its own event. Patch that one card so the text does not lag the poll interval.
+    function patchJob(requestId,text,isError,finished){
+      if(!requestId)return false;
+      const job=jobs.find(item=>String(item.id)===String(requestId));
+      if(!job)return false;
+      if(typeof text==='string')job.answer=text;
+      job.chars=(job.answer||'').length;
+      if(isError===true)job.error=true;
+      if(finished){job.endedAt=job.endedAt||Date.now();job.running=false;}
+      job.elapsedMs=Date.now()-job.startedAt;
+      renderJobs();
+      return true;
     }
     function renderJobs(){
       if(!jobs.length){historyView.innerHTML='<div class="empty">还没有任务。本机提问或等聊天机发来。</div>';return;}
       historyView.innerHTML=jobs.map(job=>{
-        const open=openIds[job.id]?' open':'';
+        const key=jobKey(job);
+        const open=openIds[key]?' open':'';
         const tag=job.error?'失败':(job.running?'进行中':'已完成');
         const klass=job.error?'err':(job.running?'run':'');
         const first=job.firstAt?('首字 '+clock(job.firstAt-job.startedAt)):'等待首字';
         const body=job.answer||pendingText;
-        const origin=job.origin||'本机';
-        const worker=job.source||'算力设备';
+        const origin=publicJobName(job.origin||'本机','chat');
+        const worker=publicJobName(job.source||'算力设备','compute');
         const raw=job.question||'';
         const pictured=!!job.image||raw.indexOf('（附图）')===0;
         const question=raw.replace(/^（附图）/,'');
-        return '<article class="card task '+klass+open+'" data-id="'+esc(job.id)+'"><div class="row1"><span class="name"><em>'+
+        return '<article class="card task '+klass+open+'" data-id="'+esc(key)+'"><div class="row1"><span class="name"><em>'+
           esc(origin)+'</em><span class="to">→</span>'+esc(worker)+'</span><span class="tag '+klass+'">'+tag+'</span></div>'+
           (job.image?'<img class="photo" src="'+esc(job.image)+'" alt="图片">':'')+
           '<div class="q">'+(pictured?'<span class="pic-tag">附图</span>':'')+esc(question)+'</div>'+
-          '<div class="meta"><span>'+clock(job.elapsedMs)+'</span><span>'+job.chars+' 字</span><span>'+first+
+          '<div class="meta"><span>'+createdAt(job.startedAt)+'</span><span>'+clock(job.elapsedMs)+'</span><span>'+job.chars+' 字</span><span>'+first+
           '</span></div><div class="body'+(job.error?' error':'')+'">'+esc(body)+'</div></article>';
       }).join('');
     }
@@ -222,13 +265,13 @@
       try{
         const error=window.chatBridge.send(question);
         if(error){
-          jobs.unshift({id:'err-'+Date.now(),source:'算力设备1',origin:'本机',local:true,image:pendingImage,question:question,answer:error,chars:0,startedAt:Date.now(),
+          jobs.unshift({id:'err-'+Date.now(),source:selfLabel,origin:'本机',local:true,image:pendingImage,question:question,answer:error,chars:0,startedAt:Date.now(),
             firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
           render();return;
         }
         promptInput.value='';promptInput.style.height='auto';promptInput.blur();setPendingImage('');
       }catch(error){
-        jobs.unshift({id:'err-'+Date.now(),source:'算力设备1',origin:'本机',local:true,question:question,answer:'暂时无法发送，请重新打开应用。',chars:0,
+        jobs.unshift({id:'err-'+Date.now(),source:selfLabel,origin:'本机',local:true,question:question,answer:'暂时无法发送，请重新打开应用。',chars:0,
           startedAt:Date.now(),firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
         render();
       }
@@ -241,15 +284,17 @@
         setStatus(event.text,event.connecting===true,available);
         connectButton.textContent=event.connectLabel||'启用近场';
         connectButton.disabled=event.connecting===true;
+        setSelfLabel(event.selfLabel);
         updateButton();return;
       }
       if(event.kind==='image'){setPendingImage(event.text);return;}
       if(event.kind==='image-error'){
-        jobs.unshift({id:'err-'+Date.now(),source:'算力设备1',origin:'本机',local:true,question:'添加图片',answer:event.text,chars:0,
+        jobs.unshift({id:'err-'+Date.now(),source:selfLabel,origin:'本机',local:true,question:'添加图片',answer:event.text,chars:0,
           startedAt:Date.now(),firstAt:0,endedAt:Date.now(),running:false,error:true,elapsedMs:0});
         render();return;
       }
       if(event.kind==='dashboard'){
+        setSelfLabel(event.selfLabel);
         if(typeof event.text==='string'&&event.text)setStatus(event.text,event.connecting===true,true);
         if(event.connectLabel)connectButton.textContent=event.connectLabel;
         if(event.connecting===true||event.connecting===false)connectButton.disabled=event.connecting===true;
@@ -260,7 +305,11 @@
         render();return;
       }
       if(event.kind==='remote-start'){updateButton();return;}
-      if(event.kind==='done'&&!event.requestId){updateButton();}
+      if(event.kind==='text'){patchJob(event.requestId,event.text,false,false);return;}
+      if(event.kind==='done'){
+        patchJob(event.requestId,event.text,event.error===true,true);
+        updateButton();
+      }
     };
     if(typeof setInterval==='function')setInterval(()=>{
       let dirty=false;

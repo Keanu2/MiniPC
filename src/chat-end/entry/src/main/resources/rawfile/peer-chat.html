@@ -54,7 +54,7 @@
   <main class="app">
     <header>
       <svg class="brand" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="12" fill="#0f8a74"/><path fill="#fff" d="M10 12.5c0-1.4 1.1-2.5 2.5-2.5h11c1.4 0 2.5 1.1 2.5 2.5v8c0 1.4-1.1 2.5-2.5 2.5H16l-4 3v-3h-1.5C11.1 23 10 21.9 10 20.5z"/></svg>
-      <div class="head"><h1>聊天</h1><p id="connection" class="status wait" role="status">正在寻找算力设备…</p></div>
+      <div class="head"><h1 id="title">聊天</h1><p id="connection" class="status wait" role="status">正在寻找算力设备…</p></div>
       <button id="connect" class="connect" type="button" disabled>连接</button>
     </header>
     <section id="history" class="history" aria-label="聊天记录" aria-live="polite">
@@ -87,6 +87,7 @@
     const previewImg=document.getElementById('previewImg');
     const previewClear=document.getElementById('previewClear');
     const statusView=document.getElementById('connection');
+    const titleView=document.getElementById('title');
     const ICO_SEND='<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3.2 20.8 21 12 3.2 3.2l-.2 7.2L13 12l-10 1.6z"/></svg>';
     const ICO_STOP='<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>';
     connectButton.addEventListener('click',()=>window.chatBridge.connect());
@@ -150,6 +151,7 @@
         setStatus(event.text,event.connecting===true,available);
         connectButton.textContent=event.connectLabel||'连接';
         connectButton.disabled=event.connecting===true;
+        if(titleView && typeof event.selfLabel==='string' && event.selfLabel) titleView.textContent=event.selfLabel;
         updateButton();return;
       }
       if(event.kind==='image'){setPendingImage(event.text);return;}

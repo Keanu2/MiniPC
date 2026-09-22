@@ -1,6 +1,5 @@
 import { webview } from '@kit.ArkWeb';
 import { common } from '@kit.AbilityKit';
-import { promptAction } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { LocalChat, ChatUpdate } from '../llm/LocalChat';
@@ -12,7 +11,7 @@ import { IS_SERVER } from '../nearby/NearbyConfig';
 import { pickJpegDataUrl } from '../media/ImageAttach';
 import { ChatBridge } from '../ui/ChatBridge';
 
-interface PageEvent { kind: string; text: string; error?: boolean; available?: boolean; connectLabel?: string; connecting?: boolean; pendingText?: string; }
+interface PageEvent { kind: string; text: string; error?: boolean; available?: boolean; connectLabel?: string; connecting?: boolean; pendingText?: string; selfLabel?: string; }
 
 @Entry
 @Component
@@ -30,9 +29,10 @@ struct Index {
   private preparation: Promise<void> | null = null;
   private serviceReady: boolean = false;
   private preparedOperation: number = -1;
-  private selectedDeviceId: string = '';
   private autoConnect: boolean = true;
   private connectManual: boolean = false;
+  private reconnectTimer: number = -1;
+  private reconnectAttempt: number = 0;
   private model: LocalChat | null = null;
   private transport: LocalLlmTransport | null = null;
   private pageReady: boolean = false;
@@ -52,6 +52,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageReady = false;
+    this.cancelReconnect();
     this.model?.close();
     this.channel.disconnect();
     this.channel.unsubscribe();
@@ -65,11 +66,13 @@ struct Index {
     if (this.preparation !== null) return;
     if (this.channel.isConnected()) {
       this.autoConnect = false;
+      this.cancelReconnect();
       this.channel.disconnect();
       this.showConnection();
       return;
     }
     this.autoConnect = true;
+    this.reconnectAttempt = 0;
     this.ensureCollaborationReady(true);
   }
 
@@ -82,6 +85,8 @@ struct Index {
     if (!IS_SERVER && this.serviceReady && this.channel.isConnected() && this.preparedOperation === this.channel.operation()) {
       return Promise.resolve();
     }
+    this.cancelReconnect();
+    if (manual) this.reconnectAttempt = 0;
     this.connectManual = manual;
     this.connecting = true;
     const operation = this.channel.operation();
@@ -104,32 +109,39 @@ struct Index {
       if (!this.channel.isConnected() && !this.channel.isConnecting()) {
         await this.channel.computeDevices();
         if (operation !== this.channel.operation() || !this.pageReady) return;
-        const ads = this.channel.advertisedComputes();
+        let ads = this.channel.advertisedComputes();
         if (ads.length === 0) {
-          throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
+          throw new Error(this.channel.hasComputeHits()
+            ? '附近的算力还没组网。请用同一华为账号在超级终端中连接后再试。'
+            : '未发现算力设备。请打开模型手机并保持近场开启后重试。');
         }
-        let index = 0;
-        if (this.selectedDeviceId) {
-          const found = ads.findIndex(item => item.mac === this.selectedDeviceId);
-          if (found >= 0) index = found;
-        }
-        if (this.connectManual && !this.selectedDeviceId && ads.length > 1) {
-          const buttons: [promptAction.Button, promptAction.Button?, promptAction.Button?,
-            promptAction.Button?, promptAction.Button?, promptAction.Button?] = [
-            { text: '算力 · ' + ads[0].name, color: '#9b5f4c' }
-          ];
-          for (let i = 1; i < Math.min(ads.length, 6); i++) {
-            buttons.push({ text: '算力 · ' + ads[i].name, color: '#9b5f4c' });
-          }
-          const selection = await this.getUIContext().getPromptAction().showActionMenu({
-            title: '选择可用算力设备', buttons: buttons
-          });
-          index = selection.index;
+        ads = this.channel.connectComputes();
+        if (ads.length === 0) {
+          throw new Error('算力设备1尚未确定或不可用，请等待算力设备组网后重试。');
         }
         if (operation !== this.channel.operation() || !this.pageReady) return;
-        if (index < 0 || index >= ads.length) return;
-        this.selectedDeviceId = ads[index].mac;
-        await this.channel.connectAdvertiser(ads[index].mac, operation);
+        let linked = false;
+        let lastError: Error | null = null;
+        for (let attempt = 0; attempt < 3 && !linked; attempt++) {
+          if (attempt > 0) {
+            await this.delay(1500);
+            if (operation !== this.channel.operation() || !this.pageReady) return;
+            await this.channel.computeDevices();
+            if (operation !== this.channel.operation() || !this.pageReady) return;
+            ads = this.channel.connectComputes();
+            if (ads.length === 0) {
+              lastError = new Error('算力设备1尚未确定或不可用，请等待算力设备组网后重试。');
+              continue;
+            }
+          }
+          try {
+            await this.channel.connectAdvertiser(ads[0].mac, operation);
+            linked = true;
+          } catch (error) {
+            lastError = error instanceof Error ? error : new Error('增强连接失败。');
+          }
+        }
+        if (!linked) throw (lastError || new Error('增强连接失败：未找到可用的蓝牙地址。'));
       }
       if (!await this.channel.waitUntilConnected()) throw new Error(this.channel.getStatus());
       if (operation !== this.channel.operation() || !this.pageReady) return;
@@ -148,7 +160,39 @@ struct Index {
       this.connecting = false;
       this.preparation = null;
       this.showConnection();
+      if (!IS_SERVER && !this.channel.isConnected()) this.scheduleReconnect();
     }
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer === -1) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = -1;
+  }
+
+  /** Give a newly elected hub time to appear, but keep retries bounded. */
+  private scheduleReconnect(): void {
+    if (IS_SERVER || !this.autoConnect || !this.pageReady || !this.channel.isForeground() ||
+      this.activeId.length > 0 || this.preparation !== null || this.reconnectTimer !== -1) return;
+    const delays: number[] = [1500, 4000, 9000, 15000, 20000];
+    if (this.reconnectAttempt >= delays.length) {
+      this.autoConnect = false;
+      this.connectionError = '连接已中断，请点击“连接”重试。';
+      this.showConnection();
+      return;
+    }
+    const delay = delays[this.reconnectAttempt++];
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = -1;
+      if (!this.channel.isConnected() && this.autoConnect && this.pageReady &&
+        this.channel.isForeground() && this.preparation === null && !this.activeId) {
+        this.ensureCollaborationReady(false);
+      }
+    }, delay);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise<void>((resolve: () => void) => setTimeout(resolve, ms));
   }
 
   private emit(event: PageEvent): void {
@@ -169,17 +213,27 @@ struct Index {
     this.emit({ kind: 'connection', text: text,
       available: local || IS_SERVER || ready, pendingText: local ? '正在推理中' : '正在等待推理端回复',
       connectLabel: connected ? '断开' : (IS_SERVER ? '启用近场' : '连接'),
-      connecting: this.connecting || this.channel.isConnecting() });
+      connecting: this.connecting || this.channel.isConnecting(),
+      selfLabel: this.channel.selfLabel() });
   }
 
   private connectionChanged(connected: boolean, epoch: number): void {
     hilog.info(0, 'NearbyChat', 'connection=%{public}s epoch=%{public}d server=%{public}s',
       String(connected), epoch, String(IS_SERVER));
-    if (connected) this.connectionError = '';
-    else this.serviceReady = false;
+    if (connected) {
+      this.connectionError = '';
+      this.cancelReconnect();
+      this.reconnectAttempt = 0;
+    } else {
+      this.serviceReady = false;
+      this.scheduleReconnect();
+    }
     if (!connected && this.activeId) {
       if (this.hasLocalModel() && !this.peerRequest) return this.showConnection();
-      if (!IS_SERVER) this.finish(this.answer + (this.answer ? '\n\n' : '') + '连接已中断，请连接后重新发送。', true);
+      if (!IS_SERVER) {
+        this.finish(this.answer + (this.answer ? '\n\n' : '') + '连接已中断，请连接后重新发送。', true);
+        this.scheduleReconnect();
+      }
       else if (this.peerRequest && this.activeEpoch === epoch) this.model?.cancel();
     }
     this.showConnection();
@@ -210,7 +264,8 @@ struct Index {
     if (typeof text !== 'string' || !text.trim()) return '请输入问题。';
     if (text.length > 1100) return '这条消息太长，请缩短后再发送。';
     if (this.activeId || this.model?.isBusy()) return '模型正在回答上一条问题，请稍后再发。';
-    if (!this.hasLocalModel() && !IS_SERVER && (!this.channel.isConnected() || !this.serviceReady ||
+    const useLocal = this.hasLocalModel() && !this.channel.isConnected();
+    if (!useLocal && !IS_SERVER && (!this.channel.isConnected() || !this.serviceReady ||
       this.preparedOperation !== this.channel.operation())) {
       this.ensureCollaborationReady();
       return '协同尚未准备完成，请就绪后发送。';
@@ -218,7 +273,7 @@ struct Index {
     const question = text.trim();
     const messages = this.recentMessages(question);
     const id = util.generateRandomUUID();
-    if (IS_SERVER || this.hasLocalModel()) {
+    if (IS_SERVER || useLocal) {
       const error = this.startLocal(id, messages, false, 0);
       if (error) return error;
     } else {

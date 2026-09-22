@@ -3,7 +3,9 @@ import { fileIo } from '@kit.CoreFileKit';
 import { DeviceInfoEntry, WireMessage } from '../protocol/ChatProtocol';
 
 export const MODEL_DIR: string = 'Qwen2.5-7B-Instruct-Q4_N_0';
-export const DEVICE_INFO_POLL_MS: number = 3000;
+// Lightweight status requests run often; multi-frame rosters are gated
+// separately by topology changes and a 30-second refresh interval.
+export const DEVICE_INFO_POLL_MS: number = 5000;
 
 export class LocalModelStatus {
   name: string = '';

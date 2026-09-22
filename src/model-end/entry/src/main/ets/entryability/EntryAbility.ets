@@ -34,6 +34,10 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void { nearbyChannel.resume(); }
-  onBackground(): void { probe.cancel(); nearbyChannel.suspend(); }
+  onBackground(): void {
+    hilog.info(0, 'NearbyChat', 'ability background: cancelling inference and near-field link');
+    probe.cancel();
+    nearbyChannel.suspend();
+  }
   onDestroy(): void { probe.cancel(); nearbyChannel.destroy(); }
 }

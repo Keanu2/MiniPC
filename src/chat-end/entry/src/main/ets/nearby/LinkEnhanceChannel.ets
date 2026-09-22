@@ -1,11 +1,12 @@
 import { distributedDeviceManager as dm, linkEnhance } from '@kit.DistributedServiceKit';
 import { abilityAccessCtrl, common } from '@kit.AbilityKit';
+import { preferences } from '@kit.ArkData';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { connection as btConnection, ble } from '@kit.ConnectivityKit';
 import { util } from '@kit.ArkTS';
 import { encodeMessage, MessageAssembler, WireMessage } from '../protocol/ChatProtocol';
-import { COMPUTE_ADV_TYPE, COMPUTE_MANUFACTURE_ID, IS_SERVER } from './NearbyConfig';
+import { COMPUTE_ADV_KEY_BYTES, COMPUTE_ADV_TYPE, COMPUTE_MANUFACTURE_ID, IS_SERVER } from './NearbyConfig';
 
 const BUNDLE = 'com.jiuwen.registrychatui';
 const SERVICE = 'nearby-compute';
@@ -17,20 +18,30 @@ class BleHit {
   name: string;
   rssi: number;
   compute: boolean;
-  constructor(mac: string, name: string, rssi: number, compute: boolean) {
+  slot: number;
+  /** Identity fingerprint advertised by the sender; '' for older builds. */
+  key: string;
+  constructor(mac: string, name: string, rssi: number, compute: boolean, slot: number = 0, key: string = '') {
     this.mac = mac;
     this.name = name;
     this.rssi = rssi;
     this.compute = compute;
+    this.slot = slot;
+    this.key = key;
   }
 }
 
 export class AdvertisedCompute {
   name: string;
   mac: string;
-  constructor(name: string, mac: string) {
+  slot: number;
+  /** Stable across reconnects, unlike the random BLE address in `mac`. */
+  key: string;
+  constructor(name: string, mac: string, slot: number = 0, key: string = '') {
     this.name = name;
     this.mac = mac;
+    this.slot = slot;
+    this.key = key;
   }
 }
 
@@ -39,16 +50,91 @@ function namesMatch(left: string, right: string): boolean {
     (left === right || left.indexOf(right) >= 0 || right.indexOf(left) >= 0);
 }
 
-function computeManufacture(): ble.ManufactureData {
-  const bytes = new Uint8Array(1);
+function randomId(): string {
+  let id = '';
+  while (id.length < 16) id += Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
+  return id.substring(0, 16);
+}
+
+/** Stable identity for protocol/session deduplication; never used as a trust decision. */
+function installIdOf(context: common.UIAbilityContext | null): string {
+  if (context === null) return '';
+  try {
+    const store = preferences.getPreferencesSync(context, { name: 'nearby-identity' });
+    const stored = store.getSync('installId', '').toString();
+    if (stored.length > 0) return stored;
+    const drawn = randomId();
+    store.putSync('installId', drawn);
+    store.flush();
+    return drawn;
+  } catch (_) { return ''; }
+}
+
+function computeManufacture(slot: number, key: string): ble.ManufactureData {
+  const bytes = new Uint8Array(2 + COMPUTE_ADV_KEY_BYTES);
   bytes[0] = COMPUTE_ADV_TYPE;
+  bytes[1] = slot > 0 && slot < 256 ? slot : 0;
+  const keyBytes = keyBytesOf(key);
+  for (let i = 0; i < COMPUTE_ADV_KEY_BYTES; i++) bytes[2 + i] = keyBytes[i];
   return {
     manufactureId: COMPUTE_MANUFACTURE_ID,
     manufactureValue: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   };
 }
 
-function advMarksCompute(data: ArrayBuffer): boolean {
+/** Stable, short fingerprint of a device identity, carried in the advertisement. */
+function advKeyOf(value: string): string {
+  const text = value.trim().toLowerCase();
+  if (text.length === 0) return '';
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash ^ text.charCodeAt(i)) >>> 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  let hex = (hash >>> 0).toString(16);
+  while (hex.length < 8) hex = '0' + hex;
+  return hex;
+}
+
+function keyBytesOf(value: string): Uint8Array {
+  const bytes = new Uint8Array(COMPUTE_ADV_KEY_BYTES);
+  const hex = advKeyOf(value);
+  for (let i = 0; i < COMPUTE_ADV_KEY_BYTES; i++) {
+    const at = i * 2;
+    bytes[i] = at + 2 <= hex.length ? parseInt(hex.substring(at, at + 2), 16) : 0;
+  }
+  return bytes;
+}
+
+function advComputeSlot(data: ArrayBuffer): number {
+  const at = advComputeOffset(data);
+  if (at < 0) return -1;
+  const bytes = new Uint8Array(data);
+  return at + 1 < bytes.length ? bytes[at + 1] : 0;
+}
+
+/** Advertised identity fingerprint, or '' when the sender predates the field. */
+function advComputeKey(data: ArrayBuffer): string {
+  const at = advComputeOffset(data);
+  if (at < 0) return '';
+  const bytes = new Uint8Array(data);
+  // The last key byte lives at at + 1 + KEY_BYTES; only a payload shorter than that
+  // is absent. Using >= here dropped a key that ends exactly at the packet boundary.
+  if (at + 2 + COMPUTE_ADV_KEY_BYTES > bytes.length) return '';
+  let hex = '';
+  for (let i = 0; i < COMPUTE_ADV_KEY_BYTES; i++) {
+    const byte = bytes[at + 2 + i];
+    if (byte < 16) hex += '0';
+    hex += byte.toString(16);
+  }
+  return hex;
+}
+
+/**
+ * Offset of our manufacturer payload inside a raw advertisement, or -1 when this
+ * is not one of ours. Payload layout is [type][slot][key bytes...].
+ */
+function advComputeOffset(data: ArrayBuffer): number {
   const bytes = new Uint8Array(data);
   let index = 0;
   while (index + 1 < bytes.length) {
@@ -59,17 +145,19 @@ function advMarksCompute(data: ArrayBuffer): boolean {
     const type = bytes[index + 1];
     if (type === 0xFF && length >= 4) {
       const id = bytes[index + 2] | (bytes[index + 3] << 8);
-      if (id === COMPUTE_MANUFACTURE_ID && bytes[index + 4] === COMPUTE_ADV_TYPE) return true;
+      if (id === COMPUTE_MANUFACTURE_ID && bytes[index + 4] === COMPUTE_ADV_TYPE) return index + 4;
     }
     index = end;
   }
-  return false;
+  return -1;
 }
 
 class Peer {
   epoch: number;
   peerId: string;
   connection: linkEnhance.Connection;
+  deviceUid: string = '';
+  fromServer: boolean;
   ready: boolean = false;
   opened: boolean = false;
   hello: boolean = false;
@@ -87,10 +175,11 @@ class Peer {
   serviceId: string = '';
   serviceTimer: number = -1;
   end: () => void = () => {};
-  constructor(epoch: number, peerId: string, connection: linkEnhance.Connection) {
+  constructor(epoch: number, peerId: string, connection: linkEnhance.Connection, fromServer: boolean) {
     this.epoch = epoch;
     this.peerId = peerId;
     this.connection = connection;
+    this.fromServer = fromServer;
     this.ended = new Promise<void>(resolve => { this.end = resolve; });
     this.connectionReady = new Promise<boolean>(resolve => { this.settleConnection = resolve; });
   }
@@ -119,20 +208,60 @@ export class LinkEnhanceChannel {
   private onMessage: ((message: WireMessage, epoch: number) => void) | null = null;
   private onConnection: ((connected: boolean, epoch: number) => void) | null = null;
   private status: string = IS_SERVER ? '可本机对话 · 请启用近场连接' : '正在寻找算力设备…';
+  private selfSlot: number = 0;
+  private scanCancel: (() => void) | null = null;
 
   initialize(context: common.UIAbilityContext): void { this.context = context; }
   operation(): number { return this.lifecycle; }
   resume(): void { this.foreground = true; }
   suspend(): void { this.foreground = false; this.disconnect(); }
+  isForeground(): boolean { return this.foreground; }
   private checkOperation(operation: number): void {
     if (!this.foreground || operation !== this.lifecycle || this.context === null) {
       throw new Error('连接操作已取消，请回到应用后重试。');
     }
   }
   isConnected(): boolean { return this.peers.some((item: Peer) => item.ready); }
+  isListening(): boolean { return this.server !== null; }
   isConnecting(): boolean { return this.peers.some((item: Peer) => !item.ready); }
   connectedCount(): number { return this.peers.filter((item: Peer) => item.ready).length; }
   getStatus(): string { return this.status; }
+  localName(): string {
+    try {
+      const name = btConnection.getLocalName();
+      if (name && name.length > 0) return name;
+    } catch (_) {}
+    return '聊天设备';
+  }
+  localUid(): string { return installIdOf(this.context); }
+  selfLabel(): string {
+    return this.selfSlot > 0 ? '聊天设备' + String(this.selfSlot) : '';
+  }
+  private trustedList(): dm.DeviceBasicInfo[] {
+    if (this.manager === null) return [];
+    try {
+      return this.manager.getAvailableDeviceListSync().filter((device: dm.DeviceBasicInfo) =>
+        typeof device.networkId === 'string' && device.networkId.length > 0);
+    } catch (_) { return []; }
+  }
+  private compactId(value: string): string {
+    return value.replace(/:/g, '').toLowerCase();
+  }
+  private idsMatch(left: string, right: string): boolean {
+    if (left.length === 0 || right.length === 0) return false;
+    if (left === right) return true;
+    const a = this.compactId(left);
+    const b = this.compactId(right);
+    return a.length >= 8 && b.length >= 8 && (a === b || a.indexOf(b) >= 0 || b.indexOf(a) >= 0);
+  }
+  private isTrustedPeer(peerId: string, name: string = ''): boolean {
+    const trusted = this.trustedList();
+    for (const device of trusted) {
+      if (this.idsMatch(peerId, device.deviceId) || this.idsMatch(peerId, device.networkId || '')) return true;
+      if (name.length > 0 && namesMatch(device.deviceName, name)) return true;
+    }
+    return false;
+  }
   waitUntilConnected(): Promise<boolean> {
     const pending = this.peers.find((item: Peer) => !item.ready);
     const ready = this.peers.find((item: Peer) => item.ready);
@@ -267,27 +396,31 @@ export class LinkEnhanceChannel {
     const devices = await this.devices();
     this.update('正在寻找算力设备…');
     this.lastHits = await this.scanHits(COMPUTE_SCAN_MS, true);
-    const computeHits = this.lastHits.filter((item: BleHit) => item.compute);
-    hilog.info(0, 'NearbyChat', 'compute hits=%{public}d available=%{public}d', computeHits.length, devices.length);
-    if (computeHits.length === 0) return [];
+    const ads = this.advertisedComputes();
+    hilog.info(0, 'NearbyChat', 'compute ads=%{public}d available=%{public}d', ads.length, devices.length);
+    if (ads.length === 0) return [];
+    // Return one entry per advertised compute, not one per name match. Matching by
+    // name collapsed two boxes that both call themselves 算力设备 into a single
+    // list entry, and the unmatched case threw the whole list away.
     const matched: dm.DeviceBasicInfo[] = [];
     const rssi: number[] = [];
-    for (const device of devices) {
-      let best = -9999;
-      let found = false;
-      for (const hit of computeHits) {
-        if (!namesMatch(device.deviceName, this.hitName(hit))) continue;
-        found = true;
-        if (hit.rssi > best) best = hit.rssi;
+    for (let i = 0; i < ads.length; i++) {
+      const hit = this.lastHits.find((item: BleHit) => item.mac === ads[i].mac);
+      const name = hit !== undefined ? this.hitName(hit) : '';
+      let linked: dm.DeviceBasicInfo | undefined = undefined;
+      for (const device of devices) {
+        if (name.length > 0 && namesMatch(device.deviceName, name)) {
+          linked = device;
+          break;
+        }
       }
-      if (found) {
-        matched.push(device);
-        rssi.push(best);
+      if (linked === undefined) {
+        // Not in the DeviceManager list (not paired yet): the MAC is still the only
+        // handle we have, so keep the card and let connectAdvertiser decide.
+        linked = this.virtualDevice(ads[i].mac, ads[i].name);
       }
-    }
-    if (matched.length === 0 && computeHits.length > 0) {
-      hilog.info(0, 'NearbyChat', 'compute unnamed hits=%{public}d, connect by MAC', computeHits.length);
-      return [];
+      matched.push(linked);
+      rssi.push(hit === undefined ? -9999 : hit.rssi);
     }
     for (let i = 0; i < matched.length; i++) {
       let best = i;
@@ -302,6 +435,17 @@ export class LinkEnhanceChannel {
     return matched;
   }
 
+  /**
+   * A card for an advertised box that DeviceManager does not list yet. The empty
+   * networkId is what marks it as a card rather than a dialable device: connect()
+   * refuses an id that is not in devices(), so this can only be reached through
+   * connectAdvertiser(mac), which speaks BLE and never reads networkId.
+   */
+  private virtualDevice(mac: string, name: string): dm.DeviceBasicInfo {
+    const device: dm.DeviceBasicInfo = { deviceId: mac, deviceName: name, deviceType: '', networkId: '' };
+    return device;
+  }
+
   hasComputeHits(): boolean {
     return this.lastHits.some((item: BleHit) => item.compute);
   }
@@ -312,12 +456,32 @@ export class LinkEnhanceChannel {
       if (hit.compute) hits.push(hit);
     }
     hits.sort((left: BleHit, right: BleHit) => right.rssi - left.rssi);
-    const result: AdvertisedCompute[] = [];
+    const trusted: AdvertisedCompute[] = [];
+    const seen: string[] = [];
     for (const hit of hits) {
+      // A rotating BLE address makes the MAC useless as identity: dedupe on the
+      // advertised fingerprint when we have one, and only fall back to the address.
+      const mark = hit.key.length > 0 ? 'key:' + hit.key : 'mac:' + hit.mac;
+      if (seen.indexOf(mark) >= 0) continue;
       const name = this.hitName(hit);
-      result.push(new AdvertisedCompute(name.length > 0 ? name : hit.mac, hit.mac));
+      if (!this.isTrustedPeer(hit.mac, name)) continue;
+      seen.push(mark);
+      const label = hit.slot >= 1 ? '算力设备' + String(hit.slot) : '算力设备';
+      trusted.push(new AdvertisedCompute(label, hit.mac, hit.slot, hit.key));
     }
-    return result;
+    return trusted;
+  }
+
+  /**
+   * Every advertised compute, strongest signal first. Handing the caller a single
+   * candidate is what made the chooser useless and what made a reconnect silently
+   * land on whichever box happened to be strongest.
+   */
+  connectComputes(): AdvertisedCompute[] {
+    // A chat client is never a coordinator. An unnumbered or slot-2 compute may
+    // still be discovering the mesh, but only the elected slot-1 hub can accept
+    // a chat request. Do not silently fall back to the strongest other box.
+    return this.advertisedComputes().filter((item: AdvertisedCompute) => item.slot === 1);
   }
 
   private advertise(): void {
@@ -325,7 +489,7 @@ export class LinkEnhanceChannel {
     const setting: ble.AdvertiseSetting = { interval: 160, connectable: true };
     const adv: ble.AdvertiseData = {
       serviceUuids: [],
-      manufactureData: [computeManufacture()],
+      manufactureData: [computeManufacture(0, this.localUid())],
       serviceData: [],
       includeDeviceName: false
     };
@@ -386,14 +550,17 @@ export class LinkEnhanceChannel {
   async connectToAdvertisers(operation: number = this.lifecycle): Promise<void> {
     if (IS_SERVER || this.peers.length > 0) return;
     this.checkOperation(operation);
-    const available = this.manager === null ? [] :
-      this.manager.getAvailableDeviceListSync().filter((device: dm.DeviceBasicInfo) =>
-        typeof device.networkId === 'string' && device.networkId.length > 0);
-    if (available.length === 0) throw new Error('设备未组网，请先在超级终端中连接模型手机。');
+    if (this.trustedList().length === 0) {
+      throw new Error('还没有已组网设备。请用同一华为账号在超级终端中连接后再试。');
+    }
     this.update('正在连接算力设备…');
-    const macs = this.advertiserMacs('');
-    hilog.info(0, 'NearbyChat', 'le-connect advertisers=%{public}d available=%{public}d', macs.length, available.length);
-    if (macs.length === 0) throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
+    // Hub-only, the same list connectComputes() hands the page: dialling a follower
+    // ends with it dropping the link, so it is never a fallback worth taking.
+    const macs = this.hubAdvertiserMacs();
+    hilog.info(0, 'NearbyChat', 'le-connect trusted hubs=%{public}d', macs.length);
+    if (macs.length === 0) {
+      throw new Error('算力设备1尚未确定或不可用，请等待算力设备组网后重试。');
+    }
     for (const mac of macs) {
       this.checkOperation(operation);
       if (this.peers.length > 0) return;
@@ -407,12 +574,13 @@ export class LinkEnhanceChannel {
   async connectAdvertiser(mac: string, operation: number = this.lifecycle): Promise<void> {
     if (IS_SERVER || this.peers.length > 0) return;
     this.checkOperation(operation);
-    const available = this.manager === null ? [] :
-      this.manager.getAvailableDeviceListSync().filter((device: dm.DeviceBasicInfo) =>
-        typeof device.networkId === 'string' && device.networkId.length > 0);
-    if (available.length === 0) throw new Error('设备未组网，请先在超级终端中连接模型手机。');
+    const hit = this.lastHits.find((item: BleHit) => item.mac === mac);
+    const name = hit !== undefined ? this.hitName(hit) : '';
+    if (!this.isTrustedPeer(mac, name)) {
+      throw new Error('附近的算力还没组网。请用同一华为账号在超级终端中连接后再试。');
+    }
     this.update('正在连接算力设备…');
-    hilog.info(0, 'NearbyChat', 'le-connect advertiser=%{public}s available=%{public}d', mac, available.length);
+    hilog.info(0, 'NearbyChat', 'le-connect advertiser=%{public}s', mac);
     if (mac.length === 0) throw new Error('未发现算力设备。请打开模型手机并保持近场开启后重试。');
     const ok = await this.tryConnect('compute', mac);
     if (ok) return;
@@ -441,9 +609,32 @@ export class LinkEnhanceChannel {
     return macs;
   }
 
+  /** Trusted advertisers that announce slot 1; the only hosts a chat may dial. */
+  private hubAdvertiserMacs(): string[] {
+    return this.advertiserMacsMatching(true);
+  }
+
+  private advertiserMacsMatching(hubOnly: boolean): string[] {
+    const macs: string[] = [];
+    for (const mac of this.advertiserMacs('')) {
+      const hit = this.lastHits.find((item: BleHit) => item.mac === mac);
+      if (hit === undefined) continue;
+      if (hubOnly && hit.slot !== 1) continue;
+      if (this.isTrustedPeer(mac, this.hitName(hit))) macs.push(mac);
+    }
+    return macs;
+  }
+
   private scanHits(timeoutMs: number, computeOnly: boolean): Promise<BleHit[]> {
+    this.cancelScan();
+    // BLEDeviceFind and stopBLEScan are process-global. Finish an older discovery
+    // before installing a new listener: the connect path retries computeDevices()
+    // up to three times, and an older scan's timeout would otherwise stop the
+    // radio and remove the listener out from under the newer one.
     return new Promise<BleHit[]>((resolve) => {
       const hits: BleHit[] = [];
+      let timer: number = -1;
+      let settled = false;
       const options: ble.ScanOptions = {
         interval: 0,
         dutyMode: ble.ScanDuty.SCAN_MODE_LOW_LATENCY,
@@ -452,43 +643,71 @@ export class LinkEnhanceChannel {
       const collect = (results: Array<ble.ScanResult>): void => {
         for (const item of results) {
           let compute = false;
-          try { compute = advMarksCompute(item.data); } catch (_) { compute = false; }
+          let slot = 0;
+          let key = '';
+          try {
+            slot = advComputeSlot(item.data);
+            compute = slot >= 0;
+            if (slot < 0) slot = 0;
+            if (compute) key = advComputeKey(item.data);
+          } catch (_) { compute = false; }
           const existing = hits.find((hit: BleHit) => hit.mac === item.deviceId);
           if (existing !== undefined) {
             if (compute) existing.compute = true;
+            if (slot > existing.slot) existing.slot = slot;
+            if (existing.key.length === 0 && key.length > 0) existing.key = key;
             if (existing.name.length === 0 && (item.deviceName || '').length > 0) existing.name = item.deviceName;
             continue;
           }
-          const hit = new BleHit(item.deviceId, item.deviceName || '', item.rssi, compute);
+          const hit = new BleHit(item.deviceId, item.deviceName || '', item.rssi, compute, compute ? slot : 0,
+            compute ? key : '');
           hits.push(hit);
-          hilog.info(0, 'NearbyChat', 'le-scan mac=%{public}s name=%{public}s rssi=%{public}d compute=%{public}s',
-            hit.mac, hit.name, hit.rssi, String(hit.compute));
+          hilog.info(0, 'NearbyChat',
+            'le-scan mac=%{public}s name=%{public}s rssi=%{public}d compute=%{public}s slot=%{public}d key=%{public}s',
+            hit.mac, hit.name, hit.rssi, String(hit.compute), hit.slot, hit.key);
         }
       };
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { ble.stopBLEScan(); } catch (_) {}
+        try { ble.off('BLEDeviceFind', collect); } catch (_) {
+          try { ble.off('BLEDeviceFind'); } catch (_) {}
+        }
+        if (this.scanCancel === finish) this.scanCancel = null;
+        if (computeOnly) resolve(hits.filter((item: BleHit) => item.compute));
+        else resolve(hits);
+      };
+      this.scanCancel = finish;
       try {
         ble.on('BLEDeviceFind', collect);
         try {
           ble.startBLEScan([{ manufactureId: COMPUTE_MANUFACTURE_ID }], options);
           hilog.info(0, 'NearbyChat', 'le-scan started manufacture');
         } catch (first) {
-          ble.startBLEScan(null, options);
-          hilog.info(0, 'NearbyChat', 'le-scan started unfiltered after=%{public}s',
-            String((first as BusinessError).code));
+          if (this.server !== null || this.peers.length > 0) {
+            hilog.warn(0, 'NearbyChat', 'le-scan skip unfiltered while serving code=%{public}s',
+              String((first as BusinessError).code));
+          } else {
+            ble.startBLEScan(null, options);
+            hilog.info(0, 'NearbyChat', 'le-scan started unfiltered after=%{public}s',
+              String((first as BusinessError).code));
+          }
         }
       } catch (error) {
         hilog.warn(0, 'NearbyChat', 'le-scan start failed code=%{public}s', String((error as BusinessError).code));
-        resolve([]);
+        finish();
         return;
       }
-      setTimeout(() => {
-        try { ble.stopBLEScan(); } catch (_) {}
-        try { ble.off('BLEDeviceFind', collect); } catch (_) {
-          try { ble.off('BLEDeviceFind'); } catch (_) {}
-        }
-        if (computeOnly) resolve(hits.filter((item: BleHit) => item.compute));
-        else resolve(hits);
-      }, timeoutMs);
+      timer = setTimeout(finish, timeoutMs);
     });
+  }
+
+  private cancelScan(): void {
+    const cancel = this.scanCancel;
+    this.scanCancel = null;
+    cancel?.();
   }
 
   private tryConnect(kind: string, deviceId: string): Promise<boolean> {
@@ -533,10 +752,10 @@ export class LinkEnhanceChannel {
   }
 
   private attach(incoming: linkEnhance.Connection, peerId: string, fromServer: boolean): Peer {
-    const peer = new Peer(++this.epoch, peerId, incoming);
+    const peer = new Peer(++this.epoch, peerId, incoming, fromServer);
     this.peers.push(peer);
     incoming.on('disconnected', (reason: number) => {
-      hilog.info(0, 'NearbyChat', 'le-disconnect epoch=%{public}d peer=%{public}s reason=%{public}d',
+      hilog.info(0, 'NearbyChat', 'le-disconnect epoch=%{public}d role=compute peer=%{public}s reason=%{public}d',
         peer.epoch, peer.peerId, reason);
       this.drop(peer, '连接已断开（原因' + String(reason) + '），请重新连接。');
     });
@@ -569,7 +788,9 @@ export class LinkEnhanceChannel {
   private opened(peer: Peer): void {
     if (!this.holds(peer) || peer.opened) return;
     peer.opened = true;
-    if (!IS_SERVER) this.write(peer, { type: 'hello', peerRole: 'chat' });
+    if (!IS_SERVER) this.write(peer, {
+      type: 'hello', peerRole: 'chat', name: this.localName(), deviceUid: this.localUid()
+    });
   }
 
   private receive(peer: Peer, message: WireMessage): void {
@@ -578,11 +799,33 @@ export class LinkEnhanceChannel {
       message.type, peer.epoch, peer.peerId, String(peer.ready));
     if (!peer.ready) {
       if (IS_SERVER && message.type === 'hello' && !peer.hello) {
+        const name = (typeof message.name === 'string' ? message.name : '');
+        if (!this.isTrustedPeer(peer.peerId, name)) {
+          hilog.warn(0, 'NearbyChat', 'le-hello untrusted peer=%{public}s name=%{public}s', peer.peerId, name);
+          this.drop(peer, '不是同账号或可信设备，请先在超级终端中连接。');
+          return;
+        }
         peer.hello = true;
+        peer.deviceUid = message.deviceUid || '';
         if (this.onMessage !== null) this.acknowledge(peer);
       } else if (!IS_SERVER && message.type === 'hello_ack' && peer.opened) {
+        peer.deviceUid = message.deviceUid || '';
+        if (typeof message.slot === 'number' && message.slot >= 1) this.selfSlot = Math.floor(message.slot);
         this.ready(peer);
       } else { this.drop(peer, '对端不是兼容的聊天应用。'); }
+      return;
+    }
+    if (!IS_SERVER && message.type === 'hello_ack') {
+      // The hub re-sends this when chat numbering changes. It is a live slot update,
+      // not a stray frame: re-read the number and let the page retitle itself.
+      if (typeof message.slot === 'number' && message.slot >= 1) {
+        const slot = Math.floor(message.slot);
+        if (slot !== this.selfSlot) {
+          this.selfSlot = slot;
+          hilog.info(0, 'NearbyChat', 'le-chat slot=%{public}d', slot);
+        }
+      }
+      this.onConnection?.(true, peer.epoch);
       return;
     }
     if (!IS_SERVER && message.type === 'prepared') {
@@ -599,7 +842,7 @@ export class LinkEnhanceChannel {
 
   private acknowledge(peer: Peer): void {
     if (!this.holds(peer) || peer.ready) return;
-    this.write(peer, { type: 'hello_ack', peerRole: 'compute' });
+    this.write(peer, { type: 'hello_ack', peerRole: 'compute', deviceUid: this.localUid() });
     this.ready(peer);
   }
 
@@ -633,20 +876,42 @@ export class LinkEnhanceChannel {
     hilog.info(0, 'NearbyChat', 'le-send type=%{public}s epoch=%{public}d peer=%{public}s frames=%{public}d',
       message.type, peer.epoch, peer.peerId, frames.length);
     ++peer.pending;
-    peer.writes = peer.writes.then((): boolean => {
+    peer.writes = peer.writes.then(async (): Promise<boolean> => {
       try {
         for (const frame of frames) {
-          if (!this.holds(peer)) return false;
-          peer.connection.sendData(toBuffer(frame));
+          if (!await this.sendFrame(peer, frame)) return false;
         }
         return this.holds(peer);
-      } catch (error) {
-        hilog.error(0, 'NearbyChat', 'le-send failed code=%{public}s', String((error as BusinessError).code));
-        this.drop(peer, '消息发送失败，请重新连接。');
-        return false;
       } finally { --peer.pending; }
     });
     return peer.writes;
+  }
+
+  private sendFrame(peer: Peer, frame: string, attempt: number = 0): Promise<boolean> {
+    if (!this.holds(peer)) return Promise.resolve(false);
+    const data = toBuffer(frame);
+    if (data.byteLength < 1 || data.byteLength > 1024) {
+      hilog.error(0, 'NearbyChat', 'le-send rejected bytes=%{public}d', data.byteLength);
+      return Promise.resolve(false);
+    }
+    try {
+      peer.connection.sendData(data);
+      return Promise.resolve(true);
+    } catch (error) {
+      const code = (error as BusinessError).code;
+      if ((code === 32390205 || code === 32390206 || code === 32390300) && attempt < 2) {
+        hilog.warn(0, 'NearbyChat', 'le-send retry code=%{public}s bytes=%{public}d attempt=%{public}d',
+          String(code), data.byteLength, attempt + 1);
+        return new Promise<boolean>(resolve => setTimeout(() => {
+          this.sendFrame(peer, frame, attempt + 1).then(resolve);
+        }, 120 * (attempt + 1)));
+      }
+      hilog.error(0, 'NearbyChat', 'le-send failed code=%{public}s bytes=%{public}d', String(code), data.byteLength);
+      // 32390206 is a local parameter rejection. Dropping a healthy link turned one
+      // rejected telemetry frame into an endless disconnect/reconnect loop.
+      if (code !== 32390206) this.drop(peer, '消息发送失败，请重新连接。');
+      return Promise.resolve(false);
+    }
   }
 
   private refreshStatus(): void {
@@ -682,6 +947,7 @@ export class LinkEnhanceChannel {
 
   disconnect(): void {
     ++this.lifecycle;
+    this.cancelScan();
     const current = this.peers.slice();
     for (const peer of current) this.drop(peer, '连接已结束，请重新连接。');
     if (this.server !== null) {

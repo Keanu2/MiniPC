@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const ts = require(process.argv[2] || '/Applications/DevEco-Studio.app/Contents/tools/ohpm/node_modules/typescript/lib/typescript.js');
+const { transpile } = require('../../../../../../tests/harness.cjs');
 let now = 0;
 const context = { exports: {}, Uint8Array, Date: { now: () => now }, require: name => {
   assert.equal(name, '@kit.ArkTS');
@@ -15,9 +15,7 @@ const context = { exports: {}, Uint8Array, Date: { now: () => now }, require: na
     }
   } };
 } };
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(__dirname + '/ChatProtocol.ets', 'utf8'), {
-  compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
-}).outputText, context);
+vm.runInNewContext(transpile(__dirname + '/ChatProtocol.ets'), context);
 const { encodeMessage, MessageAssembler, validMessage } = context.exports;
 const request = { type: 'request', requestId: 'r', messages: [{ role: 'user', content: '中文😀'.repeat(400) }] };
 const frames = encodeMessage(request, 'message_1');
@@ -49,6 +47,8 @@ assert.throws(() => encodeMessage({ type: 'hello' }, 'x'.repeat(65)));
 assert(!validMessage(null));
 assert(!validMessage({ ...request, messages: [{ role: 'user', content: 'x'.repeat(1801) }] }));
 assert(!validMessage({ ...request, messages: Array(8).fill(request.messages[0]) }));
+assert(validMessage({ ...request, sched: true, origin: '聊天设备2' }));
+assert(!validMessage({ ...request, sched: true, origin: 'x'.repeat(129) }));
 const bounded = new MessageAssembler();
 for (let i = 0; i < 8; i++) bounded.receive(encodeMessage(request, 'id' + i)[0]);
 assert.throws(() => bounded.receive(encodeMessage(request, 'id8')[0]), /Too many/);
@@ -74,6 +74,10 @@ assert.equal(expiry.receive(encodeMessage({ type: 'hello' }, 'idle')[0]).type, '
 assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello' }));
 assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello', peerRole: 'chat' }));
 assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello_ack', peerRole: 'compute' }));
+assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello_ack', peerRole: 'compute', slot: 2 }));
+assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello', peerRole: 'compute', deviceUid: 'install-1234' }));
+assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello', deviceUid: 'x'.repeat(65) }));
+assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello_ack', slot: 0 }));
 assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello', peerRole: 'other' }));
 now += 1000000000;
 assert.doesNotThrow(() => expiry.checkExpiry(), 'completed message never creates an inference timeout');
@@ -92,6 +96,8 @@ const sync = {
   devices: [{ id: 'self', name: '本机', role: 'self', model: 'Qwen', memUsage: 10, modelRequests: 0 }]
 };
 assert(validMessage(sync));
+assert(validMessage({ ...sync, devices: [{ id: 'temporary-link', deviceUid: 'stable-install', role: 'compute' }] }));
+assert(!validMessage({ ...sync, devices: [{ id: 'temporary-link', deviceUid: 'x'.repeat(65), role: 'compute' }] }));
 assert(!validMessage({ ...sync, devices: null }));
 assert(validMessage({
   protocol: 'nearby-chat-v1', type: 'request', requestId: 'r',

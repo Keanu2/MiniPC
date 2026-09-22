@@ -2,13 +2,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const ts = require(process.argv[2] || '/Applications/DevEco-Studio.app/Contents/tools/ohpm/node_modules/typescript/lib/typescript.js');
+const { transpile, transpileSource } = require('../../../../../../tests/harness.cjs');
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 function loadEts(file) {
   const box = { exports: {}, Error, Map, Math, Number, Date, Promise, JSON };
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
-    compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
-  }).outputText, box);
+  vm.runInNewContext(transpile(file), box);
   return box.exports;
 }
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
@@ -26,8 +24,16 @@ function setup(isServer) {
     connect: async (id, expected) => { assert.equal(id, 'current'); assert.equal(expected, operation); connections++; await behavior.connect(); },
     waitUntilConnected: () => behavior.wait(), checkService: () => { checks++; return behavior.check(); },
     connectedCount: () => connected ? 1 : 0, hasEpoch: () => connected, peerInfos: () => [],
-    peerRole: () => '', connectOtherComputes: async () => {}, localName: () => '算力设备',
-    disconnect: () => { disconnects++; operation++; connected = false; },
+    peerRole: () => '', connectOtherComputes: async () => { behavior.meshCalls = (behavior.meshCalls || 0) + 1; },
+    setActiveJobs: count => { behavior.activeJobs = count; },
+    localName: () => '算力设备',
+    localUid: () => 'self-uid',
+    isListening: () => !!behavior.listening, prepare: async () => { behavior.listening = true; },
+    selfLabel: () => '算力设备1',
+    selfComputeNumber: () => 1,
+    applyRemoteRoster() {},
+    setSelfMem() {}, setPeerMem() {}, setRemoteChats(names) { behavior.remoteChats = names.slice(); },
+    disconnect: () => { disconnects++; operation++; connected = false; behavior.listening = false; },
     getStatus: () => connected ? '近场已连接' : '未连接',
     send: async message => { sent.push(message); return true; }
   };
@@ -38,7 +44,7 @@ function setup(isServer) {
     } } };
     if (name === '@kit.ArkTS') return { util: { generateRandomUUID: () => 'request-1' } };
     if (name === '@kit.PerformanceAnalysisKit') return { hilog: { info() {} } };
-    if (name === '../nearby/NearbyChannel' || name === '../nearby/LinkEnhanceChannel') {
+    if (name === '../nearby/LinkEnhanceChannel') {
       return { nearbyChannel: channel };
     }
     if (name === '../nearby/NearbyConfig') return { IS_SERVER: !!isServer };
@@ -57,7 +63,7 @@ function setup(isServer) {
     }
     if (name === '../ui/ChatBridge') return loadEts(__dirname + '/../ui/ChatBridge.ets');
     if (name === '../cluster/DeviceInfo') return {
-      DEVICE_INFO_POLL_MS: 3000,
+      DEVICE_INFO_POLL_MS: 5000,
       applyDeviceInfo(target, message) {
         if (typeof message.name === 'string' && message.name.length > 0) target.name = message.name;
         if (typeof message.memTotal === 'number') target.memTotal = message.memTotal;
@@ -83,9 +89,7 @@ function setup(isServer) {
   let source = fs.readFileSync(__dirname + '/Index.ets', 'utf8');
   source = source.replace(/@Entry\s+@Component\s+struct Index/, 'export class Index');
   source = source.slice(0, source.indexOf('  build() {')) + '\n}';
-  vm.runInNewContext(ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS }
-  }).outputText, context);
+  vm.runInNewContext(transpileSource(source), context);
   const page = new context.exports.Index(); page.pageReady = true;
   return { page, channel, behavior, events, sent, counts: () => ({ connections, disconnects, checks }), setConnected: value => { connected = value; } };
 }
@@ -133,7 +137,7 @@ function setup(isServer) {
 // Execute the actual HTML event handlers with a small DOM stub.
 {
   const makeElement = () => {
-    const el = { handlers: {}, value: '', style: {}, attrs: {}, classList: { add() {}, remove() {}, toggle() {} },
+    const el = { handlers: {}, value: '', textContent: '', innerHTML: '', style: {}, attrs: {}, classList: { add() {}, remove() {}, toggle() {} },
       addEventListener(type, fn) { this.handlers[type] = fn; },
       setAttribute(k, v) { this.attrs[k] = v; },
       getAttribute(k) { return this.attrs[k]; },
@@ -141,7 +145,7 @@ function setup(isServer) {
     return el;
   };
   const elements = Object.fromEntries(['history', 'prompt', 'send', 'connect', 'composer', 'connection',
-    'stats', 'devices', 'pick', 'preview', 'previewImg', 'previewClear'].map(id => [id, makeElement()]));
+    'stats', 'devices', 'pick', 'preview', 'previewImg', 'previewClear', 'title'].map(id => [id, makeElement()]));
   const document = { handlers: {}, getElementById: id => elements[id], createElement: makeElement,
     addEventListener(type, fn) { this.handlers[type] = fn; } };
   let preparations = 0;
@@ -172,6 +176,46 @@ function setup(isServer) {
   assert.equal(elements.send.disabled, false, 'image alone enables send');
   elements.composer.handlers.submit({ preventDefault() {} });
   assert.equal(sent, '请描述这张图片。');
+  window.onNativeEvent({
+    kind: 'dashboard', running: 2, jobs: [], selfLabel: '算力设备2',
+    devices: [
+      { role: 'self', name: '算力设备2', ready: true, jobs: 2, memUsage: 41, model: 'Qwen2.5-7B-Instruct' },
+      { role: 'chat', name: '聊天设备1', ready: true, jobs: 1 }
+    ]
+  });
+  assert.equal(elements.title.textContent, '算力设备2');
+  assert(elements.devices.innerHTML.includes('算力设备2'));
+  assert(elements.devices.innerHTML.includes('推理 2'), 'compute card shows running job count');
+  window.onNativeEvent({
+    kind: 'dashboard', running: 1, jobs: [], selfLabel: '算力设备1',
+    devices: [
+      { role: 'self', name: '算力设备1', ready: true, jobs: 1, memUsage: 41, modelRequests: 2, model: 'Qwen2.5-7B-Instruct' }
+    ]
+  });
+  assert(elements.devices.innerHTML.includes('推理 1'), 'card uses jobs, not sampled+inflight');
+  assert(!elements.devices.innerHTML.includes('推理 2'), 'inflated modelRequests must not double the badge');
+  assert(elements.devices.innerHTML.includes('内存'), 'compute card still shows memory');
+  window.onNativeEvent({ kind: 'dashboard', running: 1, selfLabel: '算力设备1', devices: [], jobs: [{
+    id: 'time-1', key: '0:time-1', source: '算力设备1', origin: '聊天设备1', question: '时间测试', answer: '',
+    chars: 0, startedAt: new Date(2026, 8, 21, 10, 30, 45).getTime(), firstAt: 0, endedAt: 0,
+    running: true, error: false, elapsedMs: 1200
+  }] });
+  assert(elements.history.innerHTML.includes('创建 09-21 10:30:45'), 'task card shows its creation time');
+  // A streaming reply patches its own card immediately, instead of waiting up to five
+  // seconds for the next dashboard poll.
+  window.onNativeEvent({ kind: 'text', requestId: 'time-1', text: '流式第一段' });
+  assert(elements.history.innerHTML.includes('流式第一段'), 'streaming text reaches its card at once');
+  window.onNativeEvent({ kind: 'done', requestId: 'time-1', text: '流式完成', error: false });
+  assert(elements.history.innerHTML.includes('流式完成'), 'the final text replaces the partial one');
+  assert(!elements.history.innerHTML.includes('进行中'), 'the card leaves the running state');
+  window.onNativeEvent({ kind: 'text', requestId: 'not-on-the-board', text: '无关文本' });
+  assert(!elements.history.innerHTML.includes('无关文本'), 'an event for an unknown job patches nothing');
+  window.onNativeEvent({
+    kind: 'dashboard', running: 0, jobs: [], selfLabel: '算力设备',
+    devices: [{ role: 'self', name: '算力设备', ready: true, jobs: 0 }]
+  });
+  assert.equal(elements.title.textContent, '算力设备1', 'numbered title must not fall back to bare 算力设备');
+  assert(!elements.devices.innerHTML.includes('聊天设备2'), 'chat slots must not fall back to list index');
   console.log('PASS: HTML pointer/focus dedup, automatic focus no retry, explicit click/Tab retries, send availability and draft preservation');
 }
 
@@ -229,14 +273,29 @@ function setup(isServer) {
   s.page.receive({ type: 'request', requestId: 'r1', messages: [{ role: 'user', content: 'A' }] }, 1);
   assert.equal(s.sent.at(-1).type, 'request');
   assert.equal(s.sent.at(-1).sched, true);
+  assert.equal(s.sent.at(-1).origin, '聊天设备', 'forwarded work carries the public chat origin');
+  // The worker only ever sees the forwarded id, and echoes it back verbatim.
+  const forwardId = s.sent.at(-1).requestId;
+  assert.equal(forwardId === 'r1', false, 'the wire carries a hand-off id, not the client id');
   assert.equal(s.page.jobs[0].workerEpoch, 7);
   assert.equal(s.page.jobs[0].source, '算力设备2');
-  s.page.receive({ type: 'request', requestId: 'r2', messages: [{ role: 'user', content: 'B' }], sched: true }, 7);
+  s.page.receive({ type: 'request', requestId: 'r2', messages: [{ role: 'user', content: 'B' }],
+    sched: true, origin: '聊天设备3' }, 7);
   assert.equal(s.page.jobs.find(job => job.id === 'r2').workerEpoch, 0, 'sched request stays local');
-  s.page.receive({ type: 'delta', requestId: 'r1', text: 'hi' }, 7);
+  assert.equal(s.page.jobs.find(job => job.id === 'r2').origin, '聊天设备3');
+  s.page.emitDashboard();
+  const board = s.events.filter(event => event.kind === 'dashboard').at(-1);
+  assert.equal(board.devices.find(device => device.role === 'self').jobs, 1);
+  assert.equal(board.devices.find(device => device.role === 'compute').jobs, 1,
+    'the coordinator counts only work actually dispatched to that compute');
+  assert.equal(board.running, 1, 'the task rail count includes only work executed by this compute');
+  assert.equal(board.jobs.length, 1, 'a coordinator-only hand-off is hidden from this compute task rail');
+  assert.equal(board.jobs[0].id, 'r2', 'the locally executed forwarded request remains visible');
+  s.page.receive({ type: 'delta', requestId: forwardId, text: 'hi' }, 7);
   assert.equal(s.sent.at(-1).type, 'delta');
   assert.equal(s.sent.at(-1).text, 'hi');
-  s.page.receive({ type: 'done', requestId: 'r1', finishReason: 'stop' }, 7);
+  assert.equal(s.sent.at(-1).requestId, 'r1', 'the origin gets its own id back, not the forwarded one');
+  s.page.receive({ type: 'done', requestId: forwardId, finishReason: 'stop' }, 7);
   assert.equal(s.sent.at(-1).type, 'done');
   assert.equal(s.sent.at(-1).source, '由算力设备2推理');
   s.page.receive({ type: 'deviceInfo', requestId: 'info-7', model: 'Qwen', memUsage: 41, modelRequests: 1, memAvail: 7000 }, 7);
@@ -245,4 +304,143 @@ function setup(isServer) {
   assert.equal(s.sent.at(-1).type, 'deviceInfo');
   assert.equal(s.sent.at(-1).model, 'Qwen2.5-7B-Instruct-Q4_N_0');
   console.log('PASS: schedule to idle compute, sched stays local, worker reply remapped, deviceInfo poll/reply');
+}
+
+{
+  const follower = setup(true);
+  follower.channel.selfComputeNumber = () => 2;
+  follower.page.model = { start() { throw new Error('a follower must not coordinate'); }, activeCount() { return 0; } };
+  follower.page.receive({ type: 'request', requestId: 'not-hub',
+    messages: [{ role: 'user', content: 'A' }] }, 1);
+  assert.equal(follower.sent.at(-1).type, 'error');
+  assert(follower.sent.at(-1).error.includes('算力设备1'));
+  assert.equal(follower.page.jobs.length, 0);
+}
+
+{
+  const worker = setup(true);
+  worker.page.pageReady = true;
+  worker.page.model = { start() { return ''; }, readinessError() { return ''; }, cancel() {}, activeCount() { return 1; } };
+  worker.channel.peerInfos = () => [{ epoch: 7, peerId: 'coordinator', ready: true, role: 'compute',
+    name: '算力设备2', deviceUid: 'compute-2' }];
+  worker.page.receive({ type: 'request', requestId: 'forwarded', messages: [{ role: 'user', content: 'A' }],
+    sched: true, origin: '聊天设备1' }, 7);
+  worker.page.emitDashboard();
+  const board = worker.events.filter(event => event.kind === 'dashboard').at(-1);
+  assert.equal(board.devices.find(device => device.role === 'self').jobs, 1);
+  assert.equal(board.devices.find(device => device.role === 'compute').jobs, 0,
+    'an upstream coordinator is not an inference worker');
+  assert.equal(board.jobs[0].origin, '聊天设备1');
+  assert.equal(board.jobs[0].source, '算力设备1');
+
+  const ghost = setup(true);
+  ghost.page.pageReady = true;
+  ghost.page.serviceReady = true;
+  ghost.channel.peerInfos = () => [{ epoch: 7, peerId: 'compute-2', ready: true, role: 'compute',
+    name: '算力设备2', helloName: '算力设备2', deviceUid: 'compute-2', slot: 2 }];
+  ghost.channel.hasEpoch = epoch => epoch === 7;
+  ghost.page.remoteSeen.set(7, [{ id: 'chat-live', name: '聊天A', role: 'chat' }]);
+  ghost.page.remoteSeen.set(8, [{ id: 'chat-gone', name: '聊天B', role: 'chat' }]);
+  ghost.page.cancelDroppedPeers();
+  assert.equal(Array.from(ghost.behavior.remoteChats).join(','), '聊天A',
+    'a disconnected reporter cannot keep a chat online');
+  ghost.page.pollDeviceInfo();
+  const sync = ghost.sent.filter(message => message.type === 'deviceInfoSync').at(-1);
+  assert(sync.devices.every(device => device.id !== 'chat-live' && device.id !== 'chat-gone'),
+    'remote roster entries must not be forwarded into a permanent gossip cycle');
+
+  const quiet = setup(true);
+  quiet.page.serviceReady = true;
+  quiet.channel.peerInfos = () => [
+    { epoch: 1, peerId: 'chat', name: '聊天设备1', helloName: '聊天设备1', ready: true, role: 'chat', slot: 1 },
+    { epoch: 2, peerId: 'worker', name: '算力设备2', helloName: '算力设备2', ready: true, role: 'compute', slot: 2 }
+  ];
+  quiet.page.pollDeviceInfo();
+  assert.equal(quiet.sent.filter(message => message.type === 'deviceInfoSync').length, 1,
+    'only the compute worker, not the chat link, receives the multi-frame roster');
+  quiet.page.pollDeviceInfo();
+  assert.equal(quiet.sent.filter(message => message.type === 'deviceInfoSync').length, 1,
+    'a five-second status poll does not resend an unchanged full roster');
+  quiet.channel.peerInfos = () => [
+    { epoch: 1, peerId: 'chat', name: '聊天设备1', helloName: '聊天设备1', ready: true, role: 'chat', slot: 1 },
+    { epoch: 3, peerId: 'chat-new', name: '聊天设备2', helloName: '聊天设备2', ready: true, role: 'chat', slot: 2 },
+    { epoch: 2, peerId: 'worker', name: '算力设备2', helloName: '算力设备2', ready: true, role: 'compute', slot: 2 }
+  ];
+  quiet.page.pollDeviceInfo();
+  assert.equal(quiet.sent.filter(message => message.type === 'deviceInfoSync').length, 2,
+    'joining or leaving devices triggers immediate roster publication');
+  quiet.sent.length = 0;
+  quiet.page.emitDashboard = () => {};
+  quiet.page.jobs.push({ id: 'busy', workerEpoch: 0 });
+  quiet.page.pollDeviceInfo();
+  assert.equal(quiet.sent.length, 0, 'background polling must not compete with inference traffic');
+
+  const order = setup(true);
+  order.page.pageReady = true;
+  order.channel.peerInfos = () => [
+    { epoch: 4, peerId: 'chat-2', deviceUid: 'chat-2', ready: true, role: 'chat', name: '聊天设备2' },
+    { epoch: 2, peerId: 'compute-2', deviceUid: 'compute-2', ready: true, role: 'compute', name: '算力设备2' },
+    { epoch: 3, peerId: 'chat-1', deviceUid: 'chat-1', ready: true, role: 'chat', name: '聊天设备1' }
+  ];
+  order.page.emitDashboard();
+  const ordered = order.events.filter(event => event.kind === 'dashboard').at(-1).devices.map(device => device.name);
+  assert.equal(Array.from(ordered).join(','), '算力设备1,算力设备2,聊天设备1,聊天设备2',
+    'compute devices precede chat devices and both groups are sorted by slot');
+  console.log('PASS: worker-only inference counts, forwarded chat origin and disconnected roster cleanup');
+}
+
+(async () => {
+  const s = setup(true);
+  s.page.pageReady = true;
+  s.page.serviceReady = true;
+  s.page.connectNearby();
+  assert.equal(s.page.serviceReady, false, 'stop near-field even with no connected peer');
+  assert.equal(s.counts().disconnects, 1);
+  assert.equal(s.page.autoConnect, false);
+  const labels = s.events.map(event => event.connectLabel).filter(Boolean);
+  assert.equal(labels.at(-1), '启用近场');
+  s.page.connectNearby();
+  await flush();
+  assert.equal(s.page.serviceReady, true, 'second click starts near-field again');
+  assert.equal(s.behavior.meshCalls, 1, 're-enabling near-field restarts compute mesh discovery');
+  console.log('PASS: idle compute stop/start near-field toggles without a connected chat phone');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Background telemetry yields to streaming inference, and a chat link dropping is
+// reported rather than left as a silent gap the compute side cannot repair itself.
+{
+  const s = setup(true);
+  s.page.pageReady = true;
+  s.page.serviceReady = true;
+  s.channel.peerInfos = () => [
+    { epoch: 2, peerId: 'worker', deviceUid: 'worker', ready: true, role: 'compute', name: '算力设备2', slot: 2 },
+    { epoch: 1, peerId: 'chat', deviceUid: 'chat', ready: true, role: 'chat', name: '聊天设备1', slot: 1 }
+  ];
+  // A chat request lands while the hub has a local job, so the running count changes
+  // mid-stream. The status push must wait for the stream to finish.
+  s.page.jobs.push({ id: 'busy', key: '0:busy', epoch: 0, peer: false, workerEpoch: 0,
+    answer: '', question: 'q', startedAt: 0, firstAt: 0, endedAt: 0, error: false, source: '', origin: '本机', image: '' });
+  // Pretend the last published value was 1, so ending the job is a real transition.
+  s.page.lastPublishedRunning = 1;
+  s.sent.length = 0;
+  s.page.emitDashboard();
+  assert.equal(s.sent.filter(m => m.type === 'deviceInfo' && String(m.requestId).indexOf('status-') === 0).length, 0,
+    'no background status push while an inference is in flight');
+  assert.equal(s.page.lastPublishedRunning, 1, 'the pending count is not published early');
+  s.page.jobs.length = 0;
+  s.page.emitDashboard();
+  const pushed = s.sent.filter(m => m.type === 'deviceInfo' && String(m.requestId).indexOf('status-') === 0);
+  assert.equal(pushed.length, 1, 'the deferred count is published once the stream ends');
+  assert.equal(pushed[0].modelRequests, 0, 'and it carries the settled value');
+
+  // A chat phone disappearing cannot be re-dialled from here.
+  const t = setup(true);
+  t.page.pageReady = true;
+  t.page.serviceReady = true;
+  t.channel.connectedCount = () => 0;
+  t.channel.hasEpoch = () => false;
+  t.page.connectionChanged(false, 6);
+  const status = t.events.filter(e => e.kind === 'connection').at(-1);
+  assert(status.text.includes('等待它自动重连'), 'a lost chat link says who has to re-dial: ' + status.text);
+  console.log('PASS: status push defers to inference; a lost chat link is reported as the chat side\'s to re-dial');
 }

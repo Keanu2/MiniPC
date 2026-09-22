@@ -7,16 +7,47 @@ import { LocalChat, ChatUpdate } from '../llm/LocalChat';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
 import { WireMessage, ChatMessage, DeviceInfoEntry } from '../protocol/ChatProtocol';
 import { IS_SERVER } from '../nearby/NearbyConfig';
-import { ComputeRouter, DispatchEntry, ScheduleNode, pickNode } from '../cluster/ComputeRouter';
+import { ComputeRouter, DispatchEntry, ScheduleNode, originKeyOf, pickNode } from '../cluster/ComputeRouter';
 import { LocalLlmTransport } from '../llm/LlmTransport';
 import { pickJpegDataUrl } from '../media/ImageAttach';
 import {
   DEVICE_INFO_POLL_MS, applyDeviceInfo, buildSelfEntry,
   toDeviceInfoReply
 } from '../cluster/DeviceInfo';
-import { chatLabel, computeLabel, workerTail } from '../cluster/DeviceLabels';
+import { chatLabel, computeLabel, hidePhoneName, publicLabel, workerTail } from '../cluster/DeviceLabels';
 import { ChatBridge } from '../ui/ChatBridge';
 import { ActiveJob, DeviceView, JobView, PageEvent } from '../ui/DashboardTypes';
+
+function sameName(left: string, right: string): boolean {
+  return left.length > 0 && right.length > 0 &&
+    (left === right || left.indexOf(right) >= 0 || right.indexOf(left) >= 0);
+}
+
+function deviceGroup(role: string | undefined): number {
+  return role === 'self' || role === 'compute' ? 0 : 1;
+}
+
+function labelSlot(name: string, compute: boolean): number {
+  const prefix = compute ? '算力设备' : '聊天设备';
+  if (name.indexOf(prefix) !== 0) return 1000000;
+  const suffix = name.substring(prefix.length);
+  if (suffix.length === 0) return 1000000;
+  const slot = Number.parseInt(suffix);
+  return Number.isFinite(slot) && slot > 0 ? slot : 1000000;
+}
+
+/** Compute cards first, then chat cards; each group follows its public slot. */
+function compareDevices(left: DeviceView, right: DeviceView): number {
+  const leftGroup = deviceGroup(left.role);
+  const rightGroup = deviceGroup(right.role);
+  if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+  const leftSlot = labelSlot(left.name, leftGroup === 0);
+  const rightSlot = labelSlot(right.name, rightGroup === 0);
+  if (leftSlot !== rightSlot) return leftSlot - rightSlot;
+  if (left.name < right.name) return -1;
+  if (left.name > right.name) return 1;
+  return left.id < right.id ? -1 : (left.id > right.id ? 1 : 0);
+}
 
 @Entry
 @Component
@@ -42,6 +73,8 @@ struct Index {
   private pageReady: boolean = false;
   private connectionError: string = '';
   private activeId: string = '';
+  /** Wire request id backing the WebView's live task card; '' when none is streaming. */
+  private webActiveId: string = '';
   private answer: string = '';
   private question: string = '';
   private jobs: ActiveJob[] = [];
@@ -54,7 +87,12 @@ struct Index {
   private router: ComputeRouter = new ComputeRouter();
   private peerStats: Map<number, DeviceInfoEntry> = new Map();
   private infoTimer: number = -1;
+  private lastRosterSignature: string = '';
+  private lastRosterSyncAt: number = 0;
+  private lastPublishedRunning: number = -1;
+  private meshTimer: number = -1;
   private pendingImage: string = '';
+  private remoteSeen: Map<number, DeviceInfoEntry[]> = new Map();
 
   aboutToAppear(): void {
     if (IS_SERVER) {
@@ -68,6 +106,7 @@ struct Index {
   aboutToDisappear(): void {
     this.pageReady = false;
     this.stopInfoPoll();
+    this.stopMeshRetry();
     this.model?.close();
     this.channel.disconnect();
     this.channel.unsubscribe();
@@ -78,15 +117,32 @@ struct Index {
   }
 
   private connectNearby(): void {
-    if (this.preparation !== null) return;
-    if (this.channel.isConnected()) {
-      this.autoConnect = false;
-      this.channel.disconnect();
-      this.showConnection();
+    if (IS_SERVER && (this.serviceReady || this.channel.isListening() || this.connecting || this.preparation !== null)) {
+      this.stopNearField();
       return;
+    }
+    if (!IS_SERVER) {
+      if (this.preparation !== null) return;
+      if (this.channel.isConnected()) {
+        this.autoConnect = false;
+        this.channel.disconnect();
+        this.showConnection();
+        return;
+      }
     }
     this.autoConnect = true;
     this.ensureCollaborationReady(true);
+  }
+
+  private stopNearField(): void {
+    this.autoConnect = false;
+    this.connecting = false;
+    this.serviceReady = false;
+    this.preparation = null;
+    this.stopInfoPoll();
+    this.stopMeshRetry();
+    this.channel.disconnect();
+    this.showConnection();
   }
 
   private ensureCollaborationReady(manual: boolean = false): Promise<void> {
@@ -113,9 +169,11 @@ struct Index {
     try {
       if (IS_SERVER) {
         await this.channel.prepare();
+        if (operation !== this.channel.operation() || !this.pageReady) return;
         this.serviceReady = true;
         this.preparedOperation = operation;
         this.channel.connectOtherComputes(operation).catch(() => {});
+        this.startMeshRetry();
         this.startInfoPoll();
         return;
       }
@@ -172,29 +230,50 @@ struct Index {
     }
   }
 
+  private selfComputeLabel(): string {
+    const label = this.channel.selfLabel();
+    return label.length > 0 ? label : '算力设备';
+  }
+
   private emit(event: PageEvent): void {
     if (!this.pageReady) return;
     this.controller.runJavaScript('window.onNativeEvent(' + JSON.stringify(event) + ')').catch(() => this.stop());
   }
 
+  /**
+   * Board identity of a job. A chat peer and this device can send the same wire
+   * request id; the origin session keeps their cards apart. It is also the id the
+   * local model engine keys on, so callbacks can be routed back to the right card.
+   */
+  private static jobKey(epoch: number, id: string): string {
+    return originKeyOf(epoch, id);
+  }
+
   private createJob(id: string, messages: ChatMessage[], peer: boolean, epoch: number, workerEpoch: number = 0,
-    image: string = ''): ActiveJob {
+    image: string = '', originLabel: string = ''): ActiveJob {
     const peers = this.channel.peerInfos();
     return {
-      id: id, epoch: epoch, peer: peer, answer: '', question: messages[messages.length - 1].content,
+      id: id, key: Index.jobKey(epoch, id), epoch: epoch, peer: peer, answer: '', question: messages[messages.length - 1].content,
       startedAt: Date.now(), firstAt: 0, endedAt: 0, error: false,
-      source: computeLabel(workerEpoch, peers),
-      origin: peer ? chatLabel(epoch, peers) : '本机',
+      source: computeLabel(workerEpoch, peers, this.selfComputeLabel()),
+      origin: originLabel.length > 0 ? this.forwardedOrigin(originLabel) : (peer ? chatLabel(epoch, peers) : '本机'),
       workerEpoch: workerEpoch,
       image: peer ? '' : image
     };
+  }
+
+  /** A forwarded task may expose only the public chat label, never a phone name. */
+  private forwardedOrigin(origin: string): string {
+    const label = origin.trim();
+    if (label === '本机' || label === '聊天设备' || label.indexOf('聊天设备') === 0) return label;
+    return '聊天设备';
   }
 
   private toJobView(job: ActiveJob, now: number): JobView {
     const ended = job.endedAt > 0;
     const elapsed = (ended ? job.endedAt : now) - job.startedAt;
     return {
-      id: job.id, source: job.source, origin: job.origin, local: !job.peer,
+      id: job.id, key: job.key, source: job.source, origin: job.origin, local: !job.peer,
       image: job.image, question: job.question, answer: job.answer,
       chars: job.answer.length, startedAt: job.startedAt, firstAt: job.firstAt,
       endedAt: job.endedAt, running: !ended, error: job.error,
@@ -203,37 +282,105 @@ struct Index {
   }
 
   private emitDashboard(): void {
+    this.channel.setActiveJobs(this.jobs.length);
     if (!IS_SERVER || !this.pageReady) return;
+    const runningNow = this.jobs.filter((job: ActiveJob) => job.workerEpoch === 0).length;
+    // Same rule as the roster in pollDeviceInfo(): background telemetry yields to
+    // streaming inference. The counters below still update, so the next idle poll
+    // publishes the value that changed while a request was in flight.
+    if (this.serviceReady && this.jobs.length === 0 && runningNow !== this.lastPublishedRunning) {
+      const previousRunning = this.lastPublishedRunning;
+      this.lastPublishedRunning = runningNow;
+      const status = toDeviceInfoReply('status-' + String(Date.now()), this.clusterSelfEntry());
+      for (const peer of this.channel.peerInfos()) {
+        if (peer.ready && peer.role === 'compute') this.channel.send(status, peer.epoch);
+      }
+      if (runningNow === 0 && previousRunning > 0) this.pollDeviceInfo();
+    }
     const now = Date.now();
     const self = this.selfEntry();
     const peers = this.channel.peerInfos();
     const devices: DeviceView[] = [];
+    const seen: string[] = [];
+    const selfLabel = this.selfComputeLabel();
+    const selfUid = this.channel.localUid() || self.id || 'self';
     devices.push({
-      epoch: 0, name: '算力设备1', id: self.id || 'self', ready: true,
-      jobs: this.jobs.filter((item: ActiveJob) => !item.peer || item.workerEpoch === 0).length,
+      epoch: 0, name: selfLabel, id: selfUid, ready: true,
+      // Work this device is actually running: its own questions plus requests a
+      // chat peer routed here. `peer` alone would count "推理 0" mid-inference.
+      jobs: this.jobs.filter((item: ActiveJob) => item.workerEpoch === 0).length,
       role: 'self', model: self.model, memUsage: self.memUsage, modelRequests: self.modelRequests
     });
+    seen.push('id:' + selfUid);
+    // Deduplicate on connection identity, not on the public label: two distinct
+    // devices that happen to both be labelled 算力设备1 are still two devices.
     for (const peer of peers) {
+      const id = peer.deviceUid || peer.peerId;
+      const mark = id.length > 0 ? 'id:' + id : 'epoch:' + String(peer.epoch);
+      if (seen.indexOf(mark) >= 0) continue;
+      seen.push(mark);
       let count = 0;
       for (const job of this.jobs) {
-        if (job.peer && (job.epoch === peer.epoch || job.workerEpoch === peer.epoch)) count++;
+        // `epoch` is the request's upstream/origin link. Only workerEpoch says
+        // where inference runs; counting both made the forwarding compute look busy.
+        if (peer.role === 'compute' && job.workerEpoch === peer.epoch) count++;
       }
       const stats = this.peerStats.get(peer.epoch);
+      if (peer.role === 'compute' && stats?.modelRequests !== undefined && stats.modelRequests > count) {
+        count = stats.modelRequests;
+      }
       devices.push({
-        epoch: peer.epoch, name: peer.name, id: peer.peerId, ready: peer.ready, jobs: count,
+        epoch: peer.epoch, name: hidePhoneName(peer.name, peer.role || 'chat'), id: id, ready: peer.ready, jobs: count,
         role: peer.role, model: stats?.model, memUsage: stats?.memUsage, modelRequests: stats?.modelRequests
       });
     }
+    for (const extra of this.remoteEntries()) {
+      const raw = extra.name || '';
+      let role = extra.role || 'chat';
+      if (role === 'self') role = 'compute';
+      // Match on the connection id when the reporter gave us one. Comparing names
+      // is what turned one physical box into two cards labelled 算力设备1.
+      const id = extra.deviceUid || extra.id || '';
+      let known = id.length > 0 && id === selfUid;
+      for (const peer of peers) {
+        if (id.length > 0 && id === (peer.deviceUid || peer.peerId)) {
+          known = true;
+          break;
+        }
+      }
+      if (known) continue;
+      if (role === 'compute' && id.length === 0 &&
+        sameName(this.channel.localName(), raw)) continue;
+      const name = publicLabel(role, extra.slot === undefined ? 0 : extra.slot);
+      const mark = id.length > 0 ? 'id:' + id : role + ':' + name;
+      if (seen.indexOf(mark) >= 0) continue;
+      seen.push(mark);
+      devices.push({
+        epoch: -1, name: name, id: id || name, ready: extra.ready !== false, jobs: 0,
+        role: role, model: extra.model, memUsage: extra.memUsage, modelRequests: extra.modelRequests
+      });
+    }
     const views: JobView[] = [];
-    for (const job of this.jobs) views.push(this.toJobView(job, now));
-    for (const job of this.finishedJobs) views.push(this.toJobView(job, now));
+    // The task rail is local evidence, not a cluster-wide coordinator ledger.
+    // A job with workerEpoch != 0 is only passing through this device on its way
+    // to another compute. The executing compute creates its own workerEpoch=0 job,
+    // so filtering here leaves exactly the tasks this box actually inferred.
+    for (const job of this.jobs) {
+      if (job.workerEpoch === 0) views.push(this.toJobView(job, now));
+    }
+    for (const job of this.finishedJobs) {
+      if (job.workerEpoch === 0) views.push(this.toJobView(job, now));
+    }
+    const localRunning = this.jobs.filter((job: ActiveJob) => job.workerEpoch === 0).length;
+    devices.sort(compareDevices);
     this.emit({
       kind: 'dashboard',
       text: this.connectionError || this.channel.getStatus(),
       available: true,
       connectLabel: this.serviceReady ? '停用近场' : '启用近场',
       connecting: this.connecting || this.channel.isConnecting(),
-      running: this.jobs.length,
+      running: localRunning,
+      selfLabel: this.selfComputeLabel(),
       devices: devices,
       jobs: views
     });
@@ -245,8 +392,9 @@ struct Index {
     this.emit({ kind: 'connection', text: this.connectionError || (this.connecting ? (this.channel.getStatus() || '正在准备协同…') :
       (!IS_SERVER && ready ? '协同已就绪' : this.channel.getStatus())),
       available: IS_SERVER || ready, pendingText: IS_SERVER ? '正在推理中' : '正在等待推理端回复',
-      connectLabel: connected ? '断开' : (IS_SERVER ? '启用近场' : '连接'),
-      connecting: this.connecting || this.channel.isConnecting() });
+      connectLabel: this.serviceReady ? '停用近场' : (IS_SERVER ? '启用近场' : '连接'),
+      connecting: this.connecting || this.channel.isConnecting(),
+      selfLabel: this.selfComputeLabel() });
     if (IS_SERVER) this.emitDashboard();
   }
 
@@ -255,7 +403,18 @@ struct Index {
       String(connected), epoch, this.channel.connectedCount(), String(IS_SERVER));
     if (this.channel.isConnected()) this.connectionError = '';
     if (!IS_SERVER && !connected) this.serviceReady = false;
-    if (IS_SERVER) this.cancelDroppedPeers();
+    if (IS_SERVER) {
+      const dropped = !this.channel.hasEpoch(epoch);
+      this.cancelDroppedPeers();
+      if (dropped || connected) this.pollDeviceInfo();
+      // A chat link can only be dialled by the chat phone: the peer carries no
+      // discoverable address, and connectOtherComputes() only ever dials advertised
+      // compute nodes. There is nothing for this side to re-dial, so say so instead
+      // of leaving a silent gap the operator has to guess at.
+      if (dropped && this.channel.connectedCount() === 0 && !this.connecting && this.serviceReady) {
+        this.connectionError = '聊天手机已断开，等待它自动重连…';
+      }
+    }
     else if (!connected && this.activeId) {
       this.finish(this.answer + (this.answer ? '\n\n' : '') + '连接已中断，请连接后重新发送。', true);
     }
@@ -264,7 +423,7 @@ struct Index {
 
   private cancelDroppedPeers(): void {
     for (const job of this.jobs.slice()) {
-      if (job.peer && !this.channel.hasEpoch(job.epoch) && job.workerEpoch === 0) this.model?.cancel(job.id);
+      if (job.peer && !this.channel.hasEpoch(job.epoch) && job.workerEpoch === 0) this.model?.cancel(job.key);
     }
     const peers = this.channel.peerInfos();
     const live: number[] = [];
@@ -279,13 +438,26 @@ struct Index {
       for (const entry of dropped) {
         this.channel.send({ type: 'error', requestId: entry.originRequestId,
           error: '执行设备 ' + entry.workerName + ' 连接断开' }, entry.originEpoch);
-        this.completeJob(entry.originRequestId, '执行设备连接断开', true);
+        this.completeJob(entry.originRequestId, entry.originEpoch, '执行设备连接断开', true);
       }
     }
+    const staleSnapshots: number[] = [];
+    this.remoteSeen.forEach((_, epoch) => {
+      if (live.indexOf(epoch) < 0) staleSnapshots.push(epoch);
+    });
+    for (const epoch of staleSnapshots) this.remoteSeen.delete(epoch);
+    this.refreshRemoteChats();
   }
 
-  private findJob(id: string): ActiveJob | undefined {
-    return this.jobs.find((item: ActiveJob) => item.id === id);
+  private findJob(id: string, epoch: number = 0): ActiveJob | undefined {
+    return this.findJobByKey(Index.jobKey(epoch, id));
+  }
+
+  private findJobByKey(key: string): ActiveJob | undefined {
+    for (const item of this.jobs) {
+      if (item.key === key) return item;
+    }
+    return undefined;
   }
 
   private localBusy(): boolean {
@@ -356,16 +528,18 @@ struct Index {
     return [{ role: 'user', content: this.benchPrompt(kind) }];
   }
 
-  private startModel(id: string, messages: ChatMessage[]): string {
+  /** `key` is the board identity of the job; it also keys local cancellation. */
+  private startModel(key: string, messages: ChatMessage[]): string {
     if (this.transport !== null) {
-      return this.transport.start(messages, (update: ChatUpdate) => this.localUpdate(id, update), id);
+      return this.transport.start(messages, (update: ChatUpdate) => this.localUpdate(key, update), key);
     }
     if (!this.model) return '模型服务尚未初始化。';
-    return this.model.start(messages, (update: ChatUpdate) => this.localUpdate(id, update), id);
+    return this.model.start(messages, (update: ChatUpdate) => this.localUpdate(key, update), key);
   }
 
   private queueJob(id: string, messages: ChatMessage[]): string {
-    const error = this.startModel(id, messages);
+    const key = Index.jobKey(0, id);
+    const error = this.startModel(key, messages);
     if (error) return error;
     this.jobs.push(this.createJob(id, messages, false, 0));
     this.emitDashboard();
@@ -403,16 +577,22 @@ struct Index {
     return null;
   }
 
-  private startLocal(id: string, messages: ChatMessage[], peer: boolean, epoch: number, image: string = ''): string {
+  private startLocal(id: string, messages: ChatMessage[], peer: boolean, epoch: number, image: string = '',
+    originLabel: string = ''): string {
     if (this.transport === null && this.model === null) return '模型服务尚未初始化。';
     if (!peer && this.localBusy()) return '模型正在回答上一条问题，请稍后再发。';
+    // The rail only streams while one card owns the composer; a second peer request
+    // would otherwise stream into whichever card happened to be first.
+    if (this.webActiveId.length === 0) this.webActiveId = id;
     if (peer) this.router.beginSelf();
-    const error = this.startModel(id, messages);
+    const key = Index.jobKey(epoch, id);
+    const error = this.startModel(key, messages);
     if (error) {
       if (peer) this.router.endSelf();
+      if (this.webActiveId === id) this.webActiveId = '';
       return error;
     }
-    this.jobs.push(this.createJob(id, messages, peer, epoch, 0, image));
+    this.jobs.push(this.createJob(id, messages, peer, epoch, 0, image, originLabel));
     hilog.info(0, 'NearbyChat', 'accepted request=%{public}s remote=%{public}s jobs=%{public}d',
       id, String(peer), this.jobs.length);
     if (peer) this.emit({ kind: 'remote-start', text: messages[messages.length - 1].content, requestId: id });
@@ -427,8 +607,12 @@ struct Index {
 
   private clusterSelfEntry(): DeviceInfoEntry {
     const entry = this.selfEntry();
+    entry.id = this.channel.localUid() || entry.id;
+    entry.deviceUid = this.channel.localUid();
     entry.name = this.channel.localName();
     entry.role = 'compute';
+    const slot = this.channel.selfComputeNumber();
+    if (slot >= 1) entry.slot = slot;
     return entry;
   }
 
@@ -462,8 +646,10 @@ struct Index {
     return nodes;
   }
 
-  private scheduleRequest(id: string, messages: ChatMessage[], originEpoch: number, sched: boolean): string {
-    if (sched) return this.startLocal(id, messages, true, originEpoch);
+  private scheduleRequest(id: string, messages: ChatMessage[], originEpoch: number, sched: boolean,
+    forwardedOrigin: string = ''): string {
+    if (sched) return this.startLocal(id, messages, true, originEpoch, '', forwardedOrigin || '聊天设备');
+    if (this.channel.selfComputeNumber() !== 1) return '请连接算力设备1，由它统一调度。';
     const nodes = this.scheduleNodes();
     const node = pickNode(nodes);
     if (node === null) return '集群中无已部署模型的可用设备。';
@@ -473,55 +659,69 @@ struct Index {
     entry.originRequestId = id;
     entry.workerEpoch = node.epoch;
     entry.workerName = node.name;
-    this.router.beginDispatch(id, entry);
-    this.jobs.push(this.createJob(id, messages, true, originEpoch, node.epoch));
+    // The forwarded id is ours, not the origin's: the worker echoes it back
+    // verbatim and that is the only way to tell two same-id requests apart.
+    const dispatch = this.router.beginDispatch(id, entry);
+    const job = this.createJob(id, messages, true, originEpoch, node.epoch);
+    this.jobs.push(job);
     this.emitDashboard();
-    this.channel.send({ type: 'request', requestId: id, messages: messages, sched: true }, node.epoch)
+    this.channel.send({
+      type: 'request', requestId: dispatch.forwardId, messages: messages, sched: true, origin: job.origin
+    }, node.epoch)
       .then((sent: boolean) => {
         if (sent) return;
-        this.router.finishDispatch(id);
+        this.router.finishForward(dispatch.forwardId);
         this.channel.send({ type: 'error', requestId: id, error: '派发失败：与执行设备 ' + node.name + ' 的会话已断开' },
           originEpoch);
-        this.completeJob(id, '派发失败', true);
+        this.completeJob(id, originEpoch, '派发失败', true);
       });
     return '';
   }
 
   private handleCancel(id: string, epoch: number): void {
-    const dispatch = this.router.getDispatch(id);
+    const dispatch = this.router.getDispatch(id, epoch);
     if (dispatch !== undefined && dispatch.originEpoch === epoch) {
-      this.channel.send({ type: 'cancel', requestId: id }, dispatch.workerEpoch);
+      // The worker only knows the forwarded id.
+      this.channel.send({ type: 'cancel', requestId: dispatch.forwardId }, dispatch.workerEpoch);
       return;
     }
-    const job = this.findJob(id);
-    if (job !== undefined && job.peer && job.epoch === epoch) this.model?.cancel(id);
+    const job = this.findJob(id, epoch);
+    if (job !== undefined && job.peer && job.epoch === epoch) this.model?.cancel(job.key);
   }
 
   private handleWorkerReply(message: WireMessage, epoch: number): void {
-    if (!message.requestId) return;
-    const dispatch = this.router.getDispatch(message.requestId);
+    const forwardId = message.requestId;
+    if (!forwardId) return;
+    // Match on the id we generated for this hand-off. Origin ids are not unique
+    // here: two chat devices may both be running a request called r1.
+    const dispatch = this.router.getByForwardId(forwardId);
     if (dispatch === undefined || dispatch.workerEpoch !== epoch) return;
-    const job = this.findJob(message.requestId);
-    if (message.type === 'delta' && job !== undefined) {
+    this.routeWorkerReply(message, dispatch, forwardId);
+  }
+
+  private routeWorkerReply(message: WireMessage, dispatch: DispatchEntry, forwardId: string): void {
+    const id = dispatch.originRequestId;
+    if (message.type === 'delta') {
+      const job = this.findJob(id, dispatch.originEpoch);
+      if (job === undefined) return;
       job.answer += message.text || '';
       if (job.firstAt === 0) job.firstAt = Date.now();
       this.emitDashboard();
-      this.channel.send({ type: 'delta', requestId: dispatch.originRequestId, text: message.text || '' },
-        dispatch.originEpoch);
+      this.channel.send({ type: 'delta', requestId: id, text: message.text || '' }, dispatch.originEpoch);
       return;
     }
-    this.router.finishDispatch(message.requestId);
+    const job = this.router.finishForward(forwardId) === undefined ? undefined : this.findJob(id, dispatch.originEpoch);
     if (message.type === 'error') {
-      this.channel.send({ type: 'error', requestId: dispatch.originRequestId, error: message.error || '执行设备推理失败' },
+      this.channel.send({ type: 'error', requestId: id, error: message.error || '执行设备推理失败' },
         dispatch.originEpoch);
-      this.completeJob(message.requestId, message.error || '执行设备推理失败', true);
+      this.completeJob(id, dispatch.originEpoch, message.error || '执行设备推理失败', true);
       return;
     }
     this.channel.send({
-      type: 'done', requestId: dispatch.originRequestId, finishReason: message.finishReason,
-      source: workerTail(dispatch.workerEpoch, this.channel.peerInfos())
+      type: 'done', requestId: id, finishReason: message.finishReason,
+      source: workerTail(dispatch.workerEpoch, this.channel.peerInfos(), this.selfComputeLabel())
     }, dispatch.originEpoch);
-    this.completeJob(message.requestId, job === undefined ? '' : job.answer, false);
+    this.completeJob(id, dispatch.originEpoch, job === undefined ? '' : job.answer, false);
   }
 
   private handleDeviceInfo(message: WireMessage, epoch: number): void {
@@ -532,14 +732,76 @@ struct Index {
       }
       applyDeviceInfo(entry, message);
       this.peerStats.set(epoch, entry);
+      if (entry.memAvail !== undefined) this.channel.setPeerMem(epoch, entry.memAvail);
       this.emitDashboard();
       return;
     }
     if (message.requestId) this.replyDeviceInfo(message.requestId, epoch);
   }
 
+  private handleClusterSync(message: WireMessage, epoch: number): void {
+    const devices = message.devices === undefined ? [] : message.devices;
+    // Roster is stored per reporter. A single global snapshot meant whichever peer
+    // reported last overwrote the others, so the device list flickered between
+    // 算力设备 and 算力设备1 and stale entries outlived their sender.
+    this.remoteSeen.set(epoch, devices);
+    this.refreshRemoteChats();
+    const peers = this.channel.peerInfos();
+    for (const sender of peers) {
+      if (sender.epoch === epoch && sender.role === 'compute') {
+        this.channel.applyRemoteRoster(sender.helloName || '', devices);
+        break;
+      }
+    }
+    this.emitDashboard();
+  }
+
+  /** Entries reported by peers that are still connected, deduplicated by id. */
+  private remoteEntries(): DeviceInfoEntry[] {
+    const result: DeviceInfoEntry[] = [];
+    const seen: string[] = [];
+    this.remoteSeen.forEach((entries, epoch) => {
+      if (!this.channel.hasEpoch(epoch)) return;
+      for (const entry of entries) {
+        const identity = entry.deviceUid || entry.id || '';
+        const mark = identity.length > 0 ? 'id:' + identity :
+          (entry.role || '') + ':' + (entry.name || '');
+        if (seen.indexOf(mark) >= 0) continue;
+        seen.push(mark);
+        result.push(entry);
+      }
+    });
+    return result;
+  }
+
+  /** Rebuild remote chat slots from every still-connected reporter. */
+  private refreshRemoteChats(): void {
+    const chats: string[] = [];
+    this.remoteSeen.forEach((entries, epoch) => {
+      if (!this.channel.hasEpoch(epoch)) return;
+      for (const entry of entries) {
+        if (entry.role === 'chat' && entry.name && chats.indexOf(entry.name) < 0) chats.push(entry.name);
+      }
+    });
+    this.channel.setRemoteChats(chats);
+  }
+
   private replyDeviceInfo(requestId: string, epoch: number): void {
     this.channel.send(toDeviceInfoReply(requestId, this.clusterSelfEntry()), epoch);
+  }
+
+  private startMeshRetry(): void {
+    if (this.meshTimer !== -1) return;
+    this.meshTimer = setInterval(() => {
+      if (!this.serviceReady) return;
+      this.channel.connectOtherComputes(this.channel.operation()).catch(() => {});
+    }, 7000);
+  }
+
+  private stopMeshRetry(): void {
+    if (this.meshTimer === -1) return;
+    clearInterval(this.meshTimer);
+    this.meshTimer = -1;
   }
 
   private startInfoPoll(): void {
@@ -552,42 +814,78 @@ struct Index {
     if (this.infoTimer === -1) return;
     clearInterval(this.infoTimer);
     this.infoTimer = -1;
+    this.lastRosterSignature = '';
+    this.lastRosterSyncAt = 0;
+    this.lastPublishedRunning = -1;
   }
 
   private pollDeviceInfo(): void {
     if (!IS_SERVER || !this.serviceReady) return;
+    const self = this.clusterSelfEntry();
+    this.channel.setSelfMem(self.memAvail === undefined ? -1 : self.memAvail);
     const peers = this.channel.peerInfos();
-    const cluster: DeviceInfoEntry[] = [this.clusterSelfEntry()];
+    const cluster: DeviceInfoEntry[] = [self];
     for (const peer of peers) {
       if (!peer.ready) continue;
-      this.channel.send({ type: 'deviceInfo', requestId: 'info-' + String(peer.epoch) }, peer.epoch);
       const stats = this.peerStats.get(peer.epoch);
-      cluster.push({
-        id: peer.peerId, name: peer.name, role: peer.role || 'chat', ready: peer.ready,
+      const identity = peer.deviceUid || peer.peerId;
+      const entry: DeviceInfoEntry = {
+        id: identity, deviceUid: peer.deviceUid || undefined,
+        name: peer.helloName || '', role: peer.role || 'chat', ready: peer.ready,
         model: stats?.model, memUsage: stats?.memUsage, memAvail: stats?.memAvail,
         memTotal: stats?.memTotal, modelRequests: stats?.modelRequests
-      });
+      };
+      if (peer.role === 'chat' && peer.slot > 0) entry.slot = peer.slot;
+      if (peer.role === 'compute' && peer.slot > 0) entry.slot = peer.slot;
+      cluster.push(entry);
     }
+    const signature = cluster.map((entry: DeviceInfoEntry) =>
+      entry.id + ':' + (entry.role || '') + ':' + String(entry.slot || 0)).join('|');
+    const now = Date.now();
+    const syncRoster = signature !== this.lastRosterSignature || now - this.lastRosterSyncAt >= 30000;
+    if (syncRoster && this.jobs.length === 0) {
+      this.lastRosterSignature = signature;
+      this.lastRosterSyncAt = now;
+    }
+    // Publish only self and direct peers. Re-forwarding another compute's roster
+    // created a cycle in which a disconnected chat survived forever as a ghost.
     for (const peer of peers) {
-      if (!peer.ready || peer.role === 'compute') continue;
-      const devices: DeviceInfoEntry[] = [];
-      for (const entry of cluster) {
-        if (entry.id === peer.peerId) continue;
-        devices.push(entry);
+      if (!peer.ready) continue;
+      // Chat peers neither consume the cluster roster nor supply scheduling
+      // metrics. Avoid sending a multi-frame snapshot to every chat phone.
+      if (peer.role !== 'compute') continue;
+      // Streaming inference has priority over background topology refresh.
+      if (this.jobs.length > 0) continue;
+      if (syncRoster) {
+        // Include the recipient so a rejoining node can adopt the live slot map.
+        this.channel.send({ type: 'deviceInfoSync', requestId: 'sync-' + String(peer.epoch), devices: cluster },
+          peer.epoch).then(() => {
+          if (this.jobs.length === 0 && this.channel.hasEpoch(peer.epoch)) {
+            this.channel.send({ type: 'deviceInfo', requestId: 'info-' + String(peer.epoch) }, peer.epoch);
+          }
+        });
+      } else {
+        this.channel.send({ type: 'deviceInfo', requestId: 'info-' + String(peer.epoch) }, peer.epoch);
       }
-      this.channel.send({ type: 'deviceInfoSync', requestId: 'sync-' + String(peer.epoch), devices: devices },
-        peer.epoch);
     }
     this.emitDashboard();
   }
 
-  private localUpdate(id: string, update: ChatUpdate): void {
-    const job = this.findJob(id);
+  /**
+   * `id` is the wire request id as the origin sent it; `key` is the engine handle.
+   * They differ only for work a chat peer asked for, where the engine must key on
+   * the origin session so two peers can reuse one id.
+   */
+  private localUpdate(key: string, update: ChatUpdate): void {
+    const job = this.findJobByKey(key);
     if (job === undefined) return;
+    const id = job.id;
     if (update.kind === 'delta') {
       job.answer += update.text;
       if (job.firstAt === 0) job.firstAt = Date.now();
-      this.emit({ kind: 'text', text: job.answer, requestId: id });
+      // requestId lets the page update that one card instead of waiting for the next
+      // dashboard poll; without it the rail lagged the reply by up to five seconds.
+      if (this.webActiveId === id) this.emit({ kind: 'text', text: job.answer, requestId: id });
       this.emitDashboard();
       if (job.peer) this.channel?.send({ type: 'delta', requestId: id, text: update.text }, job.epoch);
       if (this.overlapArmed && this.pendingB !== null) {
@@ -603,7 +901,7 @@ struct Index {
     if (job.peer) {
       const message: WireMessage = update.error ? { type: 'error', requestId: id, error: update.error } :
         { type: 'done', requestId: id, finishReason: update.finishReason,
-          source: workerTail(0, this.channel.peerInfos()) };
+          source: workerTail(0, this.channel.peerInfos(), this.selfComputeLabel()) };
       this.channel?.send(message, job.epoch);
       this.router.endSelf();
     } else if (!update.error && update.finishReason !== 'cancelled' &&
@@ -612,13 +910,16 @@ struct Index {
       this.history.push({ role: 'assistant', content: job.answer });
     }
     hilog.info(0, 'NearbyChat', 'finished request=%{public}s reason=%{public}s', id, update.finishReason || 'error');
-    this.completeJob(id, update.text, !!update.error);
+    if (this.webActiveId === id) this.webActiveId = '';
+    this.completeJob(id, job.epoch, update.text, !!update.error);
   }
 
   private receive(message: WireMessage, epoch: number): void {
     if (IS_SERVER) {
       if (message.type === 'deviceInfo') {
         this.handleDeviceInfo(message, epoch);
+      } else if (message.type === 'deviceInfoSync') {
+        this.handleClusterSync(message, epoch);
       } else if (message.type === 'prepare' && message.requestId) {
         const error = this.model?.readinessError() ?? '模型服务尚未初始化。';
         const reply: WireMessage = { type: 'prepared', requestId: message.requestId };
@@ -628,7 +929,8 @@ struct Index {
           message.requestId, String(!error));
         this.replyDeviceInfo(message.requestId, epoch);
       } else if (message.type === 'request' && message.messages && message.requestId) {
-        const error = this.scheduleRequest(message.requestId, message.messages, epoch, message.sched === true);
+        const error = this.scheduleRequest(message.requestId, message.messages, epoch, message.sched === true,
+          message.origin || '');
         if (error) this.channel?.send({ type: 'error', requestId: message.requestId, error: error }, epoch);
       } else if (message.type === 'cancel' && message.requestId) {
         this.handleCancel(message.requestId, epoch);
@@ -662,16 +964,22 @@ struct Index {
     this.history.push({ role: 'assistant', content: this.answer });
   }
 
-  private completeJob(id: string, text: string, error: boolean): void {
-    const job = this.findJob(id);
+  private completeJob(id: string, epoch: number, text: string, error: boolean): void {
+    const job = this.findJob(id, epoch);
+    const key = Index.jobKey(epoch, id);
     if (job !== undefined) {
       job.endedAt = Date.now();
       job.error = error;
       if (text && job.answer.length === 0) job.answer = text;
       this.jobs.splice(this.jobs.indexOf(job), 1);
+      // A reused request id must not evict the earlier card with the same wire id.
+      for (let i = this.finishedJobs.length - 1; i >= 0; i--) {
+        if (this.finishedJobs[i].key === key) this.finishedJobs.splice(i, 1);
+      }
       this.finishedJobs.unshift(job);
       if (this.finishedJobs.length > 8) this.finishedJobs.pop();
     }
+    if (this.webActiveId === id) this.webActiveId = '';
     this.emit({ kind: 'done', text: text, error: error, requestId: id });
     this.emitDashboard();
     if (this.pendingB !== null && !this.overlapArmed && this.jobs.length === 0) {
@@ -691,7 +999,7 @@ struct Index {
   private stop(): void {
     if (IS_SERVER) {
       const local = this.jobs.find((item: ActiveJob) => !item.peer);
-      if (local !== undefined) this.model?.cancel(local.id);
+      if (local !== undefined) this.model?.cancel(local.key);
       return;
     }
     if (!this.activeId) return;
