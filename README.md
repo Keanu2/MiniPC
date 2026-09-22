@@ -2,7 +2,7 @@
 
 算力协同，由算力端和聊天端组成，靠蓝牙近场连接。具有两个独立 HAP。
 
-现在的版本是 [v0.3-cluster](https://github.com/Keanu2/MiniPC/releases/tag/v0.3-cluster)。改过什么看 [CHANGELOG.md](CHANGELOG.md)。
+现在的版本是 [v0.4-hub](https://github.com/Keanu2/MiniPC/releases/tag/v0.4-hub)。改过什么看 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 怎么跑起来的
 
