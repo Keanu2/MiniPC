@@ -10,6 +10,12 @@ export interface DeviceInfoEntry {
   memTotal?: number;
   memAvail?: number;
   memUsage?: number;
+  /** System thermal gear 0–7, or -1 when unknown. */
+  thermalLevel?: number;
+  /** Battery temperature in Celsius, or -1 when unknown. */
+  batteryTemp?: number;
+  /** Whole-device CPU occupancy 0–100, or -1 when unknown. */
+  cpuUsage?: number;
   model?: string;
   modelRequests?: number;
   ready?: boolean;
@@ -32,6 +38,9 @@ export interface WireMessage {
   memTotal?: number;
   memAvail?: number;
   memUsage?: number;
+  thermalLevel?: number;
+  batteryTemp?: number;
+  cpuUsage?: number;
   model?: string;
   modelRequests?: number;
   devices?: DeviceInfoEntry[];
@@ -57,7 +66,9 @@ function validDeviceEntry(entry: DeviceInfoEntry): boolean {
     validOptionalString(entry.name, 128) &&
     (entry.role === undefined || entry.role === 'chat' || entry.role === 'compute' || entry.role === 'self') &&
     validOptionalNumber(entry.memTotal) && validOptionalNumber(entry.memAvail) &&
-    validOptionalNumber(entry.memUsage) && validOptionalString(entry.model, 128) &&
+    validOptionalNumber(entry.memUsage) && validOptionalNumber(entry.thermalLevel) &&
+    validOptionalNumber(entry.batteryTemp) && validOptionalNumber(entry.cpuUsage) &&
+    validOptionalString(entry.model, 128) &&
     validOptionalNumber(entry.modelRequests) &&
     (entry.slot === undefined || (validOptionalNumber(entry.slot) && entry.slot >= 1 && entry.slot <= 64));
 }
@@ -65,7 +76,9 @@ function validDeviceEntry(entry: DeviceInfoEntry): boolean {
 function validDeviceInfo(m: WireMessage): boolean {
   return validOptionalString(m.name, 128) && validOptionalString(m.model, 128) &&
     validOptionalNumber(m.memTotal) && validOptionalNumber(m.memAvail) &&
-    validOptionalNumber(m.memUsage) && validOptionalNumber(m.modelRequests) &&
+    validOptionalNumber(m.memUsage) && validOptionalNumber(m.thermalLevel) &&
+    validOptionalNumber(m.batteryTemp) && validOptionalNumber(m.cpuUsage) &&
+    validOptionalNumber(m.modelRequests) &&
     (m.peerRole === undefined || m.peerRole === 'compute' || m.peerRole === 'chat');
 }
 

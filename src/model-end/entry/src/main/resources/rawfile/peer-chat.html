@@ -45,11 +45,15 @@
     .tag.wait { color:var(--muted); }
     .tag.run { color:var(--busy); }
     .tag.err { color:var(--err); }
-    .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .mem,.jobs { display:inline-flex; align-items:center; gap:6px; }
-    .mem i { display:block; width:52px; height:4px; border-radius:4px; background:#e6eaf4; overflow:hidden; }
-    .mem i b { display:block; height:100%; background:var(--accent); border-radius:4px; }
-    .jobs { padding:1px 7px; border-radius:999px; background:#e8edfb; color:var(--accent); font-weight:650; }
+    .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; grid-template-areas:"model heat jobs" "mem cpu jobs"; column-gap:12px; row-gap:6px; align-items:center; }
+    .model { grid-area:model; min-width:0; }
+    .heat { grid-area:heat; }
+    .mem { grid-area:mem; }
+    .cpu { grid-area:cpu; }
+    .bar { display:inline-flex; align-items:center; gap:6px; }
+    .bar i { display:block; width:52px; height:4px; border-radius:4px; background:#e6eaf4; overflow:hidden; }
+    .bar i b { display:block; height:100%; background:var(--accent); border-radius:4px; }
+    .jobs { grid-area:jobs; align-self:center; padding:1px 7px; border-radius:999px; background:#e8edfb; color:var(--accent); font-weight:650; }
     .q { margin:8px 0 0; font-size:14px; color:var(--ink); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .card.open .q { display:block; }
     .pic-tag { display:inline-block; margin-right:6px; padding:1px 6px; border-radius:8px; background:#eef1f8; color:var(--muted); font-size:11px; }
@@ -168,6 +172,24 @@
       if(!name)return '无模型';
       return String(name).replace(/-Instruct.*$/,'').replace(/-Q4.*$/,'');
     }
+    function thermalLabel(level){
+      if(level===0)return '清凉';
+      if(level===1)return '正常';
+      if(level===2)return '温热';
+      if(level===3)return '发热';
+      if(level===4)return '过热';
+      if(level===5)return '警告';
+      if(level===6)return '紧急';
+      if(level===7)return '逃生';
+      return '';
+    }
+    function formatHeat(temp, level){
+      const parts=[];
+      if(typeof temp==='number'&&temp>=0)parts.push(temp+'℃');
+      const label=thermalLabel(level);
+      if(label)parts.push(label);
+      return parts.join(' · ');
+    }
     function publicJobName(name, role){
       const text=String(name||'');
       if(text==='本机'||text.indexOf('算力设备')===0||text.indexOf('聊天设备')===0) return text;
@@ -200,11 +222,16 @@
         const tag=!device.ready?'连接中':(infer>0?'推理中':'在线');
         const klass=!device.ready?'wait':(infer>0?'run':'');
         const mem=typeof device.memUsage==='number'&&device.memUsage>=0?device.memUsage:-1;
+        const heat=compute?formatHeat(device.batteryTemp, device.thermalLevel):'';
+        const cpu=compute&&typeof device.cpuUsage==='number'&&device.cpuUsage>=0?device.cpuUsage:-1;
+        const bar=(kind,label,value)=>value<0?'<span class="bar '+kind+'"></span>':
+          '<span class="bar '+kind+'">'+label+' <i><b style="width:'+Math.min(100,value)+'%"></b></i>'+value+'%</span>';
+        const details=compute?'<div class="meta"><span class="model">'+esc(shortModel(device.model))+'</span>'+
+          '<span class="heat">'+(heat?esc(heat):'')+'</span>'+
+          bar('mem','内存',mem)+bar('cpu','CPU',cpu)+
+          '<span class="jobs">推理 '+infer+'</span></div>':'';
         return '<div class="card"><div class="row1"><span class="mark '+mark+'"></span><span class="name">'+esc(title)+
-          '</span><span class="tag '+klass+'">'+tag+'</span></div><div class="meta"><span>'+esc(shortModel(device.model))+
-          '</span>'+(mem>=0?'<span class="mem">内存 <i><b style="width:'+Math.min(100,mem)+'%"></b></i>'+mem+'%</span>':'')+
-          (compute?'<span class="jobs">推理 '+infer+'</span>':'')+
-          '</div></div>';
+          '</span><span class="tag '+klass+'">'+tag+'</span></div>'+details+'</div>';
       }).join('');
     }
     function jobKey(job){

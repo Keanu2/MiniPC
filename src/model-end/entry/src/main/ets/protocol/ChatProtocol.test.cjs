@@ -84,13 +84,16 @@ assert.doesNotThrow(() => expiry.checkExpiry(), 'completed message never creates
 assert.equal(expiry.receive(encodeMessage({ type: 'done', requestId: 'r' }, 'after_idle')[0]).type, 'done');
 const info = {
   protocol: 'nearby-chat-v1', type: 'deviceInfo', requestId: 'info-1', name: '算力', model: 'Qwen',
-  memUsage: 40, memAvail: 1000, memTotal: 2000, modelRequests: 1, peerRole: 'compute'
+  memUsage: 40, memAvail: 1000, memTotal: 2000, thermalLevel: 2, batteryTemp: 42, cpuUsage: 18,
+  modelRequests: 1, peerRole: 'compute'
 };
 assert(validMessage(info));
 assert(!validMessage({ ...info, peerRole: 'other' }));
+assert(!validMessage({ ...info, thermalLevel: 'hot' }));
 assert.equal(new MessageAssembler().receive(encodeMessage({
-  type: 'deviceInfo', requestId: 'info-1', name: '算力', model: 'Qwen', memUsage: 40, peerRole: 'compute'
-}, 'info')[0]).model, 'Qwen');
+  type: 'deviceInfo', requestId: 'info-1', name: '算力', model: 'Qwen', memUsage: 40,
+  thermalLevel: 2, batteryTemp: 42, cpuUsage: 18, peerRole: 'compute'
+}, 'info')[0]).batteryTemp, 42);
 const sync = {
   protocol: 'nearby-chat-v1', type: 'deviceInfoSync', requestId: 'sync-1',
   devices: [{ id: 'self', name: '本机', role: 'self', model: 'Qwen', memUsage: 10, modelRequests: 0 }]

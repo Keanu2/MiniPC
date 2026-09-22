@@ -243,6 +243,27 @@ const SCAN_WINDOW = 4500;
       { type: 'hello_ack', peerRole: 'compute', slot: 3 }, 'ack-2')[0]);
     await flush();
     assert.equal(t.channel.selfLabel(), '聊天设备3', 'a live renumber reaches the label');
+    link.drop(-1);
+    assert.equal(t.channel.selfLabel(), '聊天设备', 'an offline phone does not retain a stale numbered title');
+  }
+
+  {
+    const t = build('chat-discovers-takeover');
+    await t.channel.prepare();
+    t.behavior.devices = [{ deviceId: 'trusted', deviceName: 'NewHub', networkId: 'trusted-net' }];
+    t.behavior.names = { 'old-mac': 'NewHub', 'new-mac': 'NewHub' };
+    const ad = (deviceId, slot, rssi) => ({ deviceId, deviceName: 'NewHub', rssi,
+      data: new Uint8Array([9, 0xFF, 0x77, 0x6E, 1, slot, 11, 22, 33, 44]).buffer });
+    t.behavior.scanData = [ad('old-mac', 2, -20), ad('old-mac', 1, -20),
+      { deviceId: 'old-mac', deviceName: 'NewHub', rssi: -20, data: new Uint8Array([0]).buffer }];
+    const first = t.channel.computeDevices();
+    await advance(SCAN_WINDOW); await first;
+    assert.equal(t.channel.connectComputes().length, 1, 'a 2-to-1 change replaces the old slot within one scan');
+    t.behavior.scanData = [ad('old-mac', 2, -20), ad('new-mac', 1, -70)];
+    const second = t.channel.computeDevices();
+    await advance(SCAN_WINDOW); await second;
+    assert.equal(t.channel.connectComputes()[0].mac, 'new-mac',
+      'the latest identity advertisement wins over a stronger stale address');
   }
 
   console.log('PASS: chat-end scan serialisation and live chat-slot updates');

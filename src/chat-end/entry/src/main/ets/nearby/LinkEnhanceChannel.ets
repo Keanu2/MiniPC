@@ -14,6 +14,7 @@ const CONNECT_TRY_MS = 8000;
 const COMPUTE_SCAN_MS = 4500;
 
 class BleHit {
+  observation: number = 0;
   mac: string;
   name: string;
   rssi: number;
@@ -235,7 +236,7 @@ export class LinkEnhanceChannel {
   }
   localUid(): string { return installIdOf(this.context); }
   selfLabel(): string {
-    return this.selfSlot > 0 ? '聊天设备' + String(this.selfSlot) : '';
+    return this.selfSlot > 0 ? '聊天设备' + String(this.selfSlot) : '聊天设备';
   }
   private trustedList(): dm.DeviceBasicInfo[] {
     if (this.manager === null) return [];
@@ -462,6 +463,8 @@ export class LinkEnhanceChannel {
       // A rotating BLE address makes the MAC useless as identity: dedupe on the
       // advertised fingerprint when we have one, and only fall back to the address.
       const mark = hit.key.length > 0 ? 'key:' + hit.key : 'mac:' + hit.mac;
+      if (hit.key.length > 0 && hits.some((other: BleHit) => other.key === hit.key &&
+        other.observation > hit.observation)) continue;
       if (seen.indexOf(mark) >= 0) continue;
       const name = this.hitName(hit);
       if (!this.isTrustedPeer(hit.mac, name)) continue;
@@ -633,6 +636,7 @@ export class LinkEnhanceChannel {
     // radio and remove the listener out from under the newer one.
     return new Promise<BleHit[]>((resolve) => {
       const hits: BleHit[] = [];
+      let observation = 0;
       let timer: number = -1;
       let settled = false;
       const options: ble.ScanOptions = {
@@ -653,14 +657,19 @@ export class LinkEnhanceChannel {
           } catch (_) { compute = false; }
           const existing = hits.find((hit: BleHit) => hit.mac === item.deviceId);
           if (existing !== undefined) {
-            if (compute) existing.compute = true;
-            if (slot > existing.slot) existing.slot = slot;
+            if (compute) {
+              existing.compute = true;
+              // A scan response that only names the box must not wipe 2→1.
+              if (slot > 0 || existing.slot < 1) existing.slot = slot;
+              existing.observation = ++observation;
+            }
             if (existing.key.length === 0 && key.length > 0) existing.key = key;
             if (existing.name.length === 0 && (item.deviceName || '').length > 0) existing.name = item.deviceName;
             continue;
           }
           const hit = new BleHit(item.deviceId, item.deviceName || '', item.rssi, compute, compute ? slot : 0,
             compute ? key : '');
+          if (compute) hit.observation = ++observation;
           hits.push(hit);
           hilog.info(0, 'NearbyChat',
             'le-scan mac=%{public}s name=%{public}s rssi=%{public}d compute=%{public}s slot=%{public}d key=%{public}s',
@@ -929,6 +938,7 @@ export class LinkEnhanceChannel {
     const index = this.peers.indexOf(peer);
     if (index < 0) return;
     this.peers.splice(index, 1);
+    if (this.peers.length === 0) this.selfSlot = 0;
     peer.end();
     peer.settleConnection(false);
     this.completeServiceCheck(peer, status);

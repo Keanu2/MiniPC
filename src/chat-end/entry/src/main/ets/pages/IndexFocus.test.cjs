@@ -67,6 +67,8 @@ function setup() {
         const model = entry.model && entry.model.length > 0 ? entry.model : '无模型';
         const parts = [model];
         if (entry.memUsage !== undefined && entry.memUsage >= 0) parts.push('内存 ' + String(entry.memUsage) + '%');
+        if (entry.batteryTemp !== undefined && entry.batteryTemp >= 0) parts.push(String(entry.batteryTemp) + '℃');
+        if (entry.cpuUsage !== undefined && entry.cpuUsage >= 0) parts.push('CPU ' + String(entry.cpuUsage) + '%');
         if (entry.modelRequests !== undefined && entry.modelRequests >= 0) parts.push('推理 ' + String(entry.modelRequests));
         return parts.join(' · ');
       },
@@ -74,6 +76,7 @@ function setup() {
         return {
           id: message.id || '', name: message.name || '', role: message.role || 'compute',
           memTotal: message.memTotal, memAvail: message.memAvail, memUsage: message.memUsage,
+          thermalLevel: message.thermalLevel, batteryTemp: message.batteryTemp, cpuUsage: message.cpuUsage,
           model: message.model || '', modelRequests: message.modelRequests, ready: true
         };
       },
@@ -87,7 +90,8 @@ function setup() {
       },
       toDeviceInfoReply: (id, entry) => ({
         type: 'deviceInfo', requestId: id, name: entry.name, model: entry.model || '',
-        memUsage: entry.memUsage, modelRequests: entry.modelRequests, peerRole: 'chat'
+        memUsage: entry.memUsage, thermalLevel: entry.thermalLevel, batteryTemp: entry.batteryTemp,
+        cpuUsage: entry.cpuUsage, modelRequests: entry.modelRequests, peerRole: 'chat'
       })
     };
     return {};

@@ -13,7 +13,7 @@ const { transpile } = require('../../../../../../tests/harness.cjs');
 // window, the connect attempt and the 20 s no-hello timeout — and draining them in
 // one pass would tear down the very links the scene is about, so each timer keeps
 // the time it is due and the test decides how far to run.
-let clock = 0;
+let clock = Date.now();
 let clockSeq = 0;
 const clockTimers = new Map();
 
@@ -57,9 +57,8 @@ function build(server, tag) {
   let advertiseCalls = 0;
   const behavior = {
     permission: 0,
-    // This box sorts above the two it is about to dial: the tie-break in
-    // connectOtherComputes() is by display name, so a local name that lost the
-    // comparison would leave one of the two candidates undialled.
+    // Legacy beacons without an identity fingerprint use display-name dial
+    // ordering. This fixture sorts above those candidates so it initiates.
     localName: '算力设备9',
     // Two boxes the device manager lists and the mesh is allowed to dial. They are
     // link-scoped tokens, not BLE addresses: an address rotates on every reconnect,
@@ -121,21 +120,35 @@ function build(server, tag) {
       return behavior.names[id] || '';
     } };
   const ble = {
+    AdvertisingState: { STARTED: 1, ENABLED: 2, DISABLED: 3, STOPPED: 4 },
     ScanDuty: { SCAN_MODE_LOW_LATENCY: 2 },
     MatchMode: { MATCH_MODE_AGGRESSIVE: 1 },
     on: (event, fn) => bus.set(event, fn),
     off: (event) => bus.delete(event),
     startBLEScan: () => {
+      if (behavior.scanRefused) throw new Error('scanner unavailable');
       const listener = bus.get('BLEDeviceFind');
       if (listener !== undefined) listener(behavior.scanData);
     },
     stopBLEScan: () => {},
-    startAdvertising: (setting, data) => {
+    startAdvertising: async params => {
+      assert(params.advertisingData, 'use the ID-returning asynchronous API');
       if (behavior.advertiseRefused) throw new Error('adapter not ready');
       advertiseCalls++;
-      lastAdvertise = data;
+      lastAdvertise = params.advertisingData;
+      const id = advertiseCalls;
+      behavior.advertisingStarts = (behavior.advertisingStarts || []).concat(id);
+      if (behavior.startGate) await behavior.startGate;
+      if (behavior.earlyStopped) bus.get('advertisingStateChange')?.({ advertisingId: id, state: 4 });
+      else if (!behavior.silentStart) bus.get('advertisingStateChange')?.({ advertisingId: id, state: 1 });
+      return id;
     },
-    stopAdvertising: () => {}
+    stopAdvertising: async id => {
+      assert.equal(typeof id, 'number', 'stop exactly the owned advertising ID, never the global advertiser');
+      behavior.advertisingStops = (behavior.advertisingStops || []).concat(id);
+      if (behavior.stopGate) await behavior.stopGate;
+      bus.get('advertisingStateChange')?.({ advertisingId: id, state: 4 });
+    }
   };
   const storeFor = (context) => {
     const tag = context.tag;
@@ -157,7 +170,7 @@ function build(server, tag) {
   const modules = {};
   const load = (file, fromDir) => {
     const context = {
-      exports: {}, Uint8Array, ArrayBuffer, Date, JSON, Math, Promise, Map, Set, Error, Object, Array,
+      exports: {}, Uint8Array, ArrayBuffer, Date: class extends Date { static now() { return clock; } }, JSON, Math, Promise, Map, Set, Error, Object, Array,
       Number, String, Boolean, console,
       setTimeout: (fn, delay) => {
         const id = ++clockSeq;
@@ -208,16 +221,7 @@ function build(server, tag) {
   };
   modules.config = { IS_SERVER: server, USE_LINK_ENHANCE: true, COMPUTE_MANUFACTURE_ID: 0x6E77,
     COMPUTE_ADV_TYPE: 1, COMPUTE_ADV_KEY_BYTES: 4 };
-  // The roster has its own suite (ClusterRoster.test.cjs); here it only needs to hand
-  // out stable slots so peer naming can be observed.
-  modules.roster = {
-    RankMember: class {},
-    rankComputes: members => members.map(item => item.key),
-    rankNames: names => names.slice().sort(),
-    freezeComputeRank: (frozen, members) => (members.length === 0 ? frozen : members.map(item => item.key)),
-    freezeNameRank: (frozen, names) => (names.length === 0 ? frozen : names.slice().sort()),
-    slotOf: (keys, key) => { const at = keys.indexOf(key); return at < 0 ? 0 : at + 1; }
-  };
+  modules.roster = load('ClusterRoster', __dirname + '/../cluster');
   modules.protocol = load('ChatProtocol', __dirname + '/../protocol');
   const channel = new (load('LinkEnhanceChannel').LinkEnhanceChannel)();
   channel.initialize({ tag: tag || (server ? 'server' : 'client'), applicationInfo: { accessTokenId: 1 } });
@@ -228,6 +232,12 @@ function build(server, tag) {
   /** Frames the module has pushed out on an outgoing connection. */
   const sent = handle => handle.sent.map(decode).filter(Boolean);
   return { channel, behavior, logs, connections, modules, decode, sent,
+    advState(id, state) { bus.get('advertisingStateChange')?.({ advertisingId: id, state }); },
+    accept(deviceId) {
+      const link = linkEnhance.createConnection(deviceId);
+      behavior.server.listeners.get('connectionAccepted')(link);
+      return link;
+    },
     get advertise() { return lastAdvertise; },
     get advertiseCalls() { return advertiseCalls; } };
 }
@@ -486,6 +496,7 @@ function scan(t) {
     const selfKey = t.channel.computeKey(t.channel.localUid(), t.channel.localName());
     t.channel.frozenComputeKeys = ['elected-hub', selfKey];
     t.channel.applyComputeSlots();
+    await flush();
     assert.equal(t.channel.selfComputeNumber(), 2);
     assert.equal(new Uint8Array(t.advertise.manufactureData[0].manufactureValue)[1], 2,
       'a follower must not keep advertising the unnumbered or hub slot');
@@ -515,14 +526,16 @@ function scan(t) {
     const self = t.channel.computeKey(t.channel.localUid(), t.channel.localName());
     t.channel.frozenComputeKeys = ['former-hub', self];
     t.channel.applyComputeSlots();
-    t.channel.hubLostAt = Date.now() - 16000;
-    t.channel.lastHits = [{ compute: true, slot: 1, key: 'former-key' }];
+    t.channel.hubLostAt = clock - 16000;
+    t.channel.lastScanComplete = true;
+    t.channel.lastHits = [{ compute: true, slot: 1, key: 'former-key', mac: 'link-1', name: '算力设备2' }];
     for (let i = 0; i < 3; i++) t.channel.considerHubFailover();
     assert.equal(t.channel.selfComputeNumber(), 2, 'a visible old hub blocks promotion');
     t.channel.lastHits = [];
     for (let i = 0; i < 2; i++) t.channel.considerHubFailover();
     assert.equal(t.channel.selfComputeNumber(), 2, 'one or two empty scans do not create a second hub');
     t.channel.considerHubFailover();
+    await flush();
     assert.equal(t.channel.selfComputeNumber(), 1, 'third missing-hub scan promotes the next worker');
     assert.equal(new Uint8Array(t.advertise.manufactureData[0].manufactureValue)[1], 1,
       'the promoted worker publishes slot 1 for chat reconnect');
@@ -533,7 +546,7 @@ function scan(t) {
     t.channel.setSelfMem(100);
     assert.equal(t.channel.selfComputeNumber(), 1,
       'a returning former hub cannot displace the promoted center by memory rank');
-    t.channel.applyRemoteRoster('former-hub', [
+    t.channel.applyRemoteRoster(-99, [
       { id: 'former-hub', name: 'former-hub', role: 'compute', slot: 1 },
       { id: self, name: t.channel.localName(), role: 'compute', slot: 2 }
     ]);
@@ -544,12 +557,67 @@ function scan(t) {
     const t = build(true, 'former-hub-rejoins');
     t.behavior.localName = 'AFormer';
     await t.channel.prepare();
-    t.channel.applyRemoteRoster('ZNewHub', [
+    t.channel.peers.push({ epoch: 8, role: 'compute', deviceUid: 'new-hub', peerId: 'new-hub', helloName: 'ZNewHub' });
+    t.channel.applyRemoteRoster(8, [
       { id: 'new-hub', name: 'ZNewHub', role: 'compute', slot: 1 },
-      { id: 'former', name: 'AFormer', role: 'compute', slot: 2 }
+      { id: t.channel.localUid(), name: 'AFormer', role: 'compute', slot: 2 }
     ]);
     assert.equal(t.channel.selfComputeNumber(), 2,
       'a restarted former hub adopts the active hub before its own election timer and despite name ordering');
+  }
+
+  // Real handshake -> hub loss -> scans -> promotion -> server recovery -> chats.
+  {
+    const t = build(true, 'third-worker-full-takeover');
+    t.behavior.localName = 'Worker';
+    t.behavior.devices = [
+      { deviceId: 'hub-link', deviceName: 'Hub', networkId: 'hub-net' },
+      { deviceId: 'chat-listed', deviceName: 'SamePhone', networkId: 'chat-net' }
+    ];
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    const hub = t.accept('hub-link');
+    for (const frame of t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      deviceUid: 'old-hub', name: 'Hub', slot: 1 }, 'old-hello')) hub.deliver(frame);
+    await flush();
+    const hubEpoch = t.channel.peerInfos()[0].epoch;
+    t.channel.applyRemoteRoster(hubEpoch, [
+      { deviceUid: 'old-hub', name: 'Hub', role: 'compute', slot: 1 },
+      { deviceUid: 'absent-worker', name: 'Worker', role: 'compute', slot: 2 },
+      { deviceUid: t.channel.localUid(), name: 'Worker', role: 'compute', slot: 3 }
+    ]);
+    assert.equal(t.channel.selfComputeNumber(), 3, 'UID distinguishes same-name compute nodes');
+    hub.drop(-1);
+    t.behavior.scanRefused = true;
+    for (let i = 0; i < 3; i++) await scan(t);
+    assert.equal(t.channel.selfComputeNumber(), 3, 'failed radio scans cannot prove the hub absent');
+    t.behavior.scanRefused = false;
+    for (let i = 0; i < 3; i++) { await scan(t); await advance(2500); }
+    assert.equal(t.channel.selfComputeNumber(), 1, 'the highest surviving rank takes over even if original 2 is gone');
+    assert.equal(new Uint8Array(t.advertise.manufactureData[0].manufactureValue)[1], 1);
+    t.behavior.server.listeners.get('serverStopped')(-7);
+    await advance(800);
+    assert(t.behavior.server.started, 'new center recovers its listener');
+    assert.equal(t.channel.selfComputeNumber(), 1, 'server recovery retains the elected center');
+    assert.equal(new Uint8Array(t.advertise.manufactureData[0].manufactureValue)[1], 1);
+    const joinChat = async (mac, uid, messageId) => {
+      const link = t.accept(mac);
+      for (const frame of t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'chat',
+        deviceUid: uid, name: 'SamePhone' }, messageId)) link.deliver(frame);
+      await flush();
+      return link;
+    };
+    const first = await joinChat('chat-mac-1', 'phone-1', 'chat-a');
+    const second = await joinChat('chat-mac-2', 'phone-2', 'chat-b');
+    assert.equal(t.sent(first).find(m => m.type === 'hello_ack').slot, 1);
+    assert.equal(t.sent(second).find(m => m.type === 'hello_ack').slot, 2,
+      'two same-name chat phones receive distinct acknowledgments from the promoted hub');
+    first.drop(-1);
+    t.channel.setRemoteChats(['SamePhone', 'stale-phone']);
+    const rejoined = await joinChat('new-chat-mac', 'phone-1', 'chat-c');
+    assert.equal(t.sent(rejoined).find(m => m.type === 'hello_ack').slot, 1);
+    assert.equal(t.channel.peerInfos().find(p => p.deviceUid === 'phone-2').slot, 2,
+      'reconnection and stale worker rosters never reassign another live phone');
   }
 
   // --- 5. The retired acm collaborate entry point refuses -------------------------
@@ -625,7 +693,7 @@ function scan(t) {
     await t.channel.prepare();
     assert.equal(t.advertiseCalls, 0, 'no advertisement was accepted');
     assert.equal(t.advertise, null, 'nothing was pushed to the radio');
-    // Every refresh path bails on `!advertising`, so only the retry timer can recover.
+    // An asynchronous failure must leave a retry armed even without new peers.
     t.channel.refreshAdvertisedSlot();
     await advance(1000);
     assert.equal(t.advertiseCalls, 0, 'still refused');
@@ -633,6 +701,74 @@ function scan(t) {
     await advance(3000);
     assert(t.advertiseCalls > 0, 'the retry timer publishes once the adapter is ready');
     assert(t.advertise.manufactureData[0].manufactureId, 'a real advertisement reached the radio');
+  }
+
+  // The platform's advertising operations complete asynchronously, not when the
+  // request is submitted. Exercise pending stops, late starts and state events.
+  {
+    const t = build(true, 'async-advertise-takeover');
+    await t.channel.prepare(); await flush();
+    t.channel.selfComputeSlot = 2;
+    t.channel.refreshAdvertisedSlot(); await flush();
+    const workerId = t.channel.advertisingId;
+    const calls = t.advertiseCalls;
+    let stopped;
+    t.behavior.stopGate = new Promise(resolve => { stopped = resolve; });
+    t.channel.selfComputeSlot = 1;
+    t.channel.refreshAdvertisedSlot();
+    t.channel.refreshAdvertisedSlot();
+    await flush();
+    assert.equal(t.advertiseCalls, calls, 'new hub start waits for old worker stop completion');
+    assert.equal(t.channel.advertising, false, 'a stop in progress is not a live hub advertisement');
+    assert.equal(t.behavior.advertisingStops.filter(id => id === workerId).length, 1,
+      'multiple refreshes issue only one ID-specific stop');
+    stopped(); t.behavior.stopGate = null; await flush();
+    assert.equal(t.advertiseCalls, calls + 1);
+    assert.equal(t.channel.lastAdvertisedSlot, 1);
+    assert.equal(new Uint8Array(t.advertise.manufactureData[0].manufactureValue)[1], 1);
+    t.advState(workerId, 4);
+    assert.equal(t.channel.advertising, true, 'late stopped event for old ID cannot invalidate new hub');
+    const hubId = t.channel.advertisingId;
+    t.advState(hubId, 4);
+    assert.equal(t.channel.advertising, false, 'unexpected stopped event clears optimistic state');
+    await advance(1000);
+    assert.equal(t.advertiseCalls, calls + 2, 'stopped hub advertisement automatically recovers');
+    t.channel.disconnect(); await flush();
+  }
+  {
+    const t = build(true, 'late-advertise-after-disable');
+    let started;
+    t.behavior.startGate = new Promise(resolve => { started = resolve; });
+    await t.channel.prepare(); await flush();
+    assert.equal(t.channel.advertising, false, 'submitted start is not confirmed yet');
+    t.channel.disconnect();
+    started(); await flush();
+    assert.equal(t.channel.advertising, false);
+    assert.equal(t.channel.advertisingId, -1);
+    assert.deepEqual(t.behavior.advertisingStops, [1], 'late successful start is cleaned up by its own ID');
+    assert.equal(t.advertiseCalls, 1, 'manual disable must never restart an advertiser');
+  }
+  {
+    const t = build(true, 'advertise-stopped-before-result');
+    t.behavior.earlyStopped = true;
+    await t.channel.prepare(); await flush();
+    assert.equal(t.channel.advertising, false, 'STOPPED before start promise resolves is not lost');
+    t.behavior.earlyStopped = false;
+    await advance(1000);
+    assert.equal(t.channel.advertising, true);
+    t.channel.disconnect(); await flush();
+  }
+  {
+    const t = build(true, 'advertise-start-without-state');
+    t.behavior.silentStart = true;
+    await t.channel.prepare(); await flush();
+    assert.equal(t.channel.advertising, false, 'returning an ID is not the same as being on the air');
+    t.behavior.silentStart = false;
+    await advance(2000);
+    assert.equal(t.channel.advertising, false, 'the failed start only arms a retry');
+    await advance(1000);
+    assert.equal(t.channel.advertising, true, 'retry waits for STARTED before claiming success');
+    t.channel.disconnect(); await flush();
   }
 
   // --- 8. A key that ends exactly on the packet boundary is still read -----------

@@ -309,7 +309,9 @@ struct Index {
       // Work this device is actually running: its own questions plus requests a
       // chat peer routed here. `peer` alone would count "推理 0" mid-inference.
       jobs: this.jobs.filter((item: ActiveJob) => item.workerEpoch === 0).length,
-      role: 'self', model: self.model, memUsage: self.memUsage, modelRequests: self.modelRequests
+      role: 'self', model: self.model, memUsage: self.memUsage,
+      thermalLevel: self.thermalLevel, batteryTemp: self.batteryTemp, cpuUsage: self.cpuUsage,
+      modelRequests: self.modelRequests
     });
     seen.push('id:' + selfUid);
     // Deduplicate on connection identity, not on the public label: two distinct
@@ -331,7 +333,9 @@ struct Index {
       }
       devices.push({
         epoch: peer.epoch, name: hidePhoneName(peer.name, peer.role || 'chat'), id: id, ready: peer.ready, jobs: count,
-        role: peer.role, model: stats?.model, memUsage: stats?.memUsage, modelRequests: stats?.modelRequests
+        role: peer.role, model: stats?.model, memUsage: stats?.memUsage,
+        thermalLevel: stats?.thermalLevel, batteryTemp: stats?.batteryTemp, cpuUsage: stats?.cpuUsage,
+        modelRequests: stats?.modelRequests
       });
     }
     for (const extra of this.remoteEntries()) {
@@ -357,7 +361,9 @@ struct Index {
       seen.push(mark);
       devices.push({
         epoch: -1, name: name, id: id || name, ready: extra.ready !== false, jobs: 0,
-        role: role, model: extra.model, memUsage: extra.memUsage, modelRequests: extra.modelRequests
+        role: role, model: extra.model, memUsage: extra.memUsage,
+        thermalLevel: extra.thermalLevel, batteryTemp: extra.batteryTemp, cpuUsage: extra.cpuUsage,
+        modelRequests: extra.modelRequests
       });
     }
     const views: JobView[] = [];
@@ -725,7 +731,9 @@ struct Index {
   }
 
   private handleDeviceInfo(message: WireMessage, epoch: number): void {
-    if (message.memUsage !== undefined || message.model !== undefined) {
+    if (message.memUsage !== undefined || message.model !== undefined ||
+      message.thermalLevel !== undefined || message.batteryTemp !== undefined ||
+      message.cpuUsage !== undefined) {
       let entry = this.peerStats.get(epoch);
       if (entry === undefined) {
         entry = { role: this.channel.peerRole(epoch) || 'compute' };
@@ -741,27 +749,34 @@ struct Index {
 
   private handleClusterSync(message: WireMessage, epoch: number): void {
     const devices = message.devices === undefined ? [] : message.devices;
-    // Roster is stored per reporter. A single global snapshot meant whichever peer
-    // reported last overwrote the others, so the device list flickered between
-    // 算力设备 and 算力设备1 and stale entries outlived their sender.
-    this.remoteSeen.set(epoch, devices);
-    this.refreshRemoteChats();
     const peers = this.channel.peerInfos();
+    this.remoteSeen.delete(epoch);
     for (const sender of peers) {
-      if (sender.epoch === epoch && sender.role === 'compute') {
-        this.channel.applyRemoteRoster(sender.helloName || '', devices);
+      if (sender.epoch === epoch && sender.ready && sender.role === 'compute') {
+        this.channel.applyRemoteRoster(epoch, devices);
+        // Re-read the rank after applying the roster. Only the current hub can
+        // report indirect members; a worker's old snapshot is not authoritative.
+        const current = this.channel.peerInfos().find((peer) => peer.epoch === epoch);
+        if (this.channel.selfComputeNumber() > 1 && current !== undefined && current.slot === 1) {
+          this.remoteSeen.set(epoch, devices);
+        }
         break;
       }
     }
+    this.refreshRemoteChats();
     this.emitDashboard();
   }
 
-  /** Entries reported by peers that are still connected, deduplicated by id. */
+  /** Only a connected current hub may supply indirect members. */
   private remoteEntries(): DeviceInfoEntry[] {
     const result: DeviceInfoEntry[] = [];
+    if (this.channel.selfComputeNumber() <= 1) return result;
+    const hub = this.channel.peerInfos().find((peer) =>
+      peer.ready && peer.role === 'compute' && peer.slot === 1);
+    if (hub === undefined) return result;
     const seen: string[] = [];
     this.remoteSeen.forEach((entries, epoch) => {
-      if (!this.channel.hasEpoch(epoch)) return;
+      if (epoch !== hub.epoch || !this.channel.hasEpoch(epoch)) return;
       for (const entry of entries) {
         const identity = entry.deviceUid || entry.id || '';
         const mark = identity.length > 0 ? 'id:' + identity :
@@ -774,15 +789,12 @@ struct Index {
     return result;
   }
 
-  /** Rebuild remote chat slots from every still-connected reporter. */
+  /** Only expose remote chats from the current hub's live snapshot. */
   private refreshRemoteChats(): void {
     const chats: string[] = [];
-    this.remoteSeen.forEach((entries, epoch) => {
-      if (!this.channel.hasEpoch(epoch)) return;
-      for (const entry of entries) {
-        if (entry.role === 'chat' && entry.name && chats.indexOf(entry.name) < 0) chats.push(entry.name);
-      }
-    });
+    for (const entry of this.remoteEntries()) {
+      if (entry.role === 'chat' && entry.name && chats.indexOf(entry.name) < 0) chats.push(entry.name);
+    }
     this.channel.setRemoteChats(chats);
   }
 
@@ -833,7 +845,9 @@ struct Index {
         id: identity, deviceUid: peer.deviceUid || undefined,
         name: peer.helloName || '', role: peer.role || 'chat', ready: peer.ready,
         model: stats?.model, memUsage: stats?.memUsage, memAvail: stats?.memAvail,
-        memTotal: stats?.memTotal, modelRequests: stats?.modelRequests
+        memTotal: stats?.memTotal, thermalLevel: stats?.thermalLevel,
+        batteryTemp: stats?.batteryTemp, cpuUsage: stats?.cpuUsage,
+        modelRequests: stats?.modelRequests
       };
       if (peer.role === 'chat' && peer.slot > 0) entry.slot = peer.slot;
       if (peer.role === 'compute' && peer.slot > 0) entry.slot = peer.slot;

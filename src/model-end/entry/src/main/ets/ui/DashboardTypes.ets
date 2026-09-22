@@ -22,6 +22,9 @@ export interface DeviceView {
   role?: string;
   model?: string;
   memUsage?: number;
+  thermalLevel?: number;
+  batteryTemp?: number;
+  cpuUsage?: number;
   modelRequests?: number;
 }
 

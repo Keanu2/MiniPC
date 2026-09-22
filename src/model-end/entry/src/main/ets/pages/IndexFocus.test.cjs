@@ -63,24 +63,29 @@ function setup(isServer) {
     }
     if (name === '../ui/ChatBridge') return loadEts(__dirname + '/../ui/ChatBridge.ets');
     if (name === '../cluster/DeviceInfo') return {
-      DEVICE_INFO_POLL_MS: 5000,
+      DEVICE_INFO_POLL_MS: 2000,
       applyDeviceInfo(target, message) {
         if (typeof message.name === 'string' && message.name.length > 0) target.name = message.name;
         if (typeof message.memTotal === 'number') target.memTotal = message.memTotal;
         if (typeof message.memAvail === 'number') target.memAvail = message.memAvail;
         if (typeof message.memUsage === 'number') target.memUsage = message.memUsage;
+        if (typeof message.thermalLevel === 'number') target.thermalLevel = message.thermalLevel;
+        if (typeof message.batteryTemp === 'number') target.batteryTemp = message.batteryTemp;
+        if (typeof message.cpuUsage === 'number') target.cpuUsage = message.cpuUsage;
         if (typeof message.model === 'string') target.model = message.model;
         if (typeof message.modelRequests === 'number') target.modelRequests = message.modelRequests;
       },
       buildSelfEntry(_dir, running) {
         return { name: '本机', id: 'self', role: 'self', model: 'Qwen2.5-7B-Instruct-Q4_N_0',
-          modelRequests: running, memUsage: 10, memAvail: 1000, memTotal: 2000 };
+          modelRequests: running, memUsage: 10, memAvail: 1000, memTotal: 2000,
+          thermalLevel: 2, batteryTemp: 42, cpuUsage: 18 };
       },
       deployedModelName: () => 'Qwen2.5-7B-Instruct-Q4_N_0',
       formatComputeStatus: () => 'Qwen',
       toDeviceInfoReply: (id, entry) => ({
         type: 'deviceInfo', requestId: id, name: entry.name, model: entry.model,
-        memUsage: entry.memUsage, modelRequests: entry.modelRequests, peerRole: 'compute'
+        memUsage: entry.memUsage, thermalLevel: entry.thermalLevel, batteryTemp: entry.batteryTemp,
+        cpuUsage: entry.cpuUsage, modelRequests: entry.modelRequests, peerRole: 'compute'
       })
     };
     if (name === '../media/ImageAttach') return { pickJpegDataUrl: async () => '' };
@@ -179,7 +184,8 @@ function setup(isServer) {
   window.onNativeEvent({
     kind: 'dashboard', running: 2, jobs: [], selfLabel: '算力设备2',
     devices: [
-      { role: 'self', name: '算力设备2', ready: true, jobs: 2, memUsage: 41, model: 'Qwen2.5-7B-Instruct' },
+      { role: 'self', name: '算力设备2', ready: true, jobs: 2, memUsage: 41,
+        thermalLevel: 2, batteryTemp: 42, cpuUsage: 18, model: 'Qwen2.5-7B-Instruct' },
       { role: 'chat', name: '聊天设备1', ready: true, jobs: 1 }
     ]
   });
@@ -189,12 +195,17 @@ function setup(isServer) {
   window.onNativeEvent({
     kind: 'dashboard', running: 1, jobs: [], selfLabel: '算力设备1',
     devices: [
-      { role: 'self', name: '算力设备1', ready: true, jobs: 1, memUsage: 41, modelRequests: 2, model: 'Qwen2.5-7B-Instruct' }
+      { role: 'self', name: '算力设备1', ready: true, jobs: 1, memUsage: 41,
+        thermalLevel: 2, batteryTemp: 42, cpuUsage: 18, modelRequests: 2, model: 'Qwen2.5-7B-Instruct' }
     ]
   });
   assert(elements.devices.innerHTML.includes('推理 1'), 'card uses jobs, not sampled+inflight');
   assert(!elements.devices.innerHTML.includes('推理 2'), 'inflated modelRequests must not double the badge');
   assert(elements.devices.innerHTML.includes('内存'), 'compute card still shows memory');
+  assert(elements.devices.innerHTML.includes('42℃ · 温热'), 'compute card shows battery temp and thermal gear');
+  assert(elements.devices.innerHTML.includes('class="heat"'), 'heat sits on the model row');
+  assert(elements.devices.innerHTML.includes('class="bar cpu"'), 'CPU uses the same meter as memory');
+  assert(elements.devices.innerHTML.includes('width:18%'), 'CPU meter fills to occupancy');
   window.onNativeEvent({ kind: 'dashboard', running: 1, selfLabel: '算力设备1', devices: [], jobs: [{
     id: 'time-1', key: '0:time-1', source: '算力设备1', origin: '聊天设备1', question: '时间测试', answer: '',
     chars: 0, startedAt: new Date(2026, 8, 21, 10, 30, 45).getTime(), firstAt: 0, endedAt: 0,
@@ -286,6 +297,8 @@ function setup(isServer) {
   s.page.emitDashboard();
   const board = s.events.filter(event => event.kind === 'dashboard').at(-1);
   assert.equal(board.devices.find(device => device.role === 'self').jobs, 1);
+  assert.equal(board.devices.find(device => device.role === 'self').batteryTemp, 42);
+  assert.equal(board.devices.find(device => device.role === 'self').cpuUsage, 18);
   assert.equal(board.devices.find(device => device.role === 'compute').jobs, 1,
     'the coordinator counts only work actually dispatched to that compute');
   assert.equal(board.running, 1, 'the task rail count includes only work executed by this compute');
@@ -298,8 +311,16 @@ function setup(isServer) {
   s.page.receive({ type: 'done', requestId: forwardId, finishReason: 'stop' }, 7);
   assert.equal(s.sent.at(-1).type, 'done');
   assert.equal(s.sent.at(-1).source, '由算力设备2推理');
-  s.page.receive({ type: 'deviceInfo', requestId: 'info-7', model: 'Qwen', memUsage: 41, modelRequests: 1, memAvail: 7000 }, 7);
+  s.page.receive({ type: 'deviceInfo', requestId: 'info-7', model: 'Qwen', memUsage: 41,
+    thermalLevel: 3, batteryTemp: 45.5, cpuUsage: 67, modelRequests: 1, memAvail: 7000 }, 7);
   assert.equal(s.page.peerStats.get(7).memUsage, 41);
+  assert.equal(s.page.peerStats.get(7).thermalLevel, 3);
+  assert.equal(s.page.peerStats.get(7).batteryTemp, 45.5);
+  assert.equal(s.page.peerStats.get(7).cpuUsage, 67);
+  s.page.emitDashboard();
+  const loadBoard = s.events.filter(event => event.kind === 'dashboard').at(-1);
+  assert.equal(loadBoard.devices.find(device => device.role === 'compute').thermalLevel, 3);
+  assert.equal(loadBoard.devices.find(device => device.role === 'compute').cpuUsage, 67);
   s.page.receive({ type: 'deviceInfo', requestId: 'q1' }, 1);
   assert.equal(s.sent.at(-1).type, 'deviceInfo');
   assert.equal(s.sent.at(-1).model, 'Qwen2.5-7B-Instruct-Q4_N_0');
@@ -336,8 +357,9 @@ function setup(isServer) {
   const ghost = setup(true);
   ghost.page.pageReady = true;
   ghost.page.serviceReady = true;
+  ghost.channel.selfComputeNumber = () => 2;
   ghost.channel.peerInfos = () => [{ epoch: 7, peerId: 'compute-2', ready: true, role: 'compute',
-    name: '算力设备2', helloName: '算力设备2', deviceUid: 'compute-2', slot: 2 }];
+    name: '算力设备1', helloName: '算力设备1', deviceUid: 'compute-2', slot: 1 }];
   ghost.channel.hasEpoch = epoch => epoch === 7;
   ghost.page.remoteSeen.set(7, [{ id: 'chat-live', name: '聊天A', role: 'chat' }]);
   ghost.page.remoteSeen.set(8, [{ id: 'chat-gone', name: '聊天B', role: 'chat' }]);
@@ -348,6 +370,12 @@ function setup(isServer) {
   const sync = ghost.sent.filter(message => message.type === 'deviceInfoSync').at(-1);
   assert(sync.devices.every(device => device.id !== 'chat-live' && device.id !== 'chat-gone'),
     'remote roster entries must not be forwarded into a permanent gossip cycle');
+  assert.equal(ghost.page.remoteEntries().length, 1, 'a worker sees its live hub roster');
+  ghost.channel.selfComputeNumber = () => 1;
+  assert.equal(ghost.page.remoteEntries().length, 0,
+    'promotion immediately hides old indirect chats before the next roster arrives');
+  ghost.page.handleClusterSync({ devices: [{ id: 'old-chat', role: 'chat', name: '聊天设备1' }] }, 7);
+  assert.equal(ghost.page.remoteSeen.has(7), false, 'a hub cannot import another reporter chat slot');
 
   const quiet = setup(true);
   quiet.page.serviceReady = true;
@@ -360,7 +388,7 @@ function setup(isServer) {
     'only the compute worker, not the chat link, receives the multi-frame roster');
   quiet.page.pollDeviceInfo();
   assert.equal(quiet.sent.filter(message => message.type === 'deviceInfoSync').length, 1,
-    'a five-second status poll does not resend an unchanged full roster');
+    'a two-second status poll does not resend an unchanged full roster');
   quiet.channel.peerInfos = () => [
     { epoch: 1, peerId: 'chat', name: '聊天设备1', helloName: '聊天设备1', ready: true, role: 'chat', slot: 1 },
     { epoch: 3, peerId: 'chat-new', name: '聊天设备2', helloName: '聊天设备2', ready: true, role: 'chat', slot: 2 },
