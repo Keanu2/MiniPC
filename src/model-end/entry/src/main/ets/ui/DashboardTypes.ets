@@ -64,4 +64,6 @@ export interface ActiveJob {
   origin: string;
   workerEpoch: number;
   image: string;
+  /** Experiment route that scheduled this job; empty for ordinary traffic. */
+  routeMode: string;
 }

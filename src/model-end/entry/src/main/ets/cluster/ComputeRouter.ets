@@ -65,6 +65,32 @@ function memAvailOf(node: ScheduleNode): number {
   return node.memAvail < 0 ? 0 : node.memAvail;
 }
 
+/**
+ * Experiment override. auto keeps pickNode. pin1/pin2 force this hub or the
+ * other modeled compute. split sends the caller-chosen side: preferSelf is
+ * decided by the hub so each chat stays on one device for the whole run.
+ */
+export function pickRoute(nodes: ScheduleNode[], mode: string, preferSelf: boolean): ScheduleNode | null {
+  if (mode === 'auto' || mode.length === 0) return pickNode(nodes);
+  let self: ScheduleNode | null = null;
+  let peer: ScheduleNode | null = null;
+  for (const node of nodes) {
+    if (node.model.length === 0) continue;
+    if (node.isSelf) {
+      self = node;
+      continue;
+    }
+    if (peer === null || memAvailOf(node) > memAvailOf(peer)) peer = node;
+  }
+  if (mode === 'pin1') return self;
+  if (mode === 'pin2') return peer;
+  if (mode === 'split') {
+    if (preferSelf) return self !== null ? self : peer;
+    return peer !== null ? peer : self;
+  }
+  return pickNode(nodes);
+}
+
 export class ComputeRouter {
   private byOrigin: Map<string, DispatchEntry> = new Map();
   /** Forwarded request id -> origin key. The worker echoes forwardId verbatim. */

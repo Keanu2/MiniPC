@@ -659,11 +659,12 @@ export class LinkEnhanceChannel {
           if (existing !== undefined) {
             if (compute) {
               existing.compute = true;
-              // A scan response that only names the box must not wipe 2→1.
-              if (slot > 0 || existing.slot < 1) existing.slot = slot;
+              // A valid slot 0 withdraws an old hub claim after restart. Only a
+              // name-only response (compute=false) must preserve the last slot.
+              existing.slot = slot;
               existing.observation = ++observation;
             }
-            if (existing.key.length === 0 && key.length > 0) existing.key = key;
+            if (key.length > 0) existing.key = key;
             if (existing.name.length === 0 && (item.deviceName || '').length > 0) existing.name = item.deviceName;
             continue;
           }
@@ -720,6 +721,7 @@ export class LinkEnhanceChannel {
   }
 
   private tryConnect(kind: string, deviceId: string): Promise<boolean> {
+    const operation = this.lifecycle;
     return new Promise<boolean>((resolve) => {
       let settled = false;
       let handle: linkEnhance.Connection | null = null;
@@ -739,6 +741,14 @@ export class LinkEnhanceChannel {
       try {
         handle = linkEnhance.createConnection(deviceId, SERVICE);
         handle.on('connectResult', (result: linkEnhance.ConnectResult) => {
+          if (settled || operation !== this.lifecycle || !this.foreground) {
+            // A timed-out or disabled attempt must not attach a late connection.
+            if (handle !== null && (operation !== this.lifecycle || !this.peers.some((peer: Peer) => peer.connection === handle))) {
+              try { handle.close(); } catch (_) {}
+            }
+            finish(false);
+            return;
+          }
           hilog.info(0, 'NearbyChat', 'le-connect tried=%{public}s success=%{public}s reason=%{public}d id=%{public}s',
             kind, String(result.success), result.reason, deviceId);
           if (!result.success) { finish(false); return; }

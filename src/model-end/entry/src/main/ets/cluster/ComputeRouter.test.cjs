@@ -21,6 +21,14 @@ assert.equal(pickNode([self, peer]).name, '对端', 'same load prefers more memo
 assert.equal(pickNode([self, node({ name: '对端2', model: 'Qwen', requests: 1, memAvail: 2000 })]).isSelf, true,
   'equal load and memory prefers self');
 assert.equal(pickNode([busy]).name, '忙', 'all busy still returns a modeled node');
+const { pickRoute } = context.exports;
+assert.equal(pickRoute([self, peer], 'auto', true).name, '对端', 'auto matches pickNode');
+assert.equal(pickRoute([self, peer], 'pin1', false).isSelf, true, 'pin1 stays on the hub');
+assert.equal(pickRoute([self, peer], 'pin2', true).name, '对端', 'pin2 stays on the other compute');
+assert.equal(pickRoute([self, peer], 'split', true).isSelf, true, 'split can take the hub');
+assert.equal(pickRoute([self, peer], 'split', false).name, '对端', 'split can take the peer');
+assert.equal(pickRoute([peer], 'pin1', true), null, 'pin1 fails closed without the hub model');
+assert.equal(pickRoute([self], 'pin2', false), null, 'pin2 fails closed without a peer');
 const router = new ComputeRouter();
 assert.equal(router.selfLoad(1), 1);
 router.beginSelf();

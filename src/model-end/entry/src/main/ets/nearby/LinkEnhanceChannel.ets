@@ -1078,11 +1078,12 @@ export class LinkEnhanceChannel {
           if (existing !== undefined) {
             if (compute) {
               existing.compute = true;
-              // A scan response that only names the box must not wipe 2→1.
-              if (slot > 0 || existing.slot < 1) existing.slot = slot;
+              // A valid slot 0 withdraws an old hub claim after restart. Only a
+              // name-only response (compute=false) must preserve the last slot.
+              existing.slot = slot;
               existing.observation = ++observation;
             }
-            if (existing.key.length === 0 && key.length > 0) existing.key = key;
+            if (key.length > 0) existing.key = key;
             if (existing.name.length === 0 && (item.deviceName || '').length > 0) existing.name = item.deviceName;
             continue;
           }
@@ -1169,6 +1170,7 @@ export class LinkEnhanceChannel {
   }
 
   private tryConnect(kind: string, deviceId: string): Promise<boolean> {
+    const operation = this.lifecycle;
     return new Promise<boolean>((resolve) => {
       let settled = false;
       let handle: linkEnhance.Connection | null = null;
@@ -1188,6 +1190,14 @@ export class LinkEnhanceChannel {
       try {
         handle = linkEnhance.createConnection(deviceId, SERVICE);
         handle.on('connectResult', (result: linkEnhance.ConnectResult) => {
+          if (settled || operation !== this.lifecycle || !this.foreground) {
+            // A timed-out or disabled attempt must not attach a late connection.
+            if (handle !== null && (operation !== this.lifecycle || !this.peers.some((peer: Peer) => peer.connection === handle))) {
+              try { handle.close(); } catch (_) {}
+            }
+            finish(false);
+            return;
+          }
           hilog.info(0, 'NearbyChat', 'le-connect tried=%{public}s success=%{public}s reason=%{public}d id=%{public}s',
             kind, String(result.success), result.reason, deviceId);
           if (!result.success) { finish(false); return; }
@@ -1252,36 +1262,38 @@ export class LinkEnhanceChannel {
     return false;
   }
 
-  applyRemoteRoster(fromEpoch: number, devices: DeviceInfoEntry[]): void {
+  applyRemoteRoster(fromEpoch: number, devices: DeviceInfoEntry[]): boolean {
     const reporter = this.peers.find((peer: Peer) => peer.epoch === fromEpoch && peer.role === 'compute');
-    if (!IS_SERVER || reporter === undefined) return;
+    if (!IS_SERVER || reporter === undefined) return false;
     const reporterKey = this.computeKey(reporter.deviceUid || reporter.peerId, reporter.helloName);
     const self = this.computeKey(this.localUid(), this.localName());
     const ordered: (string | undefined)[] = [];
     for (const entry of devices) {
       const role = entry.role || '';
       if (role !== 'compute' && role !== 'self') continue;
-      const slot = entry.slot === undefined ? 0 : Math.floor(entry.slot);
-      if (slot < 1) continue;
+      const slot = entry.slot === undefined ? 0 : entry.slot;
+      if (!Number.isInteger(slot) || slot < 1 || slot > 64) return false;
       const key = this.computeKey(entry.deviceUid || entry.id || '', entry.name || '');
-      if (key.length === 0) continue;
+      if (key.length === 0) return false;
       while (ordered.length < slot) ordered.push(undefined);
-      if (ordered[slot - 1] !== undefined || ordered.indexOf(key) >= 0) return;
+      if (ordered[slot - 1] !== undefined || ordered.indexOf(key) >= 0) return false;
       ordered[slot - 1] = key;
     }
     const keys: string[] = [];
     for (const key of ordered) {
-      if (key === undefined || key.length === 0) return;
+      if (key === undefined || key.length === 0) return false;
       keys.push(key);
     }
     // Only a connected center may assign the global slots. Worker snapshots
     // cannot overwrite them. Resolve reunited centers by the same stable key.
-    if (keys.length === 0 || keys[0] !== reporterKey) return;
-    if (this.selfComputeSlot === 1 && self < reporterKey) return;
-    if (slotOf(keys, self) === 0) return;
+    if (keys.length === 0 || keys[0] !== reporterKey) return false;
+    if (this.selfComputeSlot === 1 && self < reporterKey) return false;
+    if (slotOf(keys, self) === 0) return false;
     this.frozenComputeKeys = keys;
     this.leadershipPinned = false;
     this.applyComputeSlots();
+    this.pruneWorkerLinks();
+    return true;
   }
 
   private applyComputeSlots(): void {
@@ -1337,9 +1349,19 @@ export class LinkEnhanceChannel {
     if (this.rankingSlots) return;
     this.rankingSlots = true;
     try {
-      if (!this.meshSettled || !this.electionReady) {
+      const selfKey = this.computeKey(this.localUid(), this.localName());
+      const establishedHub = this.selfComputeSlot === 1 && this.frozenComputeKeys[0] === selfKey;
+      // A star worker only sees the hub, not all members. It must never derive
+      // global numbering from that partial view or provisionally claim slot 2.
+      if (!establishedHub && (this.frozenComputeKeys.length > 0 ||
+        this.peers.some((peer: Peer) => peer.role === 'compute' && peer.computeSlot === 1))) {
+        this.applyComputeSlots();
+        this.pruneWorkerLinks();
         return;
       }
+      // Once elected, the hub allocates membership even when discovery is
+      // suspended for chat/inference or meshSettled was cleared by a peer drop.
+      if (!establishedHub && (!this.meshSettled || !this.electionReady)) return;
       const members: RankMember[] = [];
       const self = new RankMember();
       self.key = this.computeKey(this.localUid(), this.localName());
@@ -1361,22 +1383,13 @@ export class LinkEnhanceChannel {
         }
         if (members.some((item: RankMember) => item.memAvail < 0)) return;
       }
-      const selfKey = self.key;
       // A transient radio drop must not make a worker advertise itself as a
       // second "算力设备1" while the original hub is still running. Explicit
       // stop/start clears frozenComputeKeys and permits a fresh election.
-      const liveHub = this.peers.find((peer: Peer) => peer.role === 'compute' && peer.computeSlot === 1);
-      if (this.selfComputeSlot === 0 && liveHub !== undefined) {
-        const hubKey = this.computeKey(liveHub.deviceUid || liveHub.peerId, liveHub.helloName);
-        this.frozenComputeKeys = [hubKey, selfKey];
-        for (const item of members) {
-          if (this.frozenComputeKeys.indexOf(item.key) < 0) this.frozenComputeKeys.push(item.key);
-        }
-      } else if (this.selfComputeSlot === 1 && this.frozenComputeKeys[0] === selfKey) {
+      if (establishedHub) {
         this.frozenComputeKeys = freezeNameRank(this.frozenComputeKeys,
           members.map((item: RankMember) => item.key));
-      } else if (!(this.frozenComputeKeys.length > members.length &&
-        this.frozenComputeKeys[0] !== selfKey)) {
+      } else {
         this.frozenComputeKeys = freezeComputeRank(this.frozenComputeKeys, members);
       }
       this.applyComputeSlots();
@@ -1677,7 +1690,6 @@ export class LinkEnhanceChannel {
     if (this.peers.length === 0) this.status = IS_SERVER ?
       (this.server !== null ? '可本机对话 · 等待聊天手机连接' : status) : status;
     else this.refreshStatus();
-    this.onConnection?.(this.isConnected(), peer.epoch);
     if (wasCompute) {
       if (lostHub) {
         this.hubLostAt = Date.now();
@@ -1688,6 +1700,9 @@ export class LinkEnhanceChannel {
       this.refreshComputeSlots();
       this.meshSettled = false;
     }
+    // Publish only after renumbering survivors; otherwise the immediate snapshot
+    // contains gaps and is rejected by every worker.
+    this.onConnection?.(this.isConnected(), peer.epoch);
   }
 
   disconnect(preserveServerIntent: boolean = false): void {

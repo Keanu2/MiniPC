@@ -78,6 +78,11 @@ assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello_ack', peerRole: '
 assert(validMessage({ protocol: 'nearby-chat-v1', type: 'hello', peerRole: 'compute', deviceUid: 'install-1234' }));
 assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello', deviceUid: 'x'.repeat(65) }));
 assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello_ack', slot: 0 }));
+assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello_ack', slot: 2.5 }));
+assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'deviceInfoSync', requestId: 'fractional',
+  devices: [{ id: 'worker', role: 'compute', slot: 2.5 }] }));
+assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'deviceInfoSync', requestId: 'bad-ready',
+  devices: [{ id: 'worker', role: 'compute', slot: 2, ready: 'false' }] }));
 assert(!validMessage({ protocol: 'nearby-chat-v1', type: 'hello', peerRole: 'other' }));
 now += 1000000000;
 assert.doesNotThrow(() => expiry.checkExpiry(), 'completed message never creates an inference timeout');

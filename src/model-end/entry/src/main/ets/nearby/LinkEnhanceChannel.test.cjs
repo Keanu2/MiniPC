@@ -82,6 +82,7 @@ function build(server, tag) {
         on: (name, fn) => listeners.set(name, fn),
         connect: () => {
           handle.connected = true;
+          if (behavior.deferConnect) return;
           // The platform reports the outcome on the same connection.
           listeners.get('connectResult')?.({
             deviceId: handle.reportId === undefined ? deviceId : handle.reportId,
@@ -255,6 +256,95 @@ function scan(t) {
 }
 
 (async () => {
+  {
+    const t = build(true, 'withdraw-stale-hub');
+    await t.channel.prepare();
+    t.behavior.devices = [{ deviceId: 'old-hub', deviceName: 'Hub', networkId: 'hub-net' }];
+    t.behavior.names = { 'hub-mac': 'Hub' };
+    const ad = slot => ({ deviceId: 'hub-mac', deviceName: 'Hub', rssi: -40,
+      data: new Uint8Array([9, 0xFF, 0x77, 0x6E, 1, slot, 1, 2, 3, 4]).buffer });
+    t.behavior.scanData = [ad(1), ad(0),
+      { deviceId: 'hub-mac', deviceName: 'Hub', rssi: -40, data: new Uint8Array([0]).buffer }];
+    const scanning = t.channel.computeDevices();
+    await advance(SCAN_WINDOW); await scanning;
+    assert.equal(t.channel.lastHits[0].slot, 0, 'valid unnumbered beacon withdraws the former hub claim');
+    assert.equal(t.channel.connectComputes().length, 0, 'a restarted but unelected device is not a chat dial target');
+    t.channel.disconnect();
+  }
+  // An established star hub assigns 2/3/4 even while scanning is suspended.
+  {
+    const hub = build(true, 'multi-hub');
+    hub.behavior.localName = 'SameCompute';
+    hub.behavior.devices = [1, 2, 3, 4].map(n => ({ deviceId: 'worker-' + n, deviceName: 'SameCompute', networkId: 'net-' + n }));
+    await hub.channel.prepare();
+    hub.channel.subscribe(() => {}, () => {});
+    hub.channel.frozenComputeKeys = [hub.channel.computeKey(hub.channel.localUid(), 'SameCompute')];
+    hub.channel.applyComputeSlots();
+    hub.channel.meshSettled = false;
+    hub.channel.electionReady = false;
+    hub.channel.setActiveJobs(1);
+    const links = [];
+    const join = async n => {
+      const link = hub.accept('worker-' + n);
+      for (const frame of hub.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+        name: 'SameCompute', deviceUid: 'worker-uid-' + n }, 'multi-hello-' + n)) link.deliver(frame);
+      await flush();
+      return link;
+    };
+    for (let n = 1; n <= 3; n++) links.push(await join(n));
+    assert.equal(hub.channel.peerInfos().map(p => p.slot).join(','), '2,3,4', JSON.stringify(hub.logs));
+    assert.equal(hub.channel.peerInfos().map(p => p.name).join(','), '算力设备2,算力设备3,算力设备4');
+    const worker = build(true, 'multi-follower');
+    worker.behavior.localName = 'SameCompute';
+    worker.behavior.devices = [{ deviceId: 'hub-link', deviceName: 'SameCompute', networkId: 'hub-net' }];
+    await worker.channel.prepare();
+    worker.channel.subscribe(() => {}, () => {});
+    const upstream = worker.accept('hub-link');
+    for (const frame of worker.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      name: 'SameCompute', deviceUid: hub.channel.localUid(), slot: 1 }, 'multi-upstream')) upstream.deliver(frame);
+    await flush();
+    assert.equal(worker.channel.selfComputeNumber(), 0, 'joining nodes never invent slot 2');
+    const reporter = worker.channel.peerInfos()[0].epoch;
+    const roster = [
+      { id: hub.channel.localUid(), role: 'self', slot: 1 },
+      { id: 'other-worker', role: 'compute', slot: 2 },
+      { id: worker.channel.localUid(), role: 'compute', slot: 3 }
+    ];
+    assert.equal(worker.channel.applyRemoteRoster(reporter, roster), true);
+    worker.channel.meshSettled = true;
+    worker.channel.electionReady = true;
+    worker.channel.setSelfMem(999999);
+    assert.equal(worker.channel.selfComputeNumber(), 3, 'a partial direct view cannot shrink the global roster');
+    for (const invalid of [
+      [roster[0], { ...roster[2], slot: 2.5 }],
+      [roster[0], roster[2]],
+      [roster[0], { ...roster[1], slot: 1 }, roster[2]],
+      [roster[0], { ...roster[1], id: roster[0].id }, roster[2]],
+      [{ ...roster[0], id: 'not-the-reporter' }, roster[1], roster[2]]
+    ]) assert.equal(worker.channel.applyRemoteRoster(reporter, invalid), false);
+    assert.equal(worker.channel.selfComputeNumber(), 3, 'rejected rosters do not change labels');
+    const observed = [];
+    hub.channel.subscribe(() => {}, () => observed.push(hub.channel.peerInfos().map(p => p.slot).join(',')));
+    links[0].drop(-1);
+    assert.equal(observed.at(-1), '2,3', 'disconnect publishes only after survivor renumbering');
+    await join(4);
+    assert.equal(hub.channel.peerInfos().map(p => p.slot).join(','), '2,3,4', 'join after drop cannot wait for a scan');
+    hub.channel.disconnect(); worker.channel.disconnect();
+  }
+  for (const stopped of [true, false]) {
+    const t = build(true, 'late-connect-' + stopped);
+    await t.channel.prepare();
+    t.behavior.deferConnect = true;
+    const attempt = t.channel.tryConnect('compute', 'late-peer');
+    const link = outgoing(t);
+    if (stopped) t.channel.disconnect();
+    else await advance(9000);
+    link.listeners.get('connectResult')({ deviceId: 'late-peer', success: true, reason: 0 });
+    assert.equal(await attempt, false);
+    assert.equal(t.channel.peers.length, 0, 'late completion cannot resurrect a timed-out/stopped connection');
+    assert.equal(link.closed, true);
+    t.channel.disconnect();
+  }
   // --- 1. The advertisement carries a per-install key, not the shared name --------
   {
     const keyOf = t => {

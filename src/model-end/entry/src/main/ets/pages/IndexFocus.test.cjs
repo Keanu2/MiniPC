@@ -31,7 +31,7 @@ function setup(isServer) {
     isListening: () => !!behavior.listening, prepare: async () => { behavior.listening = true; },
     selfLabel: () => '算力设备1',
     selfComputeNumber: () => 1,
-    applyRemoteRoster() {},
+    applyRemoteRoster() { return true; },
     setSelfMem() {}, setPeerMem() {}, setRemoteChats(names) { behavior.remoteChats = names.slice(); },
     disconnect: () => { disconnects++; operation++; connected = false; behavior.listening = false; },
     getStatus: () => connected ? '近场已连接' : '未连接',
@@ -367,9 +367,8 @@ function setup(isServer) {
   assert.equal(Array.from(ghost.behavior.remoteChats).join(','), '聊天A',
     'a disconnected reporter cannot keep a chat online');
   ghost.page.pollDeviceInfo();
-  const sync = ghost.sent.filter(message => message.type === 'deviceInfoSync').at(-1);
-  assert(sync.devices.every(device => device.id !== 'chat-live' && device.id !== 'chat-gone'),
-    'remote roster entries must not be forwarded into a permanent gossip cycle');
+  assert.equal(ghost.sent.filter(message => message.type === 'deviceInfoSync').length, 0,
+    'a worker must not publish its incomplete star view as a global roster');
   assert.equal(ghost.page.remoteEntries().length, 1, 'a worker sees its live hub roster');
   ghost.channel.selfComputeNumber = () => 1;
   assert.equal(ghost.page.remoteEntries().length, 0,
@@ -432,6 +431,52 @@ function setup(isServer) {
   assert.equal(s.page.serviceReady, true, 'second click starts near-field again');
   assert.equal(s.behavior.meshCalls, 1, 're-enabling near-field restarts compute mesh discovery');
   console.log('PASS: idle compute stop/start near-field toggles without a connected chat phone');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+(async () => {
+  const s = setup(true);
+  s.page.serviceReady = true;
+  s.page.emitDashboard = () => {};
+  let peers = [{ epoch: 2, peerId: 'worker', deviceUid: 'worker', ready: true, role: 'compute', slot: 2 }];
+  s.channel.peerInfos = () => peers;
+  s.channel.hasEpoch = epoch => peers.some(p => p.epoch === epoch);
+  const deliveries = [];
+  s.channel.send = (message, epoch) => {
+    if (message.type !== 'deviceInfoSync') return Promise.resolve(true);
+    const gate = deferred(); deliveries.push({ message, epoch, gate }); return gate.promise;
+  };
+  s.page.jobs.push({ id: 'busy', workerEpoch: 0 });
+  s.page.pollDeviceInfo();
+  assert.equal(deliveries.length, 1, 'new worker gets membership even during inference');
+  assert(deliveries[0].message.devices.every(d => d.memAvail === undefined && d.name === undefined),
+    'busy control snapshots omit telemetry and duplicated names');
+  s.page.pollDeviceInfo();
+  assert.equal(deliveries.length, 1, 'unchanged pending snapshot is not flooded');
+  deliveries[0].gate.resolve(false); await flush();
+  s.page.pollDeviceInfo();
+  assert.equal(deliveries.length, 2, 'failed delivery retries on the next poll, not after 30 seconds');
+  peers = [...peers, { epoch: 3, peerId: 'third', deviceUid: 'third', ready: true, role: 'compute', slot: 3 }];
+  s.page.pollDeviceInfo();
+  assert.equal(deliveries.length, 4, 'topology change reaches both existing and new workers');
+  assert.equal(deliveries.at(-1).message.devices.map(d => d.slot).join(','), '1,2,3');
+  deliveries[2].gate.resolve(true); deliveries[3].gate.resolve(true); await flush();
+  deliveries[1].gate.resolve(false); await flush();
+  s.page.pollDeviceInfo();
+  assert.equal(deliveries.length, 4, 'old completion cannot invalidate the newest snapshot');
+  peers = peers.map(p => p.epoch === 3 ? { ...p, epoch: 30 } : p);
+  s.page.cancelDroppedPeers();
+  s.page.pollDeviceInfo();
+  assert.equal(deliveries.length, 5, 'same UID reconnecting on a new session must receive unchanged roster');
+  assert.equal(deliveries.at(-1).epoch, 30);
+  assert.equal(s.page.rosterDeliveries.has(3), false, 'dead session delivery state is removed');
+  s.channel.selfComputeNumber = () => 3;
+  peers = [{ epoch: 1, peerId: 'hub', ready: true, role: 'compute', slot: 1 }];
+  const accepted = [{ id: 'known', role: 'compute', slot: 2 }];
+  s.page.remoteSeen.set(1, accepted);
+  s.channel.applyRemoteRoster = () => false;
+  s.page.handleClusterSync({ devices: [{ id: 'forged', role: 'compute', slot: 2 }] }, 1);
+  assert.equal(s.page.remoteSeen.get(1), accepted, 'rejected membership cannot pollute the dashboard cache');
+  console.log('PASS: busy multi-node membership, per-session retry and stale completion isolation');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
 // Background telemetry yields to streaming inference, and a chat link dropping is

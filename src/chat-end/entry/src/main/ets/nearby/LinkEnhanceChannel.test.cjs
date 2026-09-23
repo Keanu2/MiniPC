@@ -61,6 +61,7 @@ function build(tag) {
         deviceId, listeners, sent: [], connected: false,
         on: (name, fn) => listeners.set(name, fn),
         connect: () => {
+          if (behavior.deferConnect) return;
           handle.connected = true;
           listeners.get('connectResult')?.({
             deviceId: handle.reportId === undefined ? deviceId : handle.reportId,
@@ -69,7 +70,7 @@ function build(tag) {
         },
         sendData: buffer => handle.sent.push(Buffer.from(buffer).toString('utf8')),
         getPeerDeviceId: () => handle.reportId || deviceId,
-        disconnect: () => {}, close: () => {},
+        disconnect: () => { handle.closed = true; }, close: () => { handle.closed = true; },
         deliver: text => listeners.get('dataReceived')?.(new Uint8Array(Buffer.from(text, 'utf8')).buffer),
         drop: reason => listeners.get('disconnected')?.(reason)
       };
@@ -177,6 +178,35 @@ function build(tag) {
 const SCAN_WINDOW = 4500;
 
 (async () => {
+  {
+    const t = build('withdraw-stale-hub');
+    await t.channel.prepare();
+    t.behavior.devices = [{ deviceId: 'old-hub', deviceName: 'Hub', networkId: 'hub-net' }];
+    t.behavior.names = { 'hub-mac': 'Hub' };
+    const ad = slot => ({ deviceId: 'hub-mac', deviceName: 'Hub', rssi: -40,
+      data: new Uint8Array([9, 0xFF, 0x77, 0x6E, 1, slot, 1, 2, 3, 4]).buffer });
+    t.behavior.scanData = [ad(1), ad(0),
+      { deviceId: 'hub-mac', deviceName: 'Hub', rssi: -40, data: new Uint8Array([0]).buffer }];
+    const scanning = t.channel.computeDevices();
+    await advance(SCAN_WINDOW); await scanning;
+    assert.equal(t.channel.lastHits[0].slot, 0, 'valid unnumbered beacon withdraws the former hub claim');
+    assert.equal(t.channel.connectComputes().length, 0, 'a restarted but unelected device is not a chat dial target');
+    t.channel.disconnect();
+  }
+  for (const stopped of [true, false]) {
+    const t = build('late-connect-' + stopped);
+    await t.channel.prepare();
+    t.behavior.deferConnect = true;
+    const attempt = t.channel.tryConnect('compute', 'late-peer');
+    const link = t.connections.at(-1);
+    if (stopped) t.channel.disconnect();
+    else await advance(9000);
+    link.listeners.get('connectResult')({ deviceId: 'late-peer', success: true, reason: 0 });
+    assert.equal(await attempt, false);
+    assert.equal(t.channel.peers.length, 0, 'late completion cannot restore a timed-out/stopped chat link');
+    assert.equal(link.closed, true);
+    t.channel.disconnect();
+  }
   // --- 1. Overlapping scans must not cancel each other --------------------------
   {
     // The connect path retries computeDevices() up to three times. Without the

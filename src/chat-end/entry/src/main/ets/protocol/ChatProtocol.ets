@@ -70,7 +70,8 @@ function validDeviceEntry(entry: DeviceInfoEntry): boolean {
     validOptionalNumber(entry.batteryTemp) && validOptionalNumber(entry.cpuUsage) &&
     validOptionalString(entry.model, 128) &&
     validOptionalNumber(entry.modelRequests) &&
-    (entry.slot === undefined || (validOptionalNumber(entry.slot) && entry.slot >= 1 && entry.slot <= 64));
+    (entry.ready === undefined || typeof entry.ready === 'boolean') &&
+    (entry.slot === undefined || (Number.isInteger(entry.slot) && entry.slot >= 1 && entry.slot <= 64));
 }
 
 function validDeviceInfo(m: WireMessage): boolean {
@@ -97,7 +98,7 @@ export function validMessage(m: WireMessage): boolean {
     if (m.peerRole !== undefined && m.peerRole !== 'compute' && m.peerRole !== 'chat') return false;
     if (!validOptionalString(m.name, 128)) return false;
     if (!validOptionalString(m.deviceUid, 64)) return false;
-    if (m.slot !== undefined && (!validOptionalNumber(m.slot) || m.slot < 1 || m.slot > 64)) return false;
+    if (m.slot !== undefined && (!Number.isInteger(m.slot) || m.slot < 1 || m.slot > 64)) return false;
     return true;
   }
   if (typeof m.requestId !== 'string' || m.requestId.length === 0 || m.requestId.length > 128) return false;
