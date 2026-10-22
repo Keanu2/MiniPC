@@ -28,6 +28,8 @@ export interface DeviceView {
   modelRequests?: number;
   /** Model capabilities of this device, e.g. ['text', 'vision']; absent means text-only. */
   capabilities?: string[];
+  /** Serving channel of this device's text model ('云侧'/'端侧', or '分档·档位·侧别模型' under xrouter); only the self entry carries it. */
+  backend?: string;
 }
 
 export interface JobView {

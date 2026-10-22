@@ -1,16 +1,50 @@
 {
   "app": {
-    "products": [{
-      "name": "default",
-      "targetSdkVersion": "6.1.0(23)",
-      "compatibleSdkVersion": "6.0.2(22)",
-      "runtimeOS": "HarmonyOS"
-    }],
-    "buildModeSet": [{ "name": "debug" }, { "name": "release" }]
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.1.0(23)",
+        "compatibleSdkVersion": "6.0.2(22)",
+        "runtimeOS": "HarmonyOS"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\10566\\.ohos\\config\\default_compute-node_Q91Zfrh7L2pgI3263jscOXgsoMX_ztkbZiSRI8j7QCk=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BFF540014F852B013E713640C76CEB00DFDD8E3B35F9F2B857702C63A8F85B8F4CF5D2087D4EB90",
+          "profile": "C:\\Users\\10566\\.ohos\\config\\default_compute-node_Q91Zfrh7L2pgI3263jscOXgsoMX_ztkbZiSRI8j7QCk=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\10566\\.ohos\\config\\default_compute-node_Q91Zfrh7L2pgI3263jscOXgsoMX_ztkbZiSRI8j7QCk=.p12",
+          "storePassword": "0000001BDE8AC8A100F9C17F31BA2E4DD077C271737289981EEE8B4A62984BFFC8FE76F2F11596602F4F3F"
+        }
+      }
+    ]
   },
-  "modules": [{
-    "name": "entry",
-    "srcPath": "./entry",
-    "targets": [{ "name": "default", "applyToProducts": ["default"] }]
-  }]
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
 }

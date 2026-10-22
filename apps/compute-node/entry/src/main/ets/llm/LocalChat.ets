@@ -2,13 +2,30 @@ import probe from 'libgewu_probe.so';
 import { modelRequestType, readyModelDirs, selectModelDir } from './ModelRegistry';
 
 export interface ChatMessage { role: string; content: string; }
-export interface ChatUpdate { kind: 'delta' | 'done'; text: string; error?: string; finishReason?: string; }
+export interface ChatUpdate {
+  kind: 'delta' | 'done';
+  text: string;
+  error?: string;
+  finishReason?: string;
+  /** 上游 Outcome 细分：后端失败时标注 'overflow'（撞输出上限）/'unavailable'，缺省按 unavailable 处理。 */
+  failureKind?: string;
+}
 /** 多模态消息分片：图片（image_url 为 data URL）或文本。 */
 interface MessagePart { type: string; text?: string; image_url?: string }
 /** 推理请求的消息：纯文本 content 为字符串；带图时最后一条 user 消息为分片数组。 */
 interface RequestMessage { role: string; content: string | MessagePart[] }
 interface ChatRequest { type: string; messages: RequestMessage[]; stream: boolean; max_tokens: number; }
 export interface ChatStartOptions { maxTokens?: number; waitSeconds?: number; image?: string; }
+/** 推理后端公共面：InferenceHost 等上层只依赖本接口，不感知本地 GEWU 还是云端 API。 */
+export interface ChatBackend {
+  isBusy(): boolean;
+  activeCount(): number;
+  readinessError(): string;
+  start(messages: ChatMessage[], callback: (update: ChatUpdate) => void,
+    requestId: string, options: ChatStartOptions): string;
+  cancel(requestId?: string): void;
+  close(): void;
+}
 const MAX_TOKENS = 2048;
 interface NativeEvent { event: string; id?: string; payload: string; }
 interface NativeResponse { message?: ChatMessage; finish_reason?: string | null; }
@@ -23,7 +40,7 @@ interface Job {
   callback: ((update: ChatUpdate) => void) | undefined;
 }
 
-export class LocalChat {
+export class LocalChat implements ChatBackend {
   private filesDir: string;
   private timer: number = -1;
   private closed: boolean = false;

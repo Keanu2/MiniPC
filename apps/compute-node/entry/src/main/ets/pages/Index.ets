@@ -3,7 +3,11 @@ import { common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { LocalChat, ChatUpdate } from '../llm/LocalChat';
+import { ChatBackend, ChatUpdate, LocalChat } from '../llm/LocalChat';
+import { CloudChat } from '../llm/CloudChat';
+import { BackendRouter } from '../llm/BackendRouter';
+import { RouterChat } from '../llm/RouterChat';
+import { XRouter } from '../llm/XRouter';
 import { InferCardHooks, InferenceHost } from '../llm/InferenceHost';
 import { InferenceRelay, RelayEvents } from '../llm/InferenceRelay';
 import { PoolNode } from '../cluster/DevicePool';
@@ -16,7 +20,7 @@ import { VlLlmTransport } from '../llm/VlLlmTransport';
 import { QwenVlManager } from '../llm/QwenVlManager';
 import { pickJpegDataUrl, jpegBase64Payload } from '../media/ImageAttach';
 import {
-  DEVICE_INFO_POLL_MS, applyDeviceInfo, buildSelfEntry,
+  DEVICE_INFO_POLL_MS, applyDeviceInfo, buildSelfEntry, deployedModelName,
   toDeviceInfoReply
 } from '../cluster/DeviceInfo';
 import { chatLabel, computeLabel, hidePhoneName, needsLabel, publicLabel, workerTail } from '../cluster/DeviceLabels';
@@ -81,7 +85,13 @@ struct Index {
   private selectedDeviceId: string = '';
   private autoConnect: boolean = true;
   private connectManual: boolean = false;
-  private model: LocalChat | null = null;
+  private model: ChatBackend | null = null;
+  /** 当前文本推理走哪一侧：'云侧' 或 '端侧'；aboutToAppear 选定后不变，改配置需重启。 */
+  private backendSide: string = '';
+  /** 云侧实际服役的模型名（端侧为空，沿用本地模型扫描结果）。 */
+  private backendModel: string = '';
+  /** 路由分派器引用：读最近一次决策的档位用于通道卡片展示。 */
+  private modelRouter: RouterChat | null = null;
   private inference: InferenceHost | null = null;
   private relay: InferenceRelay | null = null;
   private transport: LocalLlmTransport | null = null;
@@ -118,7 +128,39 @@ struct Index {
     if (IS_SERVER) {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       this.filesDir = context.getApplicationContext().filesDir;
-      this.model = new LocalChat(this.filesDir);
+      const cloud = CloudChat.create(this.filesDir);
+      const local = new LocalChat(this.filesDir);
+      const policy = BackendRouter.loadPolicy(this.filesDir);
+      const xparams = policy === 'xrouter' ? XRouter.loadParams(this.filesDir) : null;
+      const route = new BackendRouter(policy, xparams !== null ? new XRouter(xparams) : null);
+      // 质量闭环服务（judge/settle/store）：xrouter 决策实际启用时才装配。
+      const service = policy === 'xrouter' && xparams !== null
+        ? RouterChat.buildService(this.filesDir, xparams) : null;
+      this.modelRouter = new RouterChat(local, cloud, route, service);
+      this.model = this.modelRouter;
+      hilog.info(0, 'NearbyChat', 'llm backend=%{public}s route=%{public}s',
+        cloud !== null ? 'cloud' : 'local', policy);
+      if (service !== null) {
+        hilog.info(0, 'NearbyChat', 'x-router service judge=%{public}s store=%{public}s bandit=%{public}s',
+          service.judge !== null ? 'on' : 'off', 'on', service.banditEnabled ? 'on' : 'off');
+      }
+      // 通道卡片：config 策略沿用配置语义（与引入路由前一致）；其余策略按策略倾向显示。
+      if (policy === 'cloud') {
+        this.backendSide = '云侧';
+        this.backendModel = cloud !== null ? cloud.modelName : '';
+      } else if (policy === 'local') {
+        this.backendSide = '端侧';
+        this.backendModel = '';
+      } else if (policy === 'auto') {
+        this.backendSide = '自动';
+        this.backendModel = '';
+      } else if (policy === 'xrouter') {
+        this.backendSide = '分档';
+        this.backendModel = cloud !== null ? cloud.modelName : '';
+      } else {
+        this.backendSide = cloud !== null ? '云侧' : '端侧';
+        this.backendModel = cloud !== null ? cloud.modelName : '';
+      }
       const card = new InferCardHooks();
       card.begin = (requestId: string, epoch: number, prompt: string, label: string): void => {
         this.showInferTask(requestId, epoch, prompt, label);
@@ -380,7 +422,8 @@ struct Index {
       jobs: this.jobs.filter((item: ActiveJob) => item.workerEpoch === 0).length,
       role: 'self', model: self.model, memUsage: self.memUsage,
       thermalLevel: self.thermalLevel, batteryTemp: self.batteryTemp, cpuUsage: self.cpuUsage,
-      modelRequests: self.modelRequests, capabilities: self.capabilities
+      modelRequests: self.modelRequests, capabilities: self.capabilities,
+      backend: this.backendLabel()
     });
     seen.push('id:' + selfUid);
     // Deduplicate on connection identity, not on the public label: two distinct
@@ -905,9 +948,32 @@ struct Index {
     return '';
   }
 
+  /** 通道标签：分档策略附带最近一次请求的档位与实际服役模型（如 分档·COMPLEX·云侧GLM-5.3），
+   * 其余策略为静态侧别。端侧模型取部署目录名，缩写规则与 peer-chat.html 的 shortModel 一致。 */
+  private backendLabel(): string {
+    if (this.backendSide !== '分档' || this.modelRouter === null) return this.backendSide;
+    const decision = this.modelRouter.lastDecision();
+    if (decision === null) return this.backendSide;
+    const tier = decision.tier !== undefined && decision.tier.length > 0 ? '·' + decision.tier : '';
+    if (decision.side === 'cloud') {
+      const model = decision.model !== undefined && decision.model.length > 0 ?
+        decision.model : this.backendModel;
+      return '分档' + tier + '·云侧' + model;
+    }
+    return '分档' + tier + '·端侧' + this.deployedModelLabel();
+  }
+
+  /** 端侧部署目录名的展示缩写（与 web 侧 shortModel 同规则，防徽章过长）。 */
+  private deployedModelLabel(): string {
+    return deployedModelName(this.filesDir).replace(/-Instruct.*$/, '').replace(/-Q4.*$/, '');
+  }
+
   private selfEntry(): DeviceInfoEntry {
     const running = this.model === null ? 0 : this.model.activeCount();
-    return buildSelfEntry(this.filesDir, this.router.selfLoad(running), '本机', 'self');
+    const entry = buildSelfEntry(this.filesDir, this.router.selfLoad(running), '本机', 'self');
+    // 云侧时设备卡展示实际服役的云模型；端侧沿用本地模型目录扫描结果。
+    if (this.backendSide === '云侧' && this.backendModel.length > 0) entry.model = this.backendModel;
+    return entry;
   }
 
   private clusterSelfEntry(): DeviceInfoEntry {

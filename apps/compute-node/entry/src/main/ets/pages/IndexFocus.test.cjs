@@ -219,6 +219,21 @@ function setup(isServer) {
   assert(elements.devices.innerHTML.includes('class="heat"'), 'heat sits on the model row');
   assert(elements.devices.innerHTML.includes('class="bar cpu"'), 'CPU uses the same meter as memory');
   assert(elements.devices.innerHTML.includes('width:18%'), 'CPU meter fills to occupancy');
+  // The channel badge carries the routed tier AND model, and its color follows the side.
+  window.onNativeEvent({
+    kind: 'dashboard', running: 1, jobs: [], selfLabel: '算力设备1',
+    devices: [{ role: 'self', name: '算力设备1', ready: true, jobs: 0, memUsage: 40,
+      model: 'Qwen2.5-7B-Instruct', backend: '分档·COMPLEX·云侧GLM-5.3' }]
+  });
+  assert(elements.devices.innerHTML.includes('分档·COMPLEX·云侧GLM-5.3'), 'channel badge carries the routed tier and model');
+  assert(elements.devices.innerHTML.includes('class="side cloud"'), 'cloud-routed badge takes the cloud color');
+  assert(elements.stats.innerHTML.includes('分档·COMPLEX·云侧GLM-5.3'), 'stats line mirrors the routed model');
+  window.onNativeEvent({
+    kind: 'dashboard', running: 0, jobs: [], selfLabel: '算力设备1',
+    devices: [{ role: 'self', name: '算力设备1', ready: true, jobs: 0, memUsage: 40,
+      model: 'Qwen2.5-7B-Instruct', backend: '分档·SIMPLE·端侧Qwen2.5-7B' }]
+  });
+  assert(elements.devices.innerHTML.includes('class="side edge"'), 'edge-routed badge takes the edge color');
   window.onNativeEvent({ kind: 'dashboard', running: 1, selfLabel: '算力设备1', devices: [], jobs: [{
     id: 'time-1', key: '0:time-1', source: '算力设备1', origin: '聊天设备1', question: '时间测试', answer: '',
     chars: 0, startedAt: new Date(2026, 8, 21, 10, 30, 45).getTime(), firstAt: 0, endedAt: 0,

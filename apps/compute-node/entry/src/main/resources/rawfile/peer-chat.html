@@ -61,6 +61,13 @@
     .tag.wait { color:var(--muted); }
     .tag.run { color:var(--busy); }
     .tag.err { color:var(--err); }
+    .side { display:inline-block; margin-right:5px; padding:1px 7px; border-radius:8px; font-size:11px; font-weight:650; }
+    .side.cloud { color:var(--wait); background:rgba(201,132,18,.12); }
+    .side.edge { color:var(--ok); background:rgba(26,155,106,.1); }
+    .side.auto { color:var(--muted); background:#eef1f8; }
+    .stat b.cloud { color:var(--wait); }
+    .stat b.edge { color:var(--ok); }
+    .stat b.auto { color:var(--muted); }
     .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; grid-template-areas:"model heat jobs" "mem cpu jobs"; column-gap:12px; row-gap:6px; align-items:center; }
     .model { grid-area:model; min-width:0; }
     .heat { grid-area:heat; }
@@ -151,7 +158,7 @@
     promptInput.addEventListener('focus',prepareFromInput);
     document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
     let available=false, pendingText='正在生成…', pendingImage='';
-    let jobs=[], devices=[], running=0, openIds={}, selfLabel='算力设备1';
+    let jobs=[], devices=[], running=0, openIds={}, selfLabel='算力设备1', selfBackend='';
     function setSelfLabel(label){
       if(typeof label!=='string'||!label) return;
       if(label==='算力设备' && /^算力设备\d+$/.test(selfLabel)) return;
@@ -184,6 +191,9 @@
     }
     function esc(text){
       return String(text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function sideClass(label){
+      return label.indexOf('云侧')>=0?'cloud':label.indexOf('端侧')>=0?'edge':'auto';
     }
     function shortModel(name){
       if(!name)return '无模型';
@@ -222,7 +232,9 @@
     function renderStats(){
       if(!statsView)return;
       const chats=devices.filter(device=>device.role!=='self'&&device.role!=='compute').length;
-      statsView.innerHTML='<div class="stat"><span>聊天机</span><b>'+chats+'</b></div>'+
+      const side=selfBackend?'<div class="stat"><span>推理通道</span><b class="'+
+        sideClass(selfBackend)+'">'+esc(selfBackend)+'</b></div>':'';
+      statsView.innerHTML='<div class="stat"><span>聊天机</span><b>'+chats+'</b></div>'+side+
         '<div class="stat"><span>推理中</span><b>'+running+'</b></div>';
     }
     function renderDevices(){
@@ -244,7 +256,9 @@
         const bar=(kind,label,value)=>value<0?'<span class="bar '+kind+'"></span>':
           '<span class="bar '+kind+'">'+label+' <i><b style="width:'+Math.min(100,value)+'%"></b></i>'+value+'%</span>';
         const vision=(device.capabilities||[]).indexOf('vision')>=0;
-        const details=compute?'<div class="meta"><span class="model">'+esc(shortModel(device.model))+(vision?' · 多模态':'')+'</span>'+
+        const side=device.role==='self'&&device.backend?
+          '<span class="side '+sideClass(device.backend)+'">'+esc(device.backend)+'</span>':'';
+        const details=compute?'<div class="meta"><span class="model">'+side+esc(shortModel(device.model))+(vision?' · 多模态':'')+'</span>'+
           '<span class="heat">'+(heat?esc(heat):'')+'</span>'+
           bar('mem','内存',mem)+bar('cpu','CPU',cpu)+
           '<span class="jobs">推理 '+infer+'</span></div>':'';
@@ -345,6 +359,8 @@
         if(event.connecting===true||event.connecting===false)connectButton.disabled=event.connecting===true;
         available=true;
         devices=event.devices||[];
+        const self=(event.devices||[]).find(device=>device.role==='self');
+        if(self&&typeof self.backend==='string'&&self.backend)selfBackend=self.backend;
         jobs=event.jobs||[];
         running=typeof event.running==='number'?event.running:jobs.filter(job=>job.running).length;
         render();return;

@@ -1,6 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ChatMessage as WireChatMessage, ClusterInfo, InferProfile, WireMessage } from '../protocol/ChatProtocol';
-import { ChatMessage, ChatUpdate, LocalChat } from './LocalChat';
+import { ChatBackend, ChatMessage, ChatUpdate } from './LocalChat';
 import { LlmTransport } from './LlmTransport';
 import { QwenVlManager } from './QwenVlManager';
 import { RelayLocal } from './InferenceRelay';
@@ -9,7 +9,9 @@ import { repairUtf8FromSource } from './Utf8Repair';
 
 // Must equal the native session max_ctx in gewu_probe.cpp.
 const MAX_CONTEXT = 32768;
-const MAX_OUTPUT = 2048;
+// 播报给聊天端的输出上限：按云端后端（CloudChat 钳 8192、约 75s 生成）定；
+// 本地 GEWU 在 LocalChat 内自钳 2048，不受影响。
+const MAX_OUTPUT = 4096;
 const MAX_PROMPT_BYTES = 32768;
 // Time reserved after native generation stops to abort, tear down and still
 // deliver infer.error before the requester's own deadline expires.
@@ -55,7 +57,7 @@ function waitSeconds(deadlineMs: number | undefined): number {
 }
 
 export class InferenceHost implements RelayLocal {
-  private model: LocalChat;
+  private model: ChatBackend;
   private sender: (message: WireMessage, epoch: number) => Promise<boolean>;
   private card: InferCardHooks;
   private activeId: string = '';
@@ -69,7 +71,7 @@ export class InferenceHost implements RelayLocal {
   /** 可缺省的多模态通道；为 null 时带图请求 fail closed，绝不降级给纯文本引擎。 */
   private vision: LlmTransport | null = null;
 
-  constructor(model: LocalChat, sender: (message: WireMessage, epoch: number) => Promise<boolean>,
+  constructor(model: ChatBackend, sender: (message: WireMessage, epoch: number) => Promise<boolean>,
     card: InferCardHooks) {
     this.model = model;
     this.sender = sender;
