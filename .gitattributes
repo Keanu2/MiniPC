@@ -1,0 +1,2 @@
+# Device shell scripts must remain executable by sh after Windows checkouts.
+*.sh text eol=lf

@@ -15,7 +15,7 @@ try {
   for (const [name, file] of Object.entries(files)) write(name + '.ts', fs.readFileSync(path.join(root, file + '.ets'), 'utf8'));
   const protocol = fs.readFileSync(path.join(root, 'entry/src/main/ets/protocol/ChatProtocol.ets'), 'utf8');
   const declarations = protocol.slice(0, protocol.indexOf('const PROTOCOL')).replace(/^import .*;\r?\n/gm, '');
-  write('protocol/ChatProtocol.ts', declarations);
+  write('protocol/ChatProtocol.ts', declarations + '\nexport declare function validTaskSnapshot(task: TaskSnapshot): boolean;\n');
   write('agent/ConversationContext.ts', 'export interface ConversationContext {}');
   write('model/InferenceWire.ts', 'export declare function utf8Bytes(s:string):Uint8Array; export declare function sha256Hex(b:Uint8Array):string;');
   write('model/Utf8Repair.ts', 'export declare function repairUtf8FromSource(s:string,p:string):string;');

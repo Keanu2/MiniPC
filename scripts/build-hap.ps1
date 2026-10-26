@@ -4,7 +4,8 @@ param(
   [string]$Target,
   [string]$HvigorJs = $env:HVIGOR_JS,
   [string]$AgenuiHar = $env:AGENUI_HAR,
-  [switch]$InstallDependencies
+  [switch]$InstallDependencies,
+  [switch]$Clean
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -59,6 +60,10 @@ try {
   if ($InstallDependencies) {
     & ohpm install --all
     if ($LASTEXITCODE -ne 0) { throw 'ohpm dependency installation failed.' }
+  }
+  if ($Clean) {
+    & node $HvigorJs --mode module -p module=entry@default -p product=default clean --no-daemon
+    if ($LASTEXITCODE -ne 0) { throw "SDK clean failed for $Target." }
   }
   & node $HvigorJs --mode module -p module=entry@default -p product=default assembleHap --no-daemon
   if ($LASTEXITCODE -ne 0) { throw "SDK build failed for $Target." }

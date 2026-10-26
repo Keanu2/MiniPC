@@ -17,6 +17,19 @@ const context = { exports: {}, Uint8Array, Date: { now: () => now }, require: na
 } };
 vm.runInNewContext(transpile(__dirname + '/ChatProtocol.ets'), context);
 const { encodeMessage, MessageAssembler, validMessage, MAX_IMAGE_BASE64 } = context.exports;
+{
+  const agent={exports:{},require:context.require};
+  vm.runInNewContext(transpile(__dirname+'/../../../../../../agent-client/entry/src/main/ets/protocol/ChatProtocol.ets'),agent);
+  const delta={protocol:'nearby-chat-v1',type:'delta',requestId:'metrics',text:'x'};
+  assert(validMessage(delta),'legacy messages do not require telemetry');
+  assert(validMessage({...delta,metrics:{streaming:true,modelLoadMs:0,prefillMs:1.5,completionTokens:2,outputChunks:2,firstOutputMs:1,lastOutputMs:9}}));
+  assert(agent.exports.validMessage({...delta,metrics:{streaming:true,prefillMs:1.5}}));
+  for(const metrics of [null,{}, {streaming:'yes'},{streaming:true,prefillMs:-1},
+    {streaming:true,decodeMs:Infinity},{streaming:true,promptTokens:1.5},{streaming:true,outputChunks:-1},
+    {streaming:true,firstOutputMs:NaN},{streaming:true,lastOutputMs:-1}]) {
+    assert(!validMessage({...delta,metrics}),'reject malformed optional telemetry');
+  }
+}
 const request = { type: 'request', requestId: 'r', needs: [], messages: [{ role: 'user', content: '中文😀'.repeat(400) }] };
 const frames = encodeMessage(request, 'message_1');
 assert(frames.length > 1);
@@ -103,6 +116,16 @@ assert(!validMessage({ ...info, capabilities: Array(9).fill('text') }));
 // The compute↔compute info poll frame carries only this shape; it must stay valid
 // or encodeMessage throws in LinkEnhanceChannel.write and tears the link down.
 assert(validMessage({ protocol: 'nearby-chat-v1', type: 'deviceInfo', requestId: 'info-2', capabilities: [] }));
+// 强度档位：可选整数 1-3；缺省（老对端）合法，畸形值拒收
+assert(validMessage({ ...info, modelTier: 3 }), 'wire tolerates a legacy tier 3 (consumers normalize to 2)');
+assert(validMessage({ ...info, modelTier: 1 }));
+assert(validMessage(info), 'an undeclared tier stays valid (old peer)');
+for (const modelTier of [0, 4, 2.5, 'strong']) {
+  assert(!validMessage({ ...info, modelTier }), 'malformed modelTier rejected: ' + JSON.stringify(modelTier));
+}
+// 分片往返后档位字段保留
+const tiered = new MessageAssembler();
+assert.equal(tiered.receive(encodeMessage({ ...info, modelTier: 3 }, 'tier')[0]).modelTier, 3);
 assert.equal(new MessageAssembler().receive(encodeMessage({
   type: 'deviceInfo', requestId: 'info-1', name: '算力', model: 'Qwen', memUsage: 40,
   thermalLevel: 2, batteryTemp: 42, cpuUsage: 18, capabilities: ['text'], peerRole: 'compute'
@@ -116,6 +139,10 @@ assert(validMessage({ ...sync, devices: [{ id: 'temporary-link', deviceUid: 'sta
 assert(!validMessage({ ...sync, devices: [{ id: 'temporary-link', deviceUid: 'x'.repeat(65), role: 'compute', capabilities: [] }] }));
 // 未声明能力的老对端（v1）必须仍然合法：缺省 = 纯文本，路由侧 fail closed。
 assert(validMessage({ ...sync, devices: [{ id: 'worker', role: 'compute' }] }), 'undeclared capabilities mean text-only');
+// roster 条目同样可携带可选档位（紧凑 roster 设计性省略，缺省合法）
+assert(validMessage({ ...sync, devices: [{ id: 'worker', role: 'compute', capabilities: [], modelTier: 2 }] }),
+  'roster entries may carry modelTier');
+assert(!validMessage({ ...sync, devices: [{ id: 'worker', role: 'compute', capabilities: [], modelTier: 9 }] }));
 assert(!validMessage({ ...sync, devices: null }));
 assert(validMessage({
   protocol: 'nearby-chat-v1', type: 'request', requestId: 'r',
@@ -193,3 +220,50 @@ const prepared = { protocol: 'nearby-chat-v1', type: 'prepared', requestId: 'r' 
 assert(validMessage({ ...prepared, error: 'x'.repeat(2048) }));
 for (const error of [null, 1, {}, 'x'.repeat(2049)]) assert(!validMessage({ ...prepared, error }));
 console.log('PASS: prepare/prepared schema and roundtrip, required bounded requestId, optional bounded error');
+
+// Slow-but-progressing uploads must survive both endpoints' receive watchdogs.
+for (const relative of ['./ChatProtocol.ets', '../../../../../../agent-client/entry/src/main/ets/protocol/ChatProtocol.ets']) {
+  const env = { ...context, exports: {} };
+  vm.runInNewContext(transpile(__dirname + '/' + relative), env);
+  const p = env.exports;
+  const payload = { type: 'infer.request', version: 2, requestId: 'slow', prompt: 'x'.repeat(10800) };
+  const chunks = p.encodeMessage(payload, 'slow');
+  now = 0;
+  const slow = new p.MessageAssembler(), receipt = [];
+  slow.setFragmentObserver(part => receipt.push(part));
+  let decoded;
+  for (let i = 0; i < chunks.length; i++) { now = i * 900; decoded = slow.receive(chunks[i]); slow.checkExpiry(); }
+  assert.equal(decoded.prompt, payload.prompt, 'continuous ~20s upload succeeds');
+  assert.equal(receipt.length, chunks.length);
+  assert.equal(receipt.at(-1).received, chunks.length);
+  assert.equal(receipt.at(-1).gapMs, 900);
+  assert.equal(receipt.at(-1).elapsedMs, (chunks.length - 1) * 900);
+  assert(!JSON.stringify(receipt).includes(payload.prompt), 'diagnostics contain metadata only');
+  now += 200000;
+  assert.doesNotThrow(() => slow.checkExpiry(), 'completed transfers have no inference timeout');
+
+  now = 0;
+  const duplicate = new p.MessageAssembler(); duplicate.receive(chunks[0]);
+  now = 14000; duplicate.receive(chunks[0]);
+  duplicate.receive(p.encodeMessage({ type: 'hello' }, 'other')[0]);
+  now = 15000;
+  assert.throws(() => duplicate.checkExpiry(), /received=1\/23.*idleMs=15000/,
+    'duplicate frames and unrelated messages never renew progress');
+
+  now = 0;
+  const drip = new p.MessageAssembler();
+  const long = p.encodeMessage({ ...payload, prompt: 'x'.repeat(32000) }, 'drip');
+  for (let i = 0; i < 60; i++) { now = i * 2000; drip.receive(long[i]); }
+  now = 120000;
+  assert.throws(() => drip.receive(long[60]), /ageMs=120000/, 'total upload duration remains bounded');
+
+  now = 0;
+  const isolated = new p.MessageAssembler(); isolated.receive(chunks[0]);
+  const other = p.encodeMessage(payload, 'second');
+  now = 10000; isolated.receive(other[0]);
+  now = 15000; assert.throws(() => isolated.checkExpiry(), /id=slow/, 'progress is per message');
+  const noisy = new p.MessageAssembler(); noisy.setFragmentObserver(() => { throw new Error('diagnostic sink'); });
+  for (const chunk of chunks) decoded = noisy.receive(chunk);
+  assert.equal(decoded.prompt, payload.prompt, 'logging failures cannot interrupt delivery');
+}
+console.log('PASS slow transfers, progress-only renewal, duplicate/other-message isolation, absolute bounds, metadata diagnostics on both endpoints');

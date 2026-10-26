@@ -1,14 +1,15 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {transpile}=require('../../../../../../../tests/ets-harness.cjs');
 const screenModule={exports:{}};vm.runInNewContext(transpile(path.join(__dirname,'../ui/CollaborationScreen.ets')),{exports:screenModule.exports,Promise});
-const screen=screenModule.exports.collaborationScreen,records=[];
+const screen=screenModule.exports.collaborationScreen,records=[],lifecycle=[];
 const win={setWindowKeepScreenOn:async on=>{records.push(on);},getWindowProperties:()=>({isKeepScreenOn:records.at(-1)}),setWindowLimits:async()=>{},resize:async()=>{}};
 const moduleObject={exports:{}};const context={exports:moduleObject.exports,require:name=>{
  if(name==='@kit.AbilityKit')return{UIAbility:class{},AbilityConstant:{}};
  if(name==='@kit.BasicServicesKit')return{deviceInfo:{deviceType:'2in1'}};
  if(name==='@kit.PerformanceAnalysisKit')return{hilog:{info(){},warn(){}}};
- if(name==='libgewu_probe.so')return{default:{cancel(){}}};
- if(name==='../nearby/LinkEnhanceChannel')return{nearbyChannel:{resume(){},suspend(){},destroy(){}}};
+ if(name==='libgewu_probe.so')return{default:{cancel(){lifecycle.push('cancel');}}};
+ if(name==='../nearby/LinkEnhanceChannel')return{nearbyChannel:{resume(){lifecycle.push('resume');},suspend(){lifecycle.push('background');},destroy(){lifecycle.push('destroy');},setActivityListener(){}}};
+ if(name==='../nearby/NearbyBackgroundTask')return{nearbyBackgroundTask:{retry(){lifecycle.push('retry');},dispose(){lifecycle.push('release');}}};
  if(name==='../ui/CollaborationScreen')return screenModule.exports;
  return{};
 }};
@@ -16,6 +17,8 @@ vm.runInNewContext(transpile(path.join(__dirname,'EntryAbility.ets')),context);
 (async()=>{const ability=new moduleObject.exports.default();screen.setWanted(true);ability.onForeground();
  ability.onWindowStageCreate({loadContent:(_url,callback)=>callback({code:0}),getMainWindowSync:()=>win});await screen.settled();assert.equal(records.at(-1),true);
  ability.onBackground();await screen.settled();assert.equal(records.at(-1),false);
+ assert(!lifecycle.includes('cancel'));assert(!lifecycle.includes('destroy'));
  ability.onDestroy();await screen.settled();assert.equal(records.at(-1),false);
+ assert(lifecycle.includes('cancel'));assert(lifecycle.includes('destroy'));assert(lifecycle.includes('release'));
  console.log('PASS actual EntryAbility binds successful code-zero callback and releases window on background/destroy');
 })().catch(e=>{console.error(e);process.exitCode=1;});

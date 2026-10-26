@@ -36,10 +36,24 @@
     .status.ok { color:var(--ok); background:rgba(26,155,106,.1); }
     .status.wait { color:var(--wait); background:rgba(201,132,18,.12); }
     .status.err { color:var(--err); background:rgba(196,71,58,.1); }
-    .connect { margin-left:auto; flex-shrink:0; border:0; border-radius:16px; padding:8px 12px; background:#fff; color:var(--accent); font-size:13px; font-weight:650; cursor:pointer; }
+    .connect { flex-shrink:0; border:0; border-radius:16px; padding:8px 12px; background:#fff; color:var(--accent); font-size:13px; font-weight:650; cursor:pointer; }
     .connect:disabled { opacity:.45; cursor:default; }
+    .gear { margin-left:auto; width:36px; height:36px; padding:0; border-radius:18px; font-size:18px; line-height:1; }
     .clear-tasks { margin-left:8px; border:0; border-radius:12px; padding:2px 10px; background:#fff; color:var(--accent); font-size:12px; font-weight:650; cursor:pointer; }
     .stats { display:flex; gap:8px; }
+    .settings { position:fixed; inset:0; z-index:5; display:flex; flex-direction:column; gap:12px; padding:16px 20px; background:var(--bg); overflow:auto; }
+    .settings[hidden] { display:none; }
+    .settings-head { display:flex; align-items:center; gap:12px; }
+    .settings-head h2 { margin:0; font-size:22px; font-weight:700; }
+    .settings-back { border:0; border-radius:16px; padding:8px 12px; background:#fff; color:var(--accent); font:inherit; font-size:14px; font-weight:650; cursor:pointer; }
+    .settings-label { margin:6px 0 0; font-size:16px; font-weight:650; color:var(--muted); }
+    .model-settings { padding:16px; border:1px solid var(--line); border-radius:16px; background:#fff; }
+    .model-fields { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:12px; }
+    .model-field { display:flex; flex:1 1 210px; min-width:0; flex-direction:column; gap:6px; font-size:13px; color:var(--muted); }
+    .model-field select { width:100%; min-width:0; min-height:44px; padding:8px; border:1px solid var(--line); border-radius:10px; background:#f7f9fd; color:var(--ink); font:inherit; }
+    .model-apply { min-height:44px; border:0; border-radius:10px; padding:8px 16px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+    .model-apply:disabled { opacity:.45; cursor:default; }
+    .model-hint { margin:10px 0 0; font-size:13px; color:var(--muted); line-height:1.5; }
     .stat { flex:1; max-width:200px; padding:10px 12px; border-radius:16px; background:#fff; display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
     .stat span { font-size:12px; color:var(--muted); }
     .stat b { font-size:20px; font-weight:720; color:var(--ink); }
@@ -68,6 +82,10 @@
     .stat b.cloud { color:var(--wait); }
     .stat b.edge { color:var(--ok); }
     .stat b.auto { color:var(--muted); }
+    .card:not(.task) .tag { padding:1px 8px; border-radius:999px; background:rgba(26,155,106,.12); }
+    .card:not(.task) .tag.wait { background:#eef1f8; }
+    .card:not(.task) .tag.run { background:rgba(61,91,219,.12); }
+    .card:not(.task) .tag.local { background:#efe8fb; color:#6d4bb5; }
     .meta { margin:6px 0 0; font-size:12px; color:var(--muted); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; grid-template-areas:"model heat jobs" "mem cpu jobs"; column-gap:12px; row-gap:6px; align-items:center; }
     .model { grid-area:model; min-width:0; }
     .heat { grid-area:heat; }
@@ -99,20 +117,203 @@
     .send:disabled { background:#c9cedc; color:#fff; opacity:1; }
     textarea { flex:1; min-width:0; max-height:104px; resize:none; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:16px; line-height:24px; padding:10px 4px; }
     textarea::placeholder { color:#8b93ab; }
-  </style>
+    /* Presentation only: keep native bridge and device telemetry unchanged. */
+    h1 { font-size:22px; }
+    .status,.connect,.clear-tasks,.tag { font-size:14px; }
+    .stat span { font-size:15px; }
+    .stat b { font-size:24px; }
+    .section { font-size:16px; }
+    .name { font-size:18px; }
+    .meta { font-size:15px; column-gap:10px; row-gap:8px; }
+    .card { padding:16px; }
+    .bar { gap:4px; white-space:nowrap; }
+    .bar i { width:42px; flex-shrink:0; }
+    .device-panel { min-height:0; }
+    .devices-label { margin-bottom:10px; display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; -webkit-user-select:none; }
+    .devices-label::before { content:"▾"; display:inline-block; width:12px; color:var(--muted); transition:transform .2s; }
+    .devices-label.collapsed::before { transform:rotate(-90deg); }
+    .devices-label .dev-sum { margin-left:auto; font-weight:500; font-size:12px; color:var(--muted); }
+    .device-panel.collapsed #devices { display:none; }
+    .model,.heat { overflow-wrap:anywhere; }
+    .jobs { font-size:13px; padding:2px 5px; }
+    .task-panel { position:relative; display:flex; flex-direction:column; min-height:0; flex:1; background:#fff; border-radius:18px; border:1px solid var(--line); overflow:hidden; }
+    .task-toolbar { padding:20px 22px 0; flex-shrink:0; }
+    .task-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .task-heading h2 { margin:0; font-size:21px; font-weight:650; }
+    .task-hint { margin:6px 0 16px; font-size:14px; line-height:1.5; color:var(--muted); }
+    .clear-tasks { margin:0; padding:8px; white-space:nowrap; }
+    .filters { display:flex; gap:20px; border-bottom:1px solid var(--line); }
+    .filter { border:0; padding:10px 4px; background:none; color:var(--muted); font:inherit; font-size:16px; cursor:pointer; border-bottom:2px solid transparent; }
+    .filter[aria-pressed="true"] { color:var(--accent); border-bottom-color:var(--accent); }
+    .task-columns,.task-row { display:grid; grid-template-columns:minmax(0,1fr) 130px 90px 100px; gap:16px; align-items:center; }
+    .task-columns { color:var(--muted); font-size:14px; padding:16px 0 12px; border-bottom:1px solid var(--line); }
+    #history { padding:0 22px; gap:0; scrollbar-width:thin; }
+    .task-row { padding:20px 0; border-bottom:1px solid var(--line); flex-shrink:0; }
+    .task-info { min-width:0; }
+    .task-question { margin:0; font-size:18px; font-weight:600; line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+    .request-label { display:inline-block; margin-right:7px; padding:2px 6px; border-radius:6px; background:#eef1f8; color:var(--muted); font-size:13px; font-weight:500; vertical-align:middle; }
+    .task-origin { margin:7px 0; font-size:15px; color:var(--muted); display:flex; align-items:center; gap:8px; }
+    .task-metrics { font-size:14px; line-height:1.6; color:var(--muted); }
+    .task-created { display:block; }
+    .task-worker { font-size:16px; overflow-wrap:anywhere; }
+    .task-state { display:flex; align-items:center; gap:7px; font-size:15px; color:var(--ok); }
+    .task-state::before { content:""; width:7px; height:7px; background:currentColor; border-radius:50%; flex-shrink:0; }
+    .task-state.run { color:var(--busy); }
+    .task-state.err { color:var(--err); }
+    .task-action { border:0; background:none; color:var(--accent); font:inherit; font-size:15px; padding:8px 0; cursor:pointer; text-align:right; }
+    .task-group { padding-bottom:16px; border-bottom:1px solid var(--line); flex-shrink:0; }
+    .task-group > .task-row { border:0; }
+    .parent-label { display:inline-block; margin-right:8px; color:var(--accent); font-size:14px; font-weight:500; }
+    .task-children { margin:0 0 0 8px; padding:0 14px 0 28px; border-radius:10px; background:#f7f9fd; }
+    .task-children .task-row { position:relative; padding:16px 0; }
+    .task-children .task-row::before { content:""; position:absolute; left:-20px; top:50%; width:13px; border-top:2px solid #b5c3da; pointer-events:none; }
+    .task-children .task-row::after { content:""; position:absolute; left:-20px; top:0; bottom:0; border-left:2px solid #b5c3da; pointer-events:none; }
+    .task-children .task-row:first-child::after { top:-12px; }
+    .task-children .task-row:last-of-type { border-bottom:0; }
+    .task-children .task-row:last-of-type::after { bottom:50%; }
+    .child-metrics { margin-top:4px; font-size:13px; }
+    .task-children .task-question { font-size:16px; font-weight:500; }
+    .task-state.wait { color:var(--wait); }
+    .task-state.partial { color:var(--wait); }
+    .group-return { position:relative; margin:0; padding:10px 0 12px; color:var(--muted); font-size:14px; line-height:1.5; }
+    .group-return::before { content:""; position:absolute; left:-20px; top:0; height:20px; width:13px; border-left:2px solid #b5c3da; border-bottom:2px solid #b5c3da; border-bottom-left-radius:6px; pointer-events:none; }
+    .return-arrow { margin-right:6px; color:var(--accent); }
+    .group-actions { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+    .detail-context { color:var(--muted); font-size:14px; line-height:1.6; overflow-wrap:anywhere; margin-top:10px; }
+    .task-preview { display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; color:var(--muted); font-size:15px; line-height:1.6; margin-top:6px; }
+    .task-count { margin:0; padding:12px 22px; font-size:14px; color:var(--muted); flex-shrink:0; }
+    .detail { position:absolute; inset:0; z-index:2; display:flex; flex-direction:column; min-width:0; overflow:hidden; background:#fff; padding:22px; }
+    .detail[hidden] { display:none; }
+    .detail-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .detail-head h2 { margin:0; font-size:21px; }
+    .detail-close { border:0; background:#eef1f8; color:var(--ink); border-radius:50%; width:36px; height:36px; font-size:24px; cursor:pointer; }
+    .detail-title { font-size:18px; margin:12px 0 6px; line-height:1.5; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; flex-shrink:0; }
+    .detail-route { color:var(--muted); font-size:13px; line-height:1.6; margin-bottom:4px; overflow-wrap:anywhere; flex-shrink:0; }
+    .detail-metrics { display:flex; flex-wrap:wrap; gap:6px 18px; padding:10px 0; border-bottom:1px solid var(--line); flex-shrink:0; }
+    .detail-metrics span { color:var(--muted); font-size:12px; }
+    .detail-metrics b { margin-left:6px; font-size:13px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; }
+    .detail-content { flex:1; min-height:80px; overflow:auto; margin-top:12px; font-size:15px; line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; }
+    #history,#devices,.detail-content { overflow-anchor:none; touch-action:pan-y; overscroll-behavior-y:contain; -webkit-overflow-scrolling:touch; }
+    .detail-footer { font-size:13px; color:var(--muted); padding-top:12px; line-height:1.6; overflow-wrap:anywhere; }
+    button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    @media (min-width:960px) {
+      .app { grid-template-columns:minmax(350px,390px) minmax(0,1fr); grid-template-rows:auto auto minmax(0,1fr) auto; grid-template-areas:"header header" "stats stats" "devices tasks" "sheet sheet"; gap:16px 20px; padding:20px; }
+      .device-panel { grid-area:devices; display:flex; flex-direction:column; }
+      #devices { flex:1; max-height:none; }
+      .task-panel { grid-area:tasks; }
+    }
+    @media (max-width:1199px) {
+      .task-columns,.task-row { grid-template-columns:minmax(0,1fr) 100px 74px 90px; gap:10px; }
+      .task-toolbar { padding:16px 16px 0; }
+      #history { padding:0 16px; }
+    }
+    @media (max-width:959px) {
+      .app { padding:12px; }
+      #devices { max-height:28vh; }
+      .task-columns { display:none; }
+      .task-hint { margin-bottom:6px; }
+      .task-heading h2 { font-size:18px; }
+      .task-row { grid-template-columns:minmax(0,1fr) auto; gap:10px; padding:16px 0; }
+      .task-info { grid-column:1 / -1; }
+      .task-worker { grid-column:1; grid-row:2; }
+      .task-state { grid-column:2; grid-row:2; }
+      .task-action { grid-column:2; grid-row:3; }
+      .task-created { display:none; }
+      .detail { position:fixed; inset:12px 12px 84px; padding:16px; border-radius:16px; box-shadow:0 12px 40px rgba(28,36,72,.16); }
+      .detail .filter { font-size:14px; padding:9px 2px; }
+      .detail-footer { font-size:11px; padding-top:8px; }
+      .task-count { padding:8px 16px; }
+    }
+    @media (max-width:399px) { .bar i { width:30px; } .meta { column-gap:6px; } }
+    @media (max-height:600px) {
+      .detail { padding:12px; }
+      .detail-title { -webkit-line-clamp:1; margin-top:8px; }
+      .detail-context { display:none; }
+      .detail-rounds { margin:8px 0; }
+      .detail-footer { max-height:3em; overflow:auto; }
+    }
+    .detail-rounds{display:flex;align-items:center;gap:10px;flex-shrink:0;padding:8px 0}
+    .detail-rounds[hidden]{display:none}
+    .rounds-heading{flex-shrink:0;font-size:12px;margin:0;color:var(--muted)}
+    .round-list{flex:1;min-width:0;max-height:none;overflow:visible;padding:0}
+    .round-list select{width:100%;min-width:0;box-sizing:border-box;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:inherit;font:inherit;font-size:12px}
+    .task-result{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:5px}
+      .task-view-switch{display:flex;gap:3px;background:#f1f3f8;border-radius:10px;padding:3px;margin-left:auto}.task-view-switch button{font:inherit;font-size:13px;white-space:nowrap;border:0;border-radius:7px;padding:7px 10px;background:none;color:var(--muted);cursor:pointer}.task-view-switch button[aria-pressed=true]{background:#fff;color:var(--accent);box-shadow:0 1px 4px #25356715}
+    .flow-view{flex:1;min-height:0;overflow:auto;padding:14px 22px 20px;overscroll-behavior:contain}.flow-view[hidden],#history[hidden],#historyControls[hidden],#taskCount[hidden]{display:none}
+    .flow-labels{display:grid;grid-template-columns:154px 146px 1fr;min-width:920px;color:var(--muted);font-size:12px;padding-bottom:16px}.flow-labels span:last-child{padding-left:30px}.flow-scene{position:relative;min-height:400px}.flow-wires{position:absolute;inset:0;width:100%;height:100%;overflow:visible}.flow-wire{fill:none;stroke:#bfc8d8;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.flow-wire.active{stroke:#4e6bd6;stroke-width:3.6}
+    .flow-phone{position:absolute;left:2px;width:88px;display:flex;flex-direction:column;align-items:center;gap:9px;font-size:13px;font-weight:600}.flow-phone>svg{width:44px;height:66px;color:#89919f}.flow-phone>span{text-align:center;overflow-wrap:anywhere}.flow-router{position:absolute;left:154px;width:64px;height:52px;display:grid;place-items:center;border:1.5px solid #a9b1c0;border-radius:11px;background:#fff;color:#858fa2}.flow-router>svg{width:40px;height:30px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.flow-router>span{position:absolute;top:61px;color:var(--ink);white-space:nowrap;font-size:13px;font-weight:600}.flow-router.active{border-color:#849ae6;background:#f6f8ff;color:#4e6bd6}
+    .flow-compute{position:absolute;display:grid;grid-template-columns:104px minmax(210px,1fr) minmax(210px,1fr);gap:18px;padding:18px;border:1px solid #e4e9ee;border-radius:17px;background:#fcfdfd}.flow-computer{align-self:start;display:flex;flex-direction:column;align-items:center;gap:9px;font-size:14px;font-weight:600;padding-top:4px}.flow-computer>svg{width:100px;height:70px;color:#89919f}.flow-computer>span{text-align:center;overflow-wrap:anywhere}.flow-memory{width:92px;margin-top:0}.flow-memory>i{height:8px;background:#e3e6eb;border-radius:5px;display:block;overflow:hidden}.flow-memory em{height:100%;display:block;border-radius:5px}.flow-memory>span{display:flex;justify-content:space-between;font-size:11px;line-height:14px;font-weight:450;color:#626b85;margin-top:5px}.flow-memory b{font-weight:600}.flow-computer small{font-size:12px;color:#94640e}.flow-lane{display:flex;flex-direction:column;gap:8px;min-width:0}.flow-lane h3,.flow-pending h3{font-size:15px;font-weight:600;color:#127650;line-height:18px;margin:0 0 2px}.flow-lane h3:before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;display:inline-block;vertical-align:3px;margin-right:6px}.flow-lane.queue h3,.flow-pending h3{color:#866018}.flow-idle{font-size:12px;color:var(--muted);padding:16px 0}
+    .flow-task{height:50px;min-height:50px;display:grid;grid-template-columns:30px minmax(36px,1fr) auto;gap:10px;align-items:center;border:1px solid #d4e9de;border-radius:9px;background:#f2faf6;padding:8px 12px;color:#385745;font:inherit;text-align:left;position:relative}.flow-task:is(button){cursor:pointer}.flow-task>span{font-size:18px;font-weight:550}.flow-type{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.flow-task b{font:620 26px/1 ui-monospace,'SFMono-Regular',Consolas,monospace;letter-spacing:.2px;font-variant-numeric:tabular-nums;color:#237b58}.flow-task.working:before{content:'';position:absolute;left:-1px;top:12px;bottom:12px;width:2px;background:#71b391}.flow-task.waiting{border-color:#ebdfc4;background:#fff9ed;color:#866018}.flow-task.waiting b{color:#866018}.flow-packet{position:absolute;left:0;top:0;width:44px;height:44px;border:1.5px solid #849ae6;border-radius:9px;background:#f4f6ff;color:#4e6bd6;display:grid;place-items:center;offset-rotate:0deg;animation:flow-travel 1.2s linear infinite;pointer-events:none;z-index:1}.flow-packet .flow-type{width:28px;height:28px}@keyframes flow-travel{from{offset-distance:0%}to{offset-distance:100%}}@media(prefers-reduced-motion:reduce){.flow-packet{animation:none;offset-distance:65%}}
+    .flow-pending{min-width:600px;margin-top:12px;margin-left:300px}.flow-pending>div{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}.flow-pending .flow-task{width:220px}.flow-empty{position:absolute;left:330px;top:150px;color:var(--muted);font-size:14px}
+    @media(max-width:959px){.flow-view{padding:12px 16px;min-height:230px}.task-view-switch button{font-size:12px;padding:7px}.task-toolbar{padding:14px 16px 0}.task-heading{flex-wrap:wrap}.task-view-switch{margin-left:0}.clear-tasks{font-size:12px}.task-hint{font-size:12px}.stats{overflow-x:auto}.stat{flex:0 0 auto;min-width:130px}}
+
+</style>
 </head>
 <body>
+<svg style="position:absolute;width:0;height:0;overflow:hidden" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+<symbol id="flow-phone" viewBox="0 0 58 87"><g fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="2" width="46" height="81" rx="8" fill="#fff"/><rect x="10" y="8" width="38" height="65" rx="3" stroke="#d3d8e1" fill="#fbfcff"/><path d="M24 5h10M24 78h10" stroke-linecap="round"/></g></symbol>
+<symbol id="flow-pc" viewBox="0 0 110 83"><g fill="white" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="16" y="4" width="78" height="52" rx="4"/><rect x="21" y="9" width="68" height="41" rx="1.5" stroke="#cbd1da" stroke-width="1.2" fill="#fcfdfd"/><path d="M16 57h78l12 17q1 4-4 4H8q-5 0-4-4z"/><path d="M4 73h102M26 61h58l5 7H22z" stroke="#bdc5cf" stroke-width="1.1"/><path d="M46 71h18l3 5H43z" stroke="#b2bac5" stroke-width="1"/><path d="M34 61l-2 7m15-7-1 7m15-7 1 7m13-7 2 7" stroke="#d1d6de" stroke-width="1"/></g></symbol>
+<symbol id="flow-task-text" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></symbol>
+<symbol id="flow-task-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="16" cy="9" r="1.5"/><path d="m3 17 5-6 5 6 3-3 5 5"/></symbol>
+<symbol id="flow-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V8l2 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+<symbol id="flow-mini-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 5h4m-3 14h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+<symbol id="flow-mini-pc" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m4 16-2 4h20l-2-4M9 8h6v4H9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></symbol>
+</defs></svg>
   <main class="app">
     <header>
       <svg class="brand" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="12" fill="#3d5bdb"/><circle cx="11" cy="18" r="3" fill="#fff"/><circle cx="25" cy="12" r="3" fill="#fff"/><circle cx="25" cy="24" r="3" fill="#fff"/><path stroke="#fff" stroke-width="1.6" d="M13.6 16.8 22.4 13.2M13.6 19.2 22.4 22.8"/></svg>
       <div class="head"><h1 id="title">算力</h1><p id="connection" class="status wait" role="status">正在准备…</p></div>
+      <button id="openSettings" class="connect gear" type="button" aria-label="设置">⚙</button>
       <button id="connect" class="connect" type="button" disabled>启用近场</button>
     </header>
+    <section id="settings" class="settings" hidden>
+      <div class="settings-head">
+        <button id="closeSettings" class="settings-back" type="button">返回</button>
+        <h2>设置</h2>
+      </div>
+      <h3 class="settings-label">模型选择 · 本机</h3>
+      <section id="modelSettings" class="model-settings">
+        <div class="model-fields">
+          <label class="model-field" for="selectedModel">当前模型<select id="selectedModel"></select></label>
+          <button id="applyModels" class="model-apply" type="button" disabled>应用选择</button>
+        </div>
+        <p id="modelHint" class="model-hint">仅列出本机已部署的模型，设置会自动保存。</p>
+        <p id="modelMessage" class="model-hint" role="status" aria-live="polite"></p>
+      </section>
+      <h3 class="settings-label">输出方式 · 本机</h3>
+      <section class="model-settings">
+        <div class="model-fields">
+          <label class="model-field" for="outputMode">推理输出<select id="outputMode">
+            <option value="stream">流式输出（逐段显示）</option>
+            <option value="complete">非流式输出（完整返回）</option>
+          </select></label>
+          <button id="applyOutputMode" class="model-apply" type="button" disabled>保存输出方式</button>
+        </div>
+        <p class="model-hint">适用于本机执行的文字和图片推理。保存后对新请求生效，正在进行的任务保持原设置。</p>
+        <p id="outputModeMessage" class="model-hint" role="status" aria-live="polite"></p>
+      </section>
+    </section>
     <div class="stats" id="stats"></div>
-    <div class="section devices-label">附近设备</div>
-    <div class="list" id="devices"></div>
-    <div class="section tasks-label">任务 <button id="clearTasks" class="clear-tasks" type="button">清空</button></div>
-    <section id="history" class="list" aria-label="推理任务" aria-live="polite"></section>
+    <aside class="device-panel" id="devicePanel" aria-label="附近设备">
+      <div class="section devices-label" id="devicesToggle" role="button" tabindex="0" aria-expanded="true">附近设备<span id="deviceCount"></span><span class="dev-sum" id="deviceSummary"></span></div>
+      <div class="list" id="devices"></div>
+    </aside>
+    <section class="task-panel" aria-label="本机推理任务">
+      <div id="taskToolbar" class="task-toolbar">
+        <div class="task-heading"><h2>推理任务</h2><div id="taskViewSwitch" class="task-view-switch" aria-label="任务视图"><button type="button" data-task-view="flow" aria-pressed="true">协同视图</button><button type="button" data-task-view="history" aria-pressed="false">任务历史</button></div><button id="clearTasks" class="clear-tasks" type="button">清空历史</button></div>
+        <p class="task-hint">设备协同、任务路由与推理状态</p>
+        <div id="historyControls" hidden><div id="filters" class="filters" aria-label="筛选推理请求">
+          <button class="filter" type="button" data-filter="all" aria-pressed="true">全部</button>
+          <button class="filter" type="button" data-filter="running" aria-pressed="false">进行中</button>
+          <button class="filter" type="button" data-filter="finished" aria-pressed="false">已完成</button>
+        </div>
+        <div class="task-columns" aria-hidden="true"><span>任务 / 来源</span><span>执行设备</span><span>状态</span><span style="text-align:right">操作</span></div>
+      </div></div>
+      <section id="collaboration" class="flow-view" aria-label="设备协同运行图"></section>
+      <section id="history" hidden class="list" aria-label="推理请求"></section>
+      <p hidden id="taskCount" class="task-count"></p>
+      <section id="detail" class="detail" role="region" aria-label="推理详情" hidden></section>
+    </section>
     <div class="sheet">
       <div id="preview" class="preview">
         <img id="previewImg" alt="已选图片">
@@ -143,6 +344,84 @@
     const previewClear=document.getElementById('previewClear');
     const statusView=document.getElementById('connection');
     const titleView=document.getElementById('title');
+    const settingsView=document.getElementById('settings');
+    const modelSettingsView=document.getElementById('modelSettings');
+    const selectedModelView=document.getElementById('selectedModel');
+    const modelHintView=document.getElementById('modelHint');
+    const applyModelsButton=document.getElementById('applyModels');
+    const modelMessageView=document.getElementById('modelMessage');
+    const outputModeView=document.getElementById('outputMode');
+    const applyOutputModeButton=document.getElementById('applyOutputMode');
+    const outputModeMessage=document.getElementById('outputModeMessage');
+    let outputDraft=false;
+    let modelState=null, modelStateSignature='', modelDraft=false, modelPollAt=0;
+    function refreshModels(){
+      if(!settingsView||settingsView.hidden||typeof window.chatBridge.models!=='function')return;
+      try{renderModelSettings(JSON.parse(window.chatBridge.models()));}catch(error){}
+    }
+    function openSettings(){if(!settingsView)return;settingsView.hidden=false;refreshModels();}
+    function closeSettings(){if(settingsView)settingsView.hidden=true;}
+    const openSettingsButton=document.getElementById('openSettings');
+    const closeSettingsButton=document.getElementById('closeSettings');
+    if(openSettingsButton)openSettingsButton.addEventListener('click',openSettings);
+    if(closeSettingsButton)closeSettingsButton.addEventListener('click',closeSettings);
+    function renderModelSettings(state){
+      if(!state||!modelSettingsView)return;
+      modelState=state;
+      if(outputModeView){
+        if(!outputDraft)outputModeView.value=state.streaming===false?'complete':'stream';
+        applyOutputModeButton.disabled=!outputDraft;
+      }
+      const signature=JSON.stringify([state.selected,state.options]);
+      if(signature!==modelStateSignature){
+        modelStateSignature=signature;modelDraft=false;
+        const entries=[['','自动（按请求选择）']];
+        for(const choice of state.options||[])entries.push([choice.name,shortModel(choice.name)+(choice.vision?'（仅带图片）':'（文字）')]);
+        if(state.selected&&!entries.some(entry=>entry[0]===state.selected))entries.push([state.selected,shortModel(state.selected)+'（不可用）']);
+        selectedModelView.innerHTML=entries.map(entry=>'<option value="'+esc(entry[0])+'"'+(entry[0]===state.selected?' selected':'')+'>'+esc(entry[1])+'</option>').join('');
+        selectedModelView.value=state.selected;
+      }
+      selectedModelView.disabled=state.locked;
+      updateModelHint();
+      applyModelsButton.disabled=state.locked||!modelDraft;
+      if(state.locked)modelMessageView.textContent='本机正在推理或释放模型，结束后可切换。';
+      else if(modelMessageView.textContent==='本机正在推理或释放模型，结束后可切换。')modelMessageView.textContent='';
+    }
+    function updateModelHint(){
+      const choice=modelState&&(modelState.options||[]).find(item=>item.name===selectedModelView.value);
+      modelHintView.textContent=!selectedModelView.value?'自动模式按请求选择文字或图片模型。设置保存在本机。':
+        (choice?(choice.vision?'选择此模型后，本机只处理带图片的请求。':'选择此模型后，本机只处理文字请求。'):'所选模型当前不可用，请重新选择。');
+    }
+    function modelEdited(){
+      modelDraft=true;applyModelsButton.disabled=!modelState||modelState.locked;
+      modelMessageView.textContent='点击“应用选择”后生效。';
+      updateModelHint();
+    }
+    if(selectedModelView)selectedModelView.addEventListener('change',modelEdited);
+    if(applyModelsButton)applyModelsButton.addEventListener('click',()=>{
+      try{
+        const error=window.chatBridge.selectModel(selectedModelView.value);
+        modelMessageView.textContent=error||'已保存，将用于后续请求。';
+        if(!error){modelDraft=false;applyModelsButton.disabled=true;}
+      }catch(error){modelMessageView.textContent='设置未保存，请重试。';}
+    });
+    if(outputModeView)outputModeView.addEventListener('change',()=>{
+      outputDraft=!!modelState&&outputModeView.value!==(modelState.streaming===false?'complete':'stream');
+      applyOutputModeButton.disabled=!outputDraft;
+      outputModeMessage.textContent=outputDraft?'点击“保存输出方式”后生效。':'';
+    });
+    if(applyOutputModeButton)applyOutputModeButton.addEventListener('click',()=>{
+      if(!outputDraft)return;
+      try{
+        const error=window.chatBridge.setOutputMode(outputModeView.value);
+        outputModeMessage.textContent=error||'已保存，将用于后续推理请求。';
+        if(!error){modelState.streaming=outputModeView.value==='stream';outputDraft=false;applyOutputModeButton.disabled=true;}
+      }catch(error){outputModeMessage.textContent='输出方式未保存，请重试。';}
+    });
+    const filtersView=document.getElementById('filters');
+    const taskCountView=document.getElementById('taskCount');
+    const detailView=document.getElementById('detail');
+    const taskToolbarView=document.getElementById('taskToolbar');
     const ICO_SEND='<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3.2 20.8 21 12 3.2 3.2l-.2 7.2L13 12l-10 1.6z"/></svg>';
     const ICO_STOP='<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>';
     connectButton.addEventListener('click',()=>window.chatBridge.connect());
@@ -156,9 +435,142 @@
     }
     promptInput.addEventListener('pointerdown',()=>{allowFocusPreparation=true;prepareFromInput();});
     promptInput.addEventListener('focus',prepareFromInput);
-    document.addEventListener('keydown',event=>{if(event.key==='Tab')allowFocusPreparation=true;});
+    document.addEventListener('keydown',event=>{
+      if(event.key==='Tab')allowFocusPreparation=true;
+      if(event.key==='Escape'&&(detailKey||detailGroupKey))closeDetail();
+      else if(event.key==='Escape')closeSettings();
+    });
     let available=false, pendingText='正在生成…', pendingImage='';
-    let jobs=[], devices=[], running=0, openIds={}, selfLabel='算力设备1', selfBackend='';
+    let jobs=[], remoteCalls=[], devices=[], running=0, selfLabel='算力设备1', selfBackend='';
+    let activeFilter='all', detailKey='', detailTab='output', detailTrigger=null;
+    let groups=[], collapsedGroups=new Set(), detailGroupKey='', detailChildId='';
+    let detailFollow=true;
+    function allCalls(){
+      const calls=new Map();
+      const local=jobs.filter(job=>!/^算力设备\d+$/.test(job.source||'')||job.source===selfLabel);
+      for(const job of local.concat(remoteCalls))if(!calls.has(jobKey(job)))calls.set(jobKey(job),job);
+      return Array.from(calls.values());
+    }
+    function summaryText(text){
+      let value=String(text||'').replace(/^（附图）/,'').replace(/^【(?:子任务\s+\d+\/\d+|任务拆分|合并结果)】/,'');
+      const marker=value.match(/(?:^|\n)(?:User task:|## User request|Original question:|用户请求：|原始问题：)\s*\n/);
+      if(marker)value=value.slice(marker.index+marker[0].length).split('\n')[0];
+      else if(/\n|^(?:You are|# Role|Return |System:|Developer:|把用户请求拆成|下面是同一个用户请求)/i.test(value))value='推理请求';
+      value=value.replace(/\s+/g,' ').trim()||'推理请求';
+      return value.length>80?value.slice(0,80)+'…':value;
+    }
+    function focusWithoutScroll(element){if(element&&element.focus)element.focus({preventScroll:true});}
+    // Patch existing nodes: replacing the scroll tree on every stream tick breaks
+    // touch scrolling and makes focused buttons pull the history back into view.
+    function morphNode(current,next){
+      if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next);return;}
+      if(current.nodeType===3){if(current.data!==next.data)current.data=next.data;return;}
+      if(current.nodeType!==1)return;
+      for(const attribute of Array.from(current.attributes))if(!next.hasAttribute(attribute.name))current.removeAttribute(attribute.name);
+      for(const attribute of Array.from(next.attributes))if(current.getAttribute(attribute.name)!==attribute.value)current.setAttribute(attribute.name,attribute.value);
+      const children=Array.from(next.childNodes);
+      for(let index=0;index<children.length;index++){
+        if(current.childNodes[index])morphNode(current.childNodes[index],children[index]);else current.appendChild(children[index]);
+      }
+      while(current.childNodes.length>children.length)current.lastChild.remove();
+    }
+    function renderMarkup(view,html){
+      if(view.innerHTML===html)return;
+      const top=view.scrollTop||0;
+      const template=document.createElement('template');
+      if(!template.content||!view.insertBefore){view.innerHTML=html;view.scrollTop=top;return;}
+      template.innerHTML=html;
+      const key=node=>node.getAttribute('data-row-key')||node.getAttribute('data-filter')||'';
+      const old=Array.from(view.children), keyed=new Map(old.filter(key).map(node=>[key(node),node]));
+      const viewTop=view.getBoundingClientRect().top;
+      const anchor=top>0?old.find(node=>key(node)&&node.getBoundingClientRect().bottom>viewTop):null;
+      const anchorOffset=anchor?anchor.getBoundingClientRect().top-viewTop:0;
+      const used=new Set();
+      Array.from(template.content.children).forEach((next,index)=>{
+        const current=key(next)?keyed.get(key(next)):(old[index]&&!key(old[index])?old[index]:null);
+        const node=current&&!used.has(current)?current:next;
+        if(node!==next)morphNode(node,next);
+        if(view.children[index]!==node)view.insertBefore(node,view.children[index]||null);
+        used.add(node);
+      });
+      for(const node of old)if(!used.has(node))node.remove();
+      const desired=anchor&&anchor.isConnected?view.scrollTop+anchor.getBoundingClientRect().top-viewTop-anchorOffset:top;
+      if(Math.abs(view.scrollTop-desired)>.5)view.scrollTop=desired;
+    }
+    function groupRunning(group){return group.phase==='running'||group.phase==='merging';}
+    function phaseView(phase){
+      return ({queued:['待执行','wait'],running:['执行中','run'],merging:['汇总中','run'],done:['已完成',''],
+        partial:['部分完成','partial'],failed:['失败','err'],cancelled:['已取消','wait']})[phase]||['状态未知','wait'];
+    }
+    function callsFor(group,childId){
+      return allCalls().filter(job=>job.groupKey===group.key&&job.subtaskId===childId)
+        .sort((a,b)=>a.startedAt-b.startedAt||jobKey(a).localeCompare(jobKey(b)));
+    }
+    function childScope(job){
+      return job.groupKey&&job.subtaskId&&job.subtaskId!=='plan'&&job.subtaskId!=='merge'?
+        JSON.stringify([job.groupKey,job.subtaskId]):'';
+    }
+    function detailCalls(job){
+      if(childScope(job))return callsFor({key:job.groupKey},job.subtaskId);
+      const row=taskRows(allCalls()).find(item=>item.calls.some(call=>jobKey(call)===jobKey(job)));
+      return row?row.calls:[job];
+    }
+    function groupChildren(group){
+      return group.executor===selfLabel?group.subtasks:group.subtasks.filter(child=>
+        child.device===selfLabel||callsFor(group,child.id).some(call=>call.source===selfLabel));
+    }
+    // Only explicit session/task identity joins model calls. Identical user text is not identity.
+    function taskRows(requests){
+      const rows=new Map();
+      for(const job of requests.slice().sort((a,b)=>a.startedAt-b.startedAt)){
+        const scope=childScope(job),key=scope?'subtask:'+scope:'request:'+jobKey(job);
+        let row=rows.get(key);
+        if(!row){row={key,job,startedAt:job.startedAt,endedAt:0,count:0,running:false,chars:0,calls:[]};rows.set(key,row);}
+        row.calls.push(job);row.count++;row.running=row.running||!!job.running;
+        row.endedAt=Math.max(row.endedAt,job.endedAt||0);row.chars+=Number(job.chars)||0;
+        if(job.running&&!row.job.running||job.running===row.job.running&&job.startedAt>=row.job.startedAt)row.job=job;
+      }
+      return Array.from(rows.values());
+    }
+    function resultPreview(text){
+      const value=String(text||'').replace(/\s+/g,' ').trim();
+      return value?'<p class="task-origin task-result">'+esc(value.length>120?value.slice(0,120)+'…':value)+'</p>':'';
+    }
+    function taskSummary(text){
+      const value=String(text||'').replace(/\s+/g,' ').trim()||'图片请求';
+      return value.length>80?value.slice(0,80)+'…':value;
+    }
+    function renderGroup(group){
+      const state=phaseView(group.phase),collapsed=collapsedGroups.has(group.key),split=group.subtasks.length>0;
+      const assigned=groupChildren(group),local=group.executor===selfLabel;
+      const elapsed=(group.endedAt||Date.now())-group.startedAt;
+      const children=assigned.map(child=>{
+        const status=phaseView(child.phase),calls=callsFor(group,child.id),timing=childTiming(child,calls);
+        return '<div class="task-row"><div class="task-info"><h4 class="task-question"><span class="parent-label">子任务</span>'+esc(taskSummary(child.input||child.title))+'</h4>'+
+          '<p class="task-origin">'+esc(child.title)+'</p>'+resultPreview(child.result)+
+          (timing?'<div class="task-metrics">'+timing+'</div>':'')+'</div><span class="task-worker">'+esc(child.device||'待分配')+
+          '</span><span class="task-state '+status[1]+'">'+status[0]+'</span><button class="task-action" type="button" data-result="'+
+          esc(child.id)+'" data-group="'+esc(group.key)+'">推理详情 ›</button></div>';
+      }).join('');
+      const calls=allCalls().filter(call=>call.groupKey===group.key),workers=Array.from(new Set(calls.map(call=>call.source).filter(Boolean)));
+      const executor=split?(local?group.executor:'汇总：'+group.executor):(workers.join(' / ')||group.executor);
+      return '<article class="task-group" data-row-key="group:'+esc(group.key)+'"><div class="task-row"><div class="task-info"><h3 class="task-question">'+
+        (split?'<span class="parent-label">主任务</span>':'')+esc(taskSummary(group.title))+'</h3><p class="task-origin">'+esc(group.origin)+
+        (split?' · '+group.subtasks.length+' 个子任务'+(local?'':' · 本机参与 '+assigned.length+' 个'):'')+'</p>'+resultPreview(group.answer)+
+        '<div class="task-metrics">'+(groupRunning(group)?'已用 ':'耗时 ')+clock(elapsed)+'<span class="task-created">'+createdAt(group.startedAt)+
+        '</span></div></div><span class="task-worker">'+esc(executor)+'</span><span class="task-state '+state[1]+'">'+state[0]+
+        '</span><div class="group-actions">'+(split?'<button class="task-action" type="button" data-collapse="'+esc(group.key)+'" aria-expanded="'+!collapsed+'">'+
+        (collapsed?'展开子任务 ▾':'收起子任务 ▴')+'</button>':'')+'<button class="task-action" type="button" data-summary="'+esc(group.key)+'">推理详情 ›</button>'+
+        '</div></div>'+(split&&!collapsed?'<div class="task-children" role="group" aria-label="子任务">'+children+'</div>':'')+'</article>';
+    }
+    function childTiming(child,calls){
+      const start=child.startedAt||(calls.length?calls[0].startedAt:0);
+      if(!start)return '';
+      const active=child.phase==='running'||child.phase==='queued';
+      const end=active?Date.now():(child.endedAt||Math.max(0,...calls.map(call=>call.endedAt||0)));
+      if(!end||end<start)return '';
+      return (active?'已用 ':'耗时 ')+clock(end-start);
+    }
     function setSelfLabel(label){
       if(typeof label!=='string'||!label) return;
       if(label==='算力设备' && /^算力设备\d+$/.test(selfLabel)) return;
@@ -182,6 +594,7 @@
       const sec=Math.max(0,Math.round(ms/100)/10);
       return sec.toFixed(1)+'s';
     }
+    function preciseClock(ms){return (Math.max(0,Math.round(ms))/1000).toFixed(3)+'s';}
     function createdAt(ms){
       if(!ms)return '创建时间未知';
       const date=new Date(ms);
@@ -197,7 +610,16 @@
     }
     function shortModel(name){
       if(!name)return '无模型';
-      return String(name).replace(/-Instruct.*$/,'').replace(/-Q4.*$/,'');
+      return String(name).split(' / ').map(part=>part.replace(/-instruct.*$/i,'').replace(/-Q4.*$/i,'')).join(' / ');
+    }
+    function labeledModel(name){
+      if(!name)return '无模型';
+      return String(name).split(' / ').map(part=>{
+        const short=part.replace(/-instruct.*$/i,'').replace(/-Q4.*$/i,'');
+        const lower=part.toLowerCase();
+        const kind=lower.indexOf('vl')>=0?'多模态模型':(lower.indexOf('7b')>=0?'文本模型':'');
+        return kind?short+' · '+kind:short;
+      }).join(' / ');
     }
     function thermalLabel(level){
       if(level===0)return '清凉';
@@ -229,18 +651,182 @@
       sendButton.setAttribute('aria-label',local?'停止生成':'发送');
       pickButton.disabled=local;
     }
+    // The collaboration scene is a projection of native evidence. It never schedules work.
+    const flowView=document.getElementById('collaboration');
+    const historyControls=document.getElementById('historyControls');
+    const viewSwitch=document.getElementById('taskViewSwitch');
+    let taskView='flow',queuedCalls=[],mirroredCalls=[],flowSignature='',flowItems=[];
+    const flowSeen=new Map(),flowWaitStarts=new Map(),flowFlights=new Map();
+    function flowClock(ms){
+      const seconds=Math.max(0,Math.floor(ms/1000));
+      const pad=n=>String(n).padStart(2,'0');
+      return (seconds>=3600?pad(Math.floor(seconds/3600))+':':'')+pad(Math.floor(seconds/60)%60)+':'+pad(seconds%60);
+    }
+    function flowIcon(kind){return '<svg class="flow-type" aria-hidden="true"><use href="#flow-task-'+(kind==='image'?'image':'text')+'"/></svg>';}
+    function resolveFlowDevice(id,label,compute){
+      const candidates=devices.filter(device=>(device.role==='self'||device.role==='compute')===compute);
+      if(id)return candidates.find(device=>device.id===id)||null;
+      const matches=candidates.filter(device=>device.name===label||(device.role==='self'&&label==='本机'&&compute));
+      return matches.length===1?matches[0]:null;
+    }
+    function flowData(){
+      const now=Date.now(),items=[],live=allCalls().concat(mirroredCalls.filter(job=>job.phase!=='queued')).filter(job=>job.running);
+      for(const job of live){
+        const executor=resolveFlowDevice(job.executorId,job.source||selfLabel,true);
+        const origin=resolveFlowDevice(job.originId,job.origin,false);
+        const key=jobKey(job)+':'+job.startedAt;
+        const phase=job.phase||'running';
+        const item={key,jobKey:job.key&&job.key.indexOf('mirror:')===0?undefined:jobKey(job),kind:job.kind||((job.image||/^（附图）/.test(job.question||''))?'image':'text'),
+          phase,at:job.phaseStartedAt||job.startedAt||now,origin:origin&&origin.id,executor:executor&&executor.id};
+        items.push(item);
+        // A brief one-shot shows an observed dispatch even when acceptance was faster than painting.
+        const route=key+':'+(item.executor||'');
+        if(!flowSeen.has(route)){flowSeen.set(route,now);if(executor&&(phase==='sending'||now-(job.startedAt||0)<2000))flowFlights.set(route,{...item,until:now+1200});}
+      }
+      for(const job of queuedCalls.concat(mirroredCalls.filter(job=>job.phase==='queued'))){
+        if(now-job.startedAt>130000)continue;
+        items.push({key:'waiting:'+jobKey(job),kind:job.kind||'text',phase:'queued',at:job.phaseStartedAt||job.startedAt,
+          origin:(resolveFlowDevice(job.originId,job.origin,false)||{}).id,executor:null});
+      }
+      for(const group of groups){
+        if(!groupRunning(group))continue;
+        for(const child of group.subtasks||[]){
+          if(child.phase!=='queued'||live.some(job=>job.groupKey===group.key&&job.subtaskId===child.id))continue;
+          // An explicit retry-wait notice is more precise than a parent snapshot.
+          if(queuedCalls.some(job=>job.groupKey===group.key&&job.subtaskId===child.id))continue;
+          const key='child:'+group.key+':'+child.id;
+          if(!flowWaitStarts.has(key))flowWaitStarts.set(key,now);
+          const executor=resolveFlowDevice('',child.device,true);
+          items.push({key,groupKey:group.key,childId:child.id,kind:'text',phase:'queued',at:flowWaitStarts.get(key),
+            origin:(resolveFlowDevice('',group.origin,false)||{}).id,executor:executor&&executor.id});
+        }
+      }
+      const waitingKeys=new Set(items.filter(item=>item.phase==='queued').map(item=>item.key));
+      for(const key of flowWaitStarts.keys())if(!waitingKeys.has(key))flowWaitStarts.delete(key);
+      for(const [key,flight] of flowFlights)if(flight.until<=now||!items.some(item=>item.key===flight.key))flowFlights.delete(key);
+      while(flowSeen.size>512)flowSeen.delete(flowSeen.keys().next().value);
+      return items;
+    }
+    function flowCard(item){
+      const waiting=item.phase==='queued';
+      const action=item.jobKey?' data-flow-detail="'+esc(item.jobKey)+'"':item.groupKey?
+        ' data-flow-group="'+esc(item.groupKey)+'" data-flow-child="'+esc(item.childId)+'"':'';
+      const label=(item.kind==='image'?'图片':'文本')+'任务 · '+(waiting?'排队':'推理中');
+      return '<'+(action?'button':'div')+' class="flow-task '+(waiting?'waiting':'working')+'" data-row-key="'+esc(item.key)+'"'+
+        (action?' type="button"'+action:'')+' aria-label="'+label+'">'+flowIcon(item.kind)+'<span>'+(item.kind==='image'?'图片':'文本')+
+        '</span><b data-flow-clock="'+esc(item.key)+'">'+flowClock(Date.now()-item.at)+'</b></'+(action?'button':'div')+'>';
+    }
+    function renderFlow(){
+      if(!flowView)return;
+      flowItems=flowData();
+      const computers=devices.filter(device=>device.role==='self'||device.role==='compute');
+      const chats=devices.filter(device=>device.role!=='self'&&device.role!=='compute');
+      const sources=chats.slice();
+      if(flowItems.some(item=>!item.origin))sources.push({id:'local-source',name:'本机 / 未知来源',ready:true});
+      const width=Math.max(920,(flowView.clientWidth||984)-44),left=300,rowWidth=width-left-18;
+      let top=8;const rows=computers.map(device=>{
+        const calls=flowItems.filter(item=>item.executor===device.id&&item.phase!=='sending');
+        const active=calls.filter(item=>item.phase!=='queued'),waiting=calls.filter(item=>item.phase==='queued').sort((a,b)=>a.at-b.at);
+        const height=Math.max(174,66+Math.max(active.length,waiting.length)*58),row={device,active,waiting,y:top,height};top+=height+32;return row;
+      });
+      const height=Math.max(400,top-24,sources.length*155),center=height/2;
+      const sourceY=new Map(sources.map((source,i)=>[source.id,(i+.5)*height/Math.max(1,sources.length)]));
+      const targetY=new Map(rows.map(row=>[row.device.id,row.y+row.height/2]));
+      const sourcePath=y=>'M92 '+y+'H118Q128 '+y+' 128 '+(y+(y<center?10:-10))+'V'+(center+(y<center?-10:10))+'Q128 '+center+' 138 '+center+'H154';
+      const targetPath=y=>'M218 '+center+'H240Q250 '+center+' 250 '+(center+(y<center?-10:10))+'V'+(y+(y<center?10:-10))+'Q250 '+y+' 260 '+y+'H'+left;
+      const flights=Array.from(flowFlights.values());
+      for(const item of flowItems.filter(item=>item.phase==='sending'))if(!flights.some(flight=>flight.key===item.key))flights.push(item);
+      const activeSource=new Set(flights.map(item=>item.origin||'local-source')),activeTarget=new Set(flights.map(item=>item.executor));
+      const pending=flowItems.filter(item=>!item.executor&&item.phase==='queued');
+      const signature=JSON.stringify({width,computers,sources,items:flowItems,flights:flights.map(item=>[item.key,item.origin,item.executor])});
+      if(signature!==flowSignature){
+        flowSignature=signature;
+        const wires='<svg class="flow-wires" viewBox="0 0 '+width+' '+height+'" aria-hidden="true"><defs><marker id="flow-arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="m1 1 5 3-5 3" fill="none" stroke="context-stroke" stroke-width="1.6"/></marker></defs>'+
+          sources.map(source=>'<path class="flow-wire '+(activeSource.has(source.id)?'active':'')+'" d="'+sourcePath(sourceY.get(source.id))+'" marker-end="url(#flow-arrow)"/>').join('')+
+          rows.map(row=>'<path class="flow-wire '+(activeTarget.has(row.device.id)?'active':'')+'" d="'+targetPath(targetY.get(row.device.id))+'" marker-end="url(#flow-arrow)"/>').join('')+'</svg>';
+        const phones=sources.map(source=>'<div class="flow-phone" data-row-key="source:'+esc(source.id)+'" style="top:'+(sourceY.get(source.id)-45)+'px"><svg aria-hidden="true"><use href="#flow-phone"/></svg><span>'+esc(source.id==='local-source'?'本机 / 未知来源':publicJobName(source.name,'chat'))+'</span></div>').join('');
+        const router='<div class="flow-router '+(flights.length?'active':'')+'" style="top:'+(center-26)+'px"><svg aria-hidden="true" viewBox="0 0 48 36"><rect x="2" y="13" width="10" height="10" rx="2"/><rect x="35" y="2" width="10" height="10" rx="2"/><rect x="35" y="24" width="10" height="10" rx="2"/><path d="M12 18h9q4 0 4-4v-3q0-4 4-4h6M21 18q4 0 4 4v3q0 4 4 4h6"/></svg><span>路由层</span></div>';
+        const boxes=rows.map(row=>{
+          const d=row.device,mem=typeof d.memUsage==='number'&&Number.isFinite(d.memUsage)&&d.memUsage>=0?Math.min(100,d.memUsage):null;
+          const memory='<div class="flow-memory" aria-label="内存 '+(mem===null?'未采集':mem+'%')+'"><i><em style="width:'+(mem===null?0:mem)+'%;background:'+(mem>50?'#e1b43b':'#279a73')+'"></em></i><span>内存<b>'+(mem===null?'—':Math.round(mem)+'%')+'</b></span></div>';
+          return '<section class="flow-compute" data-row-key="compute:'+esc(d.id)+'" style="left:'+left+'px;top:'+row.y+'px;width:'+rowWidth+'px;min-height:'+row.height+'px" aria-label="'+esc(d.name)+'"><div class="flow-computer"><svg aria-hidden="true"><use href="#flow-pc"/></svg><span>'+esc(publicJobName(d.name,'compute'))+'</span>'+memory+(!d.ready?'<small>连接中</small>':'')+'</div><div class="flow-lane"><h3>推理中</h3>'+row.active.map(flowCard).join('')+(!row.active.length?'<span class="flow-idle">'+(d.jobs>0?'设备忙碌 · 无任务明细':'空闲')+'</span>':'')+'</div><div class="flow-lane queue"><h3>排队</h3>'+row.waiting.map(flowCard).join('')+(!row.waiting.length?'<span class="flow-idle">暂无排队</span>':'')+'</div></section>';
+        }).join('');
+        const packets=flights.filter(item=>targetY.has(item.executor)).map(item=>{
+          const y=sourceY.get(item.origin||'local-source')||center;
+          const route=sourcePath(y)+'L218 '+center+targetPath(targetY.get(item.executor)).replace(/^M218 [^H]+/,'');
+          return '<div class="flow-packet" data-row-key="packet:'+esc(item.key)+'" aria-label="'+(item.kind==='image'?'图片':'文本')+'任务正在分派" style="offset-path:path(\''+route+'\')">'+flowIcon(item.kind)+'</div>';
+        }).join('');
+        renderMarkup(flowView,'<div class="flow-labels" data-row-key="labels"><span>任务发起</span><span>路由分发</span><span>算力执行</span></div><div class="flow-scene" data-row-key="scene" style="width:'+width+'px;height:'+height+'px">'+wires+phones+router+boxes+packets+(!computers.length?'<div class="flow-empty">等待算力设备上线</div>':'')+'</div>'+
+          (pending.length?'<section class="flow-pending" data-row-key="pending"><h3>等待分配</h3><div>'+pending.sort((a,b)=>a.at-b.at).map(flowCard).join('')+'</div></section>':''));
+      }
+      updateFlowClocks();
+    }
+    function updateFlowClocks(){
+      if(!flowView||!flowView.querySelectorAll)return;
+      const times=new Map(flowItems.map(item=>[item.key,item.at]));
+      for(const element of flowView.querySelectorAll('[data-flow-clock]')){
+        const at=times.get(element.getAttribute('data-flow-clock'));if(at!==undefined)element.textContent=flowClock(Date.now()-at);
+      }
+    }
+    function setTaskView(value){
+      taskView=value==='history'?'history':'flow';
+      if(flowView)flowView.hidden=taskView!=='flow';
+      if(historyControls)historyControls.hidden=taskView!=='history';
+      historyView.hidden=taskView!=='history';if(taskCountView)taskCountView.hidden=taskView!=='history';
+      if(viewSwitch&&viewSwitch.querySelectorAll)for(const button of viewSwitch.querySelectorAll('[data-task-view]'))button.setAttribute('aria-pressed',String(button.getAttribute('data-task-view')===taskView));
+      renderFlow();
+    }
+    if(viewSwitch)viewSwitch.addEventListener('click',event=>{const button=event.target.closest('[data-task-view]');if(button)setTaskView(button.getAttribute('data-task-view'));});
+    if(flowView)flowView.addEventListener('click',event=>{
+      const button=event.target.closest('[data-flow-detail],[data-flow-group]');if(!button)return;
+      detailKey=button.getAttribute('data-flow-detail')||'';detailGroupKey=button.getAttribute('data-flow-group')||'';detailChildId=button.getAttribute('data-flow-child')||'';
+      detailTab='output';detailTrigger=button;renderDetail(true);if(detailView)focusWithoutScroll(detailView.querySelector('[data-close]'));
+    });
+
     function renderStats(){
       if(!statsView)return;
       const chats=devices.filter(device=>device.role!=='self'&&device.role!=='compute').length;
       const side=selfBackend?'<div class="stat"><span>推理通道</span><b class="'+
         sideClass(selfBackend)+'">'+esc(selfBackend)+'</b></div>':'';
       statsView.innerHTML='<div class="stat"><span>聊天机</span><b>'+chats+'</b></div>'+side+
-        '<div class="stat"><span>推理中</span><b>'+running+'</b></div>';
+        '<div class="stat"><span>本机推理中</span><b>'+running+'</b></div>'+
+        '<div class="stat"><span>集群推理中</span><b>'+flowItems.filter(item=>item.phase!=='queued'&&item.phase!=='sending').length+'</b></div>'+
+        '<div class="stat"><span>排队</span><b>'+flowItems.filter(item=>item.phase==='queued').length+'</b></div>'+
+        '<div class="stat"><span>发送中</span><b>'+flowItems.filter(item=>item.phase==='sending').length+'</b></div>';
     }
+    let devicesCollapsed=false;
+    try{devicesCollapsed=localStorage.getItem('devicesCollapsed')==='1';}catch(error){}
+    function applyDevicesCollapsed(){
+      const toggle=document.getElementById('devicesToggle');
+      const panel=document.getElementById('devicePanel');
+      if(toggle&&toggle.classList&&toggle.classList.toggle){toggle.classList.toggle('collapsed',devicesCollapsed);toggle.setAttribute('aria-expanded',devicesCollapsed?'false':'true');}
+      if(panel&&panel.classList&&panel.classList.toggle)panel.classList.toggle('collapsed',devicesCollapsed);
+    }
+    function toggleDevices(){
+      devicesCollapsed=!devicesCollapsed;
+      try{localStorage.setItem('devicesCollapsed',devicesCollapsed?'1':'0');}catch(error){}
+      applyDevicesCollapsed();
+      renderDevices();
+    }
+    (function(){
+      const toggle=document.getElementById('devicesToggle');
+      if(!toggle||!toggle.addEventListener)return;
+      toggle.addEventListener('click',toggleDevices);
+      toggle.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleDevices();}});
+      applyDevicesCollapsed();
+    })();
     function renderDevices(){
       if(!devicesView)return;
+      const count=document.getElementById('deviceCount');
+      if(count)count.textContent=devices.length?' · '+devices.length+' 台':'';
+      const summary=document.getElementById('deviceSummary');
+      if(summary){
+        const online=devices.filter(device=>device.ready).length;
+        const busy=devices.filter(device=>(device.role==='self'||device.role==='compute')&&(typeof device.jobs==='number'?device.jobs:(device.modelRequests||0))>0).length;
+        summary.textContent=devicesCollapsed&&devices.length?online+' 台在线'+(busy>0?' · '+busy+' 台推理中':''):'';
+      }
       if(!devices.length){devicesView.innerHTML='<div class="empty">等待聊天手机连入</div>';return;}
-      devicesView.innerHTML=devices.map(device=>{
+      renderMarkup(devicesView,devices.map(device=>{
         const compute=device.role==='self'||device.role==='compute';
         let title=device.name||'';
         if(title.indexOf('算力设备')!==0&&title.indexOf('聊天设备')!==0){
@@ -254,17 +840,18 @@
         const heat=compute?formatHeat(device.batteryTemp, device.thermalLevel):'';
         const cpu=compute&&typeof device.cpuUsage==='number'&&device.cpuUsage>=0?device.cpuUsage:-1;
         const bar=(kind,label,value)=>value<0?'<span class="bar '+kind+'"></span>':
-          '<span class="bar '+kind+'">'+label+' <i><b style="width:'+Math.min(100,value)+'%"></b></i>'+value+'%</span>';
-        const vision=(device.capabilities||[]).indexOf('vision')>=0;
+          '<span class="bar '+kind+'">'+label+' <i><b style="width:'+Math.min(100,value)+'%;'+(kind==='mem'?'background:'+(value>50?'#e1b43b':'#279a73'):'')+'"></b></i>'+value+'%</span>';
         const side=device.role==='self'&&device.backend?
           '<span class="side '+sideClass(device.backend)+'">'+esc(device.backend)+'</span>':'';
-        const details=compute?'<div class="meta"><span class="model">'+side+esc(shortModel(device.model))+(vision?' · 多模态':'')+'</span>'+
+        const tier=typeof device.modelTier==='number'&&(device.modelTier===1||device.modelTier===2)?device.modelTier:0;
+        const details=compute?'<div class="meta"><span class="model">'+side+esc(labeledModel(device.model))+(tier?' · T'+tier:'')+'</span>'+
           '<span class="heat">'+(heat?esc(heat):'')+'</span>'+
           bar('mem','内存',mem)+bar('cpu','CPU',cpu)+
           '<span class="jobs">推理 '+infer+'</span></div>':'';
-        return '<div class="card"><div class="row1"><span class="mark '+mark+'"></span><span class="name">'+esc(title)+
-          '</span><span class="tag '+klass+'">'+tag+'</span></div>'+details+'</div>';
-      }).join('');
+        const localTag=device.role==='self'?'<span class="tag local">本机</span>':'';
+        return '<div class="card" data-row-key="'+esc(device.id||device.role+':'+title)+'"><div class="row1"><span class="mark '+mark+'"></span><span class="name">'+esc(title)+
+          '</span>'+localTag+'<span class="tag '+klass+'">'+tag+'</span></div>'+details+'</div>';
+      }).join(''));
     }
     function jobKey(job){
       return String(job.key||job.id||'');
@@ -279,39 +866,264 @@
       job.chars=(job.answer||'').length;
       if(isError===true)job.error=true;
       if(finished){job.endedAt=job.endedAt||Date.now();job.running=false;}
-      job.elapsedMs=Date.now()-job.startedAt;
+      job.elapsedMs=(job.endedAt||Date.now())-job.startedAt;
       renderJobs();
       return true;
     }
     function renderJobs(){
-      if(!jobs.length){historyView.innerHTML='<div class="empty">还没有任务。本机提问或等聊天机发来。</div>';return;}
-      historyView.innerHTML=jobs.map(job=>{
+      // Native already limits this board to locally executed requests. Keep any
+      // explicitly named remote executor out of the local view as well.
+      const localJobs=jobs.filter(job=>!/^算力设备\d+$/.test(job.source||'')||job.source===selfLabel);
+      const localGroups=groups.filter(group=>group.executor===selfLabel||groupChildren(group).length>0||
+        localJobs.some(job=>job.groupKey===group.key));
+      const flatRows=taskRows(localJobs.filter(job=>!localGroups.some(group=>group.key===job.groupKey)));
+      const visible=flatRows.filter((row)=>activeFilter==='all'||
+        (activeFilter==='running'?row.running:(!row.running&&!row.job.error)));
+      const visibleGroups=localGroups.filter(group=>activeFilter==='all'||(activeFilter==='running'?groupRunning(group):group.phase==='done'));
+      if(taskCountView)taskCountView.textContent='共 '+(visible.length+visibleGroups.length)+' 个任务';
+      const filtersHtml=[['all','全部'],['running','进行中 '+(flatRows.filter(row=>row.running).length+localGroups.filter(groupRunning).length)],
+        ['finished','已完成']].map(([value,label])=>'<button class="filter" type="button" data-filter="'+value+
+          '" aria-pressed="'+(value===activeFilter)+'">'+label+'</button>').join('');
+      if(filtersView)renderMarkup(filtersView,filtersHtml);
+      const rows=visible.map(row=>{
+        const job=row.job;
         const key=jobKey(job);
-        const open=openIds[key]?' open':'';
-        const tag=job.error?'失败':(job.running?'进行中':'已完成');
-        const klass=job.error?'err':(job.running?'run':'');
-        const first=job.firstAt?('首字 '+clock(job.firstAt-job.startedAt)):'等待首字';
-        const body=job.answer||pendingText;
+        const tag=job.error?'失败':(row.running?'推理中':(childScope(job)?'等待任务结果':'已完成'));
+        const klass=job.error?'err':(row.running?'run':'');
+        const first=firstOutputMetric(job);
         const origin=publicJobName(job.origin||'本机','chat');
-        const worker=publicJobName(job.source||'算力设备','compute');
+        const worker=publicJobName(job.source||selfLabel,'compute');
         const raw=job.question||'';
         const pictured=!!job.image||raw.indexOf('（附图）')===0;
-        const question=raw.replace(/^（附图）/,'');
-        return '<article class="card task '+klass+open+'" data-id="'+esc(key)+'"><div class="row1"><span class="name"><em>'+
-          esc(origin)+'</em><span class="to">→</span>'+esc(worker)+'</span><span class="tag '+klass+'">'+tag+'</span></div>'+
-          (job.image?'<img class="photo" src="'+esc(job.image)+'" alt="图片">':'')+
-          '<div class="q">'+(pictured?'<span class="pic-tag">附图</span>':'')+esc(question)+'</div>'+
-          '<div class="meta"><span>'+createdAt(job.startedAt)+'</span><span>'+clock(job.elapsedMs)+'</span><span>'+job.chars+' 字</span><span>'+first+
-          '</span></div><div class="body'+(job.error?' error':'')+'">'+esc(body)+'</div></article>';
-      }).join('');
+        const caption=raw.replace(/^（附图）/,'').match(/^【(子任务\s+\d+\/\d+|任务拆分|合并结果)】/);
+        const question=summaryText(raw);
+        return { startedAt:row.startedAt, html:'<article class="task-row '+klass+'" data-row-key="'+esc(row.key)+'" data-id="'+esc(key)+'"><div class="task-info">'+
+          '<h3 class="task-question">'+(caption?'<span class="request-label">'+esc(caption[1])+'</span>':'')+
+          (pictured?'<span class="pic-tag">附图</span>':'')+esc(question||'推理请求')+'</h3>'+
+          '<p class="task-origin"><span class="mark '+(origin.indexOf('聊天设备')===0?'chat':'self')+'"></span>'+esc(origin)+'</p>'+
+          '<div class="task-metrics">耗时 '+(row.count>1?clock((row.running?Date.now():(row.endedAt||Date.now()))-row.startedAt):preciseClock(job.elapsedMs))+(row.count>1?'':' · '+esc(first))+' · '+(row.count>1?row.chars:(Number(job.chars)||0))+' 字'+
+          '<span class="task-created">'+createdAt(job.startedAt)+'</span></div>'+
+          '</div>'+
+          '<span class="task-worker">'+esc(worker)+'</span><span class="task-state '+klass+'">'+tag+'</span>'+
+          '<button class="task-action" type="button" data-detail="'+esc(key)+'" aria-label="查看推理：'+esc(question||'推理请求')+'">查看推理 ›</button></article>' };
+      });
+      for(const group of visibleGroups)rows.push({startedAt:group.startedAt,html:renderGroup(group)});
+      renderMarkup(historyView,rows.length?rows.sort((a,b)=>b.startedAt-a.startedAt).map(row=>row.html).join(''):
+        '<div class="empty">'+(localJobs.length||localGroups.length?'当前筛选下没有任务':'还没有本机推理记录。本机提问或等聊天机发来。')+'</div>');
+      if(detailKey&&!allCalls().some(job=>jobKey(job)===detailKey)||detailGroupKey&&!localGroups.some(group=>group.key===detailGroupKey))closeDetail();
+      else renderDetail(false);
     }
-    function render(){renderStats();renderDevices();renderJobs();updateButton();}
+    function streamingOutput(job){return !!job.metrics&&job.metrics.streaming===true;}
+    function singleOutput(job){return !job.running&&!job.error&&streamingOutput(job)&&job.metrics.outputChunks===1;}
+    function firstOutputLabel(job){return streamingOutput(job)?(singleOutput(job)?'首段':'首字'):'首次返回';}
+    function firstOutputMetric(job){
+      return firstOutputLabel(job)+' '+(job.firstAt?preciseClock(job.firstAt-job.startedAt):(job.running?'等待中':'未产生输出'));
+    }
+    function tokenRate(tokens,elapsedMs){
+      if(!Number.isSafeInteger(tokens)||tokens<0||!Number.isFinite(elapsedMs)||elapsedMs<=0)return '未采集';
+      const rate=tokens/elapsedMs*1000;
+      if(!Number.isFinite(rate))return '未采集';
+      return (rate>0&&rate<0.01?'<0.01':rate.toFixed(2))+' token/s';
+    }
+    function engineMetrics(job){
+      const m=job.metrics||{},lines=[];
+      for(const [key,label] of [['modelLoadMs','模型加载'],['prefillMs','Prefill'],['decodeMs','Decode']]){
+        const value=m[key];
+        if(typeof value==='number'&&Number.isFinite(value)&&value>=0)lines.push(label+'：'+value.toFixed(1)+' ms');
+      }
+      for(const [key,label] of [['promptTokens','输入 token'],['completionTokens','输出 token']]){
+        const value=m[key];
+        if(Number.isSafeInteger(value)&&value>=0)lines.push(label+'：'+value);
+      }
+      if(lines.length){
+        lines.push('Prefill 速度：'+tokenRate(m.promptTokens,m.prefillMs));
+        lines.push('Decode 速度：'+tokenRate(m.completionTokens,m.decodeMs));
+      }
+      if(Number.isSafeInteger(m.outputChunks)&&m.outputChunks>=0)lines.push('非空输出分片：'+m.outputChunks);
+      for(const [key,label] of [['firstOutputMs','原生首段等待'],['lastOutputMs','原生末段等待']]){
+        if(Number.isFinite(m[key])&&m[key]>=0)lines.push(label+'：'+Math.round(m[key])+' ms');
+      }
+      if(singleOutput(job))lines.push('本次只有一个非空输出分片，首段与末段同批返回；逐 token 首字时间未采集。');
+      return lines.length?'\n\n引擎与回调统计：\n'+lines.join('\n'):'\n\n引擎与回调统计：未采集';
+    }
+    function detailMetrics(job){
+      if(job.resultView)return '<span>任务耗时<b>'+callTime(job)+'</b></span><span>输出<b>'+(job.chars||0)+' 字</b></span><span>状态<b>'+job.resultStatus+'</b></span>';
+      return '<span>'+firstOutputLabel(job)+'<b>'+(job.firstAt?preciseClock(job.firstAt-job.startedAt):(job.running?'等待中':'未产生输出'))+'</b></span>'+
+        '<span>本轮请求<b>'+callTime(job,true)+'</b></span><span>输出<b>'+(Number(job.chars)||0)+' 字</b></span>'+
+        '<span>状态<b>'+(job.error?'失败':(job.running?'推理中':'已返回'))+'</b></span>';
+    }
+    function detailText(job){
+      if(job.resultView){
+        if(detailTab==='runtime')return '任务ID：'+job.taskId+(job.subtaskId?'\n子任务ID：'+job.subtaskId:'')+
+          '\n来源：'+job.origin+'\n执行：'+job.source+'\n结果返回：'+selfLabel+'\n任务耗时：'+callTime(job)+'\n'+createdAt(job.startedAt)+
+          (job.activity?'\n\n工具过程（最近记录；完整调用输入见模型记录）：\n'+job.activity:'');
+        if(detailTab==='input')return (job.input||job.question)+(job.inputTruncated?'\n\n（任务输入已截断。）':'');
+        return (job.answer||(job.resultActive?'任务正在执行，最终结果尚未返回。':'未返回结果。'))+(job.truncated?'\n\n（此处展示结果摘要，最多'+(job.subtaskId?'2048':'4096')+'字。）':'');
+      }
+      if(detailTab==='input')return job.input||job.question||'未提供输入';
+      if(detailTab==='runtime'){
+        const executor=publicJobName(job.source||selfLabel,'compute');
+        const device=devices.find(item=>item.name===executor||(item.role==='self'&&executor===selfLabel));
+        return '来源：'+publicJobName(job.origin||'本机','chat')+'\n执行：'+executor+
+          '\n本轮请求耗时：'+callTime(job,true)+'\n输出方式：'+(job.metrics?(streamingOutput(job)?'流式':'非流式'):'未记录')+
+          '\n'+firstOutputMetric(job)+(streamingOutput(job)?'（应用收到首段非空文本）':'\n首字等待：未采集')+
+          '\n请求ID：'+job.id+'\n'+createdAt(job.startedAt)+
+          (job.endedAt?'\n'+createdAt(job.endedAt).replace('创建 ','结束 '):'')+
+          (device&&device.model?'\n当前设备模型：'+device.model:'')+
+          '\n记录标识：'+jobKey(job)+engineMetrics(job)+'\n\n请求耗时包含排队、加载、推理及传输。本机首段优先使用原生回调计时；旧端和远端记录接收时间。引擎各阶段耗时不用于推算首字或替代请求总耗时。并行调用的耗时不能直接相加作为任务总耗时。';
+      }
+      return job.answer||(job.error?'请求失败，未收到错误详情。':(job.running?pendingText:'未返回文本。'));
+    }
+    function callTime(job,precise=false){
+      const elapsed=job.running&&job.startedAt?Date.now()-job.startedAt:
+        (typeof job.elapsedMs==='number'?job.elapsedMs:(job.endedAt&&job.startedAt?job.endedAt-job.startedAt:null));
+      return typeof elapsed==='number'&&Number.isFinite(elapsed)?(precise?preciseClock(elapsed):clock(elapsed)):'未记录';
+    }
+    function scopeCalls(){
+      const group=groups.find(item=>item.key===detailGroupKey);
+      if(group)return (detailChildId?callsFor(group,detailChildId):allCalls().filter(job=>job.groupKey===group.key))
+        .sort((a,b)=>a.startedAt-b.startedAt||jobKey(a).localeCompare(jobKey(b)));
+      const job=allCalls().find(item=>jobKey(item)===detailKey);
+      return job?detailCalls(job):[];
+    }
+    function renderRoundNavigation(){
+      const container=document.getElementById('detailRounds'),list=document.getElementById('roundList'),heading=document.getElementById('roundHeading');
+      if(!container||!list||!heading)return;
+      const group=groups.find(item=>item.key===detailGroupKey),calls=scopeCalls();
+      container.hidden=calls.length<2&&!group;
+      if(container.hidden)return;
+      heading.textContent='查看内容';
+      const option=(value,text,selected)=>'<option value="'+esc(value)+'"'+(selected?' selected':'')+'>'+esc(text)+'</option>';
+      const markup=(group?option('','任务输入与最终结果',!detailKey):'')+calls.map((call,index)=>
+        option(jobKey(call),'模型调用 '+(index+1)+' · '+publicJobName(call.source||selfLabel,'compute')+' · '+callTime(call)+
+          ' · '+(call.error?'失败':(call.running?'进行中':'已返回')),jobKey(call)===detailKey)).join('');
+      const html='<select data-call="true" aria-label="任务结果与模型调用记录">'+markup+'</select>';
+      // Do not replace a focused select on every streaming tick.
+      const select=list.querySelector('select');
+      if(!select||document.activeElement!==select)renderMarkup(list,html);
+    }
+    function renderDetail(reset){
+      if(!detailView||(!detailKey&&!detailGroupKey))return;
+      const group=groups.find(item=>item.key===detailGroupKey);
+      const child=group&&group.subtasks.find(item=>item.id===detailChildId);
+      const job=detailKey?allCalls().find(item=>jobKey(item)===detailKey):(group?{
+        resultView:true,taskId:group.id,subtaskId:child&&child.id,id:child?child.id:group.id,
+        question:child?child.title:group.title,input:child?(child.input||child.title):(group.input||group.title),
+        inputTruncated:!child&&group.inputTruncated,activity:child?child.activity:group.activity,answer:child?child.result:group.answer,
+        image:scopeCalls().find(call=>call.image)?.image,
+        source:child?child.device:(group.subtasks.length?group.executor:
+          (Array.from(new Set(scopeCalls().map(call=>call.source).filter(Boolean))).join(' / ')||group.executor)),
+        origin:group.origin,startedAt:child?(child.startedAt||0):group.startedAt,
+        endedAt:child?(child.endedAt||0):group.endedAt,running:child?['queued','running'].includes(child.phase):groupRunning(group),
+        resultActive:child?['queued','running'].includes(child.phase):groupRunning(group),
+        chars:(child?(child.result||''):(group.answer||'')).length,truncated:child?child.resultTruncated:group.answerTruncated,
+        resultStatus:phaseView(child?child.phase:group.phase)[0]
+      }:null);
+      if(!job)return;
+      if(reset){
+        const executor=publicJobName(job.source||selfLabel,'compute');
+        detailView.innerHTML='<div class="detail-head"><h2>推理详情</h2><button class="detail-close" data-close="true" type="button" aria-label="关闭推理详情">×</button></div>'+
+          (group&&child?'<div class="detail-context">'+esc(taskSummary(group.title))+' › '+esc(taskSummary(child.title))+'</div>':'')+
+          '<h3 class="detail-title">'+esc(job.resultView?taskSummary(job.input||job.question):summaryText(job.question))+'</h3>'+
+          '<div class="detail-route">来源：'+esc(publicJobName(job.origin||'本机','chat'))+' · 执行：'+esc(executor)+'</div>'+
+          '<div id="detailRounds" class="detail-rounds"><div id="roundHeading" class="rounds-heading"></div><div id="roundList" class="round-list" role="group" aria-label="任务结果与调用记录"></div></div>'+
+          '<div class="filters" aria-label="推理详情内容">'+[['output','输出'],['input','输入'],['runtime','运行信息']].map(([value,label])=>
+            '<button class="filter" type="button" data-tab="'+value+'" aria-pressed="'+(value===detailTab)+'">'+label+'</button>').join('')+'</div>'+
+          '<div id="detailMetrics" class="detail-metrics"></div><div id="detailContent" class="detail-content" tabindex="0"></div>'+
+          '<div id="detailFooter" class="detail-footer"></div>';
+        detailView.hidden=false;
+        detailFollow=true;
+        const output=document.getElementById('detailContent');
+        if(output)output.addEventListener('scroll',()=>{detailFollow=output.scrollHeight-output.clientHeight-output.scrollTop<=4;});
+        historyView.inert=true;
+        if(taskToolbarView)taskToolbarView.inert=true;
+      }
+      renderRoundNavigation();
+      const metrics=document.getElementById('detailMetrics');
+      const content=document.getElementById('detailContent');
+      const footer=document.getElementById('detailFooter');
+      if(metrics)metrics.innerHTML=detailMetrics(job);
+      if(content){
+        const previousTop=content.scrollTop;
+        const follow=detailFollow&&content.scrollHeight-content.clientHeight-previousTop<=4;
+        const text=detailText(job);
+        const changed=content.textContent!==text||reset;
+        if(changed){
+          content.textContent=text;
+          if(!reset)content.scrollTop=follow&&detailTab==='output'?content.scrollHeight:previousTop;
+        }
+        content.className='detail-content'+(job.error&&detailTab==='output'?' error':'');
+        if(detailTab==='input'&&/^data:image\/(jpeg|png|webp|gif);base64,/.test(job.image||'')&&
+          (changed||!content.querySelector('img.photo'))){
+          const photo=document.createElement('img');
+          photo.className='photo';photo.alt='请求附图';photo.src=job.image;content.appendChild(photo);
+        }
+      }
+      if(footer)footer.textContent=(job.resultView?'任务ID '+job.taskId:'请求ID '+job.id)+' · '+createdAt(job.startedAt)+
+        (job.resultView&&scopeCalls().length===0?' · 当前仅有返回结果，未收到该设备的逐轮推理记录':'');
+    }
+    function closeDetail(){
+      const previousKey=detailKey;
+      detailKey='';
+      detailGroupKey='';detailChildId='';
+      if(detailView){detailView.hidden=true;detailView.innerHTML='';}
+      historyView.inert=false;
+      if(taskToolbarView)taskToolbarView.inert=false;
+      if(detailTrigger&&detailTrigger.isConnected)focusWithoutScroll(detailTrigger);
+      else if(previousKey)focusRequest(previousKey);
+      detailTrigger=null;
+    }
+    function focusRequest(key){
+      if(!historyView.querySelectorAll)return;
+      const button=Array.from(historyView.querySelectorAll('[data-detail]')).find(item=>item.getAttribute('data-detail')===key);
+      if(button)focusWithoutScroll(button);
+    }
+    function render(){renderFlow();renderStats();renderDevices();renderJobs();updateButton();}
     historyView.addEventListener('click',event=>{
-      const card=event.target.closest('.task');
-      if(!card)return;
-      const id=card.getAttribute('data-id');
-      openIds[id]=!openIds[id];
-      card.classList.toggle('open',openIds[id]);
+      const collapse=event.target.closest('[data-collapse]');
+      if(collapse){const key=collapse.getAttribute('data-collapse');
+        if(collapsedGroups.has(key))collapsedGroups.delete(key);else collapsedGroups.add(key);
+        renderJobs();return;}
+      const summary=event.target.closest('[data-summary]');
+      const childButton=event.target.closest('[data-child]');
+      const result=event.target.closest('[data-result]');
+      if(summary||childButton||result){
+        const target=summary||childButton||result;
+        detailGroupKey=summary?summary.getAttribute('data-summary'):target.getAttribute('data-group');
+        detailChildId=childButton?target.getAttribute('data-child'):(result?target.getAttribute('data-result'):'');
+        const group=groups.find(item=>item.key===detailGroupKey);if(!group)return;
+        detailKey='';
+        detailTab='output';detailTrigger=target;renderDetail(true);
+        if(detailView)focusWithoutScroll(detailView.querySelector('[data-close]'));return;
+      }
+      const button=event.target.closest('[data-detail]');
+      if(!button)return;
+      detailGroupKey='';detailChildId='';
+      detailKey=button.getAttribute('data-detail');detailTab='output';detailTrigger=button;
+      renderDetail(true);
+      if(detailView)focusWithoutScroll(detailView.querySelector('[data-close]'));
+    });
+    if(filtersView)filtersView.addEventListener('click',event=>{
+      const button=event.target.closest('[data-filter]');if(!button)return;
+      activeFilter=button.getAttribute('data-filter');renderJobs();
+      focusWithoutScroll(filtersView.querySelector('[aria-pressed="true"]'));
+    });
+    if(detailView)detailView.addEventListener('click',event=>{
+      if(event.target.closest('[data-close]')){closeDetail();return;}
+      const button=event.target.closest('[data-tab]');if(!button)return;
+      detailTab=button.getAttribute('data-tab');renderDetail(true);
+      focusWithoutScroll(detailView.querySelector('[aria-pressed="true"]'));
+    });
+    if(detailView)detailView.addEventListener('change',event=>{
+      if(!event.target.closest('[data-call]'))return;
+      const calls=scopeCalls();
+      if(event.target.value===''&&detailGroupKey){detailKey='';renderDetail(true);return;}
+      if(!calls.some(item=>jobKey(item)===event.target.value))return;
+      detailKey=event.target.value;renderDetail(true);
+      focusWithoutScroll(detailView.querySelector('[data-call]'));
+    });
+    if(detailView)for(const eventName of ['wheel','touchstart','pointerdown','keydown'])detailView.addEventListener(eventName,event=>{
+      if(event.target.closest('#detailContent'))detailFollow=false;
     });
     previewClear.addEventListener('click',()=>{window.chatBridge.clearImage();setPendingImage('');});
     promptInput.addEventListener('input',()=>{promptInput.style.height='auto';promptInput.style.height=Math.min(promptInput.scrollHeight,104)+'px';updateButton();});
@@ -353,6 +1165,7 @@
         render();return;
       }
       if(event.kind==='dashboard'){
+        renderModelSettings(event.modelSettings);
         setSelfLabel(event.selfLabel);
         if(typeof event.text==='string'&&event.text)setStatus(event.text,event.connecting===true,true);
         if(event.connectLabel)connectButton.textContent=event.connectLabel;
@@ -362,6 +1175,10 @@
         const self=(event.devices||[]).find(device=>device.role==='self');
         if(self&&typeof self.backend==='string'&&self.backend)selfBackend=self.backend;
         jobs=event.jobs||[];
+        remoteCalls=event.remoteCalls||[];
+        queuedCalls=event.queuedCalls||[];
+        mirroredCalls=event.flowCalls||[];
+        groups=event.groups||[];
         running=typeof event.running==='number'?event.running:jobs.filter(job=>job.running).length;
         render();return;
       }
@@ -373,13 +1190,15 @@
       }
     };
     if(typeof setInterval==='function')setInterval(()=>{
-      let dirty=false;
-      for(const job of jobs){
+      if(Date.now()-modelPollAt>=2000){modelPollAt=Date.now();refreshModels();}
+      let dirty=groups.some(groupRunning);
+      for(const job of allCalls()){
         if(!job.running||!job.startedAt)continue;
         job.elapsedMs=Date.now()-job.startedAt;
         dirty=true;
       }
       if(dirty)renderJobs();
+      renderFlow();renderStats();
     },400);
     render();
   </script>

@@ -4,6 +4,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import probe from 'libgewu_probe.so';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
+import { nearbyBackgroundTask } from '../nearby/NearbyBackgroundTask';
 import { USE_LINK_ENHANCE } from '../nearby/NearbyConfig';
 import { CollaborationWindow, collaborationScreen } from '../ui/CollaborationScreen';
 
@@ -22,7 +23,11 @@ class NativeCollaborationWindow implements CollaborationWindow {
 }
 
 export default class EntryAbility extends UIAbility {
-  onCreate(): void { nearbyChannel.initialize(this.context); }
+  onCreate(): void {
+    nearbyChannel.initialize(this.context);
+    nearbyBackgroundTask.initialize(this.context);
+    nearbyChannel.setActivityListener((connected: boolean): void => nearbyBackgroundTask.setWanted(connected));
+  }
 
   onCollaborate(wantParam: Record<string, Object>): AbilityConstant.CollaborateResult {
     hilog.info(0, 'NearbyChat', 'onCollaborate entered');
@@ -51,12 +56,22 @@ export default class EntryAbility extends UIAbility {
     });
   }
 
-  onForeground(): void { hilog.info(0, 'CollabScreen', 'foreground'); collaborationScreen.setForeground(true); nearbyChannel.resume(); }
+  onForeground(): void {
+    hilog.info(0, 'CollabScreen', 'foreground');
+    collaborationScreen.setForeground(true);
+    nearbyChannel.resume();
+    nearbyBackgroundTask.retry();
+  }
   onBackground(): void {
-    hilog.info(0, 'NearbyChat', 'ability background: cancelling inference and near-field link');
+    hilog.info(0, 'NearbyChat', 'ability background: preserving inference and near-field links');
     collaborationScreen.setForeground(false);
-    probe.cancel();
     nearbyChannel.suspend();
   }
-  onDestroy(): void { collaborationScreen.clear(); probe.cancel(); nearbyChannel.destroy(); }
+  onDestroy(): void {
+    collaborationScreen.clear();
+    probe.cancel();
+    nearbyChannel.destroy();
+    nearbyChannel.setActivityListener(null);
+    nearbyBackgroundTask.dispose();
+  }
 }

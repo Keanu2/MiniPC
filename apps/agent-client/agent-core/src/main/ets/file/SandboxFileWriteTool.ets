@@ -33,7 +33,8 @@ export class SandboxFileWriteTool implements AgentTool {
   }
 
   description(): string {
-    return 'Writes text content to a file in the workspace. All paths are relative to the workspace root. ' +
+    return 'Writes text content to a file in the workspace. Use only when the user explicitly asks to save, write or create a file; ' +
+      'when the user only wants to read the text (a story, summary, draft), answer with Final instead. All paths are relative to the workspace root. ' +
       'Input JSON: {"relativePath":"folder/file.txt","content":"text"}. ' +
       'Absolute paths and .. are rejected.';
   }

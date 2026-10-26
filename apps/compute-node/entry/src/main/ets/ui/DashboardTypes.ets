@@ -1,3 +1,18 @@
+import { TaskGroupView } from './TaskBoard';
+import { InferenceMetrics } from '../protocol/ChatProtocol';
+
+export interface ModelSettingsView {
+  streaming: boolean;
+  selected: string;
+  options: ModelChoiceView[];
+  locked: boolean;
+}
+
+export interface ModelChoiceView {
+  name: string;
+  vision: boolean;
+}
+
 export interface PageEvent {
   kind: string;
   text: string;
@@ -11,6 +26,12 @@ export interface PageEvent {
   selfLabel?: string;
   devices?: DeviceView[];
   jobs?: JobView[];
+  /** Hub-observed forwarded calls, available in task details only. */
+  remoteCalls?: JobView[];
+  queuedCalls?: JobView[];
+  flowCalls?: JobView[];
+  groups?: TaskGroupView[];
+  modelSettings?: ModelSettingsView;
 }
 
 export interface DeviceView {
@@ -30,9 +51,20 @@ export interface DeviceView {
   capabilities?: string[];
   /** Serving channel of this device's text model ('云侧'/'端侧', or '分档·档位·侧别模型' under xrouter); only the self entry carries it. */
   backend?: string;
+  /** Highest model-strength tier this device's manifests declare, 1-2 (1 weak, 2 strong); absent = 2 strong. */
+  modelTier?: number;
 }
 
 export interface JobView {
+  kind?: string;
+  phase?: string;
+  phaseStartedAt?: number;
+  originId?: string;
+  executorId?: string;
+  metrics?: InferenceMetrics;
+  input?: string;
+  groupKey?: string;
+  subtaskId?: string;
   id: string;
   /** Stable board identity: origin epoch + wire request id. Never sent on the wire. */
   key: string;
@@ -52,6 +84,15 @@ export interface JobView {
 }
 
 export interface ActiveJob {
+  kind?: string;
+  phase?: string;
+  phaseStartedAt?: number;
+  originId?: string;
+  executorId?: string;
+  metrics?: InferenceMetrics;
+  input?: string;
+  taskId?: string;
+  subtaskId?: string;
   id: string;
   /** Stable board identity: origin epoch + wire request id. Never sent on the wire. */
   key: string;
@@ -70,4 +111,6 @@ export interface ActiveJob {
   image: string;
   /** Experiment route that scheduled this job; empty for ordinary traffic. */
   routeMode: string;
+  /** Task tier (1-2: 1 simple, 2 complex) the hub classified this job into; 0 = not classified. */
+  taskTier?: number;
 }

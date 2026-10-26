@@ -2,6 +2,7 @@ import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.Ab
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
+import { nearbyBackgroundTask } from '../nearby/NearbyBackgroundTask';
 
 const DOMAIN = 0x0000;
 
@@ -10,10 +11,15 @@ export default class EntryAbility extends UIAbility {
     this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     hilog.info(DOMAIN, 'Loop', 'EntryAbility onCreate');
     nearbyChannel.initialize(this.context);
+    nearbyBackgroundTask.initialize(this.context);
+    nearbyChannel.setActivityListener((connected: boolean): void => nearbyBackgroundTask.setWanted(connected));
   }
 
   onDestroy(): void {
     hilog.info(DOMAIN, 'Loop', 'EntryAbility onDestroy');
+    nearbyChannel.destroy();
+    nearbyChannel.setActivityListener(null);
+    nearbyBackgroundTask.dispose();
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -34,6 +40,7 @@ export default class EntryAbility extends UIAbility {
   onForeground(): void {
     hilog.info(DOMAIN, 'Loop', 'EntryAbility onForeground');
     nearbyChannel.resume();
+    nearbyBackgroundTask.retry();
   }
 
   onBackground(): void {

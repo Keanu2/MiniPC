@@ -1,0 +1,21 @@
+const assert=require('node:assert/strict'),dashboard=require('./DashboardHarness.cjs');
+const h=dashboard(),now=Date.now();
+const devices=[{id:'c1',name:'算力设备1',role:'self',ready:true,jobs:2,memUsage:50},{id:'c2',name:'算力设备2',role:'compute',ready:true,jobs:1,memUsage:51},
+ {id:'p',name:'聊天设备1',role:'chat',ready:true}];
+const job=(key,extra={})=>({id:key,key,source:'算力设备1',origin:'聊天设备1',kind:'text',phase:'running',running:true,startedAt:now-5000,phaseStartedAt:now-5000,endedAt:0,question:'PRIVATE',...extra});
+const event={kind:'dashboard',selfLabel:'算力设备1',devices,jobs:[job('one'),job('two',{kind:'image'})],remoteCalls:[job('three',{source:'算力设备2',phase:'sending',kind:'image'})],queuedCalls:[job('wait',{phase:'queued',source:''})],groups:[]};
+h.window.onNativeEvent(event);
+let html=h.elements.collaboration.innerHTML;
+assert.equal((html.match(/class="flow-compute"/g)||[]).length,2);
+assert.equal((html.match(/class="flow-task working"/g)||[]).length,2);
+assert.equal((html.match(/class="flow-task waiting"/g)||[]).length,1);
+assert.match(html,/等待分配/);assert.match(html,/offset-path:path/);assert.match(html,/#flow-task-image/);
+assert.doesNotMatch(html,/PRIVATE|flight-label|>发送中</);
+assert.match(html,/width:50%;background:#279a73/);assert.match(html,/width:51%;background:#e1b43b/);
+assert.match(html,/00:05/);
+event.remoteCalls=[];event.jobs=[];event.queuedCalls=[];
+h.window.onNativeEvent(event);html=h.elements.collaboration.innerHTML;
+assert.doesNotMatch(html,/class="flow-packet"|data-flow-clock/);
+event.flowCalls=[job('mirror:remote',{source:'算力设备2',kind:'image'})];h.window.onNativeEvent(event);html=h.elements.collaboration.innerHTML;
+assert.match(html,/图片/);assert.doesNotMatch(html,/data-flow-detail="mirror:/,'mirrored minimal records must not open nonexistent local details');
+console.log('PASS: live device layout, concurrent tasks, image metadata, sending path, real waiting pool, clock baseline, >50 memory threshold, terminal cleanup and mirror handling');

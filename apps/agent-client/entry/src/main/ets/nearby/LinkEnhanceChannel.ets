@@ -5,7 +5,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { connection as btConnection, ble } from '@kit.ConnectivityKit';
 import { util } from '@kit.ArkTS';
-import { encodeMessage, MessageAssembler, WireMessage } from '../protocol/ChatProtocol';
+import { encodeMessage, MessageAssembler, FragmentReceipt, WireMessage } from '../protocol/ChatProtocol';
 import { COMPUTE_ADV_KEY_BYTES, COMPUTE_ADV_TYPE, COMPUTE_MANUFACTURE_ID, IS_SERVER } from './NearbyConfig';
 
 const BUNDLE = 'com.jiuwen.registrychatui';
@@ -210,6 +210,7 @@ export class LinkEnhanceChannel {
   private onInference: ((message: WireMessage, epoch: number) => void) | null = null;
   private onInferenceLink: ((droppedEpoch: number) => void) | null = null;
   private onConnection: ((connected: boolean, epoch: number) => void) | null = null;
+  private onActivity: ((connected: boolean) => void) | null = null;
   private status: string = IS_SERVER ? '可本机对话 · 请启用近场连接' : '正在寻找算力设备…';
   private selfSlot: number = 0;
   private scanCancel: (() => void) | null = null;
@@ -217,22 +218,21 @@ export class LinkEnhanceChannel {
 
   initialize(context: common.UIAbilityContext): void { this.context = context; }
   operation(): number { return this.lifecycle; }
-  /**
-   * 回前台：恢复近场（与算力端同源缺陷）。
-   *
-   * suspend() 的 disconnect() 会取消扫描、递增 meshRun 并清掉选举/广播定时器，
-   * 而原先这里只置 foreground 标志 → 聊天端回前台后不再主动扫描/发现，
-   * 叠加算力端服务端未重建（对端恒得 32390201「Peer server is not started」），
-   * 表现为「增强连接失败：未找到可用的蓝牙地址」。
-   * 这里重新走一遍 prepare()，让权限/设备管理器与后续由界面驱动的发现流程恢复。
-   */
   resume(): void {
     this.foreground = true;
     this.prepare().catch((error: Error): void => {
       hilog.error(0, 'NearbyChat', 'near-field restore failed: %{public}s', error.message);
     });
   }
-  suspend(): void { this.foreground = false; this.disconnect(); }
+  suspend(): void { this.foreground = false; this.cancelScan(); }
+  setActivityListener(listener: ((connected: boolean) => void) | null): void {
+    this.onActivity = listener;
+    listener?.(this.isConnected());
+  }
+  private notifyConnection(connected: boolean, epoch: number): void {
+    this.onActivity?.(connected);
+    this.onConnection?.(connected, epoch);
+  }
   isForeground(): boolean { return this.foreground; }
   private checkOperation(operation: number): void {
     if (!this.foreground || operation !== this.lifecycle || this.context === null) {
@@ -805,6 +805,10 @@ export class LinkEnhanceChannel {
   private attach(incoming: linkEnhance.Connection, peerId: string, fromServer: boolean): Peer {
     const peer = new Peer(++this.epoch, peerId, incoming, fromServer);
     this.peers.push(peer);
+    peer.assembler.setFragmentObserver((part: FragmentReceipt): void => {
+      hilog.info(0, 'NearbyChat', 'le-frame-recv epoch=%{public}d id=%{public}s index=%{public}d count=%{public}d received=%{public}d bytes=%{public}d elapsedMs=%{public}d gapMs=%{public}d',
+        peer.epoch, part.id, part.index, part.count, part.received, part.bytes, part.elapsedMs, part.gapMs);
+    });
     incoming.on('disconnected', (reason: number) => {
       hilog.info(0, 'NearbyChat', 'le-disconnect epoch=%{public}d role=compute peer=%{public}s reason=%{public}d',
         peer.epoch, peer.peerId, reason);
@@ -817,14 +821,22 @@ export class LinkEnhanceChannel {
         const message = peer.assembler.receive(text);
         if (message !== null) this.receive(peer, message);
       } catch (error) {
-        hilog.warn(0, 'NearbyChat', 'le-recv invalid epoch=%{public}d', peer.epoch);
+        const detail = (error as Error).message || '';
+        const safe = detail.indexOf('Incomplete chat fragments timed out id=') === 0 ? detail :
+          (['Fragment exceeds limit', 'Malformed chat fragment', 'Invalid fragment payload',
+            'Conflicting fragment count', 'Conflicting duplicate fragment', 'Too many incomplete chat messages',
+            'Chat message exceeds 64 KiB', 'Missing chat fragment', 'Invalid chat message'].includes(detail) ? detail : 'decode failed');
+        hilog.warn(0, 'NearbyChat', 'le-recv invalid epoch=%{public}d reason=%{public}s', peer.epoch, safe);
         this.drop(peer, '收到无效消息，连接已结束。');
       }
     });
     peer.timer = setTimeout(() => this.drop(peer, '连接超时，请确认两端应用在前台后重试。'), 20000);
     peer.fragmentTimer = setInterval(() => {
       try { peer.assembler.checkExpiry(); }
-      catch (_) { this.drop(peer, '消息传输中断，请重新连接。'); }
+      catch (error) {
+        hilog.warn(0, 'NearbyChat', 'le-frame-timeout epoch=%{public}d reason=%{public}s', peer.epoch, (error as Error).message);
+        this.drop(peer, '消息传输中断，请重新连接。');
+      }
     }, 1000);
     hilog.info(0, 'NearbyChat', 'le-attach epoch=%{public}d peer=%{public}s server=%{public}s',
       peer.epoch, peerId, String(fromServer));
@@ -882,7 +894,7 @@ export class LinkEnhanceChannel {
           hilog.info(0, 'NearbyChat', 'le-chat slot=%{public}d', slot);
         }
       }
-      this.onConnection?.(true, peer.epoch);
+      this.notifyConnection(true, peer.epoch);
       return;
     }
     if (!IS_SERVER && message.type === 'prepared') {
@@ -914,7 +926,7 @@ export class LinkEnhanceChannel {
     this.refreshStatus();
     hilog.info(0, 'NearbyChat', 'le-ready epoch=%{public}d peer=%{public}s peers=%{public}d',
       peer.epoch, peer.peerId, this.connectedCount());
-    this.onConnection?.(true, peer.epoch);
+    this.notifyConnection(true, peer.epoch);
   }
 
   async send(message: WireMessage, expectedEpoch?: number): Promise<boolean> {
@@ -932,15 +944,23 @@ export class LinkEnhanceChannel {
       return Promise.resolve(false);
     }
     let frames: string[];
-    try { frames = encodeMessage(message, String(peer.epoch) + '-' + String(++peer.sequence)); }
+    const fragmentId = String(peer.epoch) + '-' + String(++peer.sequence);
+    try { frames = encodeMessage(message, fragmentId); }
     catch (_) { this.drop(peer, '消息格式或长度超出限制。'); return Promise.resolve(false); }
     hilog.info(0, 'NearbyChat', 'le-send type=%{public}s epoch=%{public}d peer=%{public}s frames=%{public}d',
       message.type, peer.epoch, peer.peerId, frames.length);
     ++peer.pending;
+    const enqueuedAt = Date.now();
     peer.writes = peer.writes.then(async (): Promise<boolean> => {
+      const startedAt = Date.now();
+      hilog.info(0, 'NearbyChat', 'le-write-start type=%{public}s request=%{public}s epoch=%{public}d id=%{public}s count=%{public}d queueMs=%{public}d',
+        message.type, message.requestId || '', peer.epoch, fragmentId, frames.length, startedAt - enqueuedAt);
       try {
-        for (const frame of frames) {
-          if (!await this.sendFrame(peer, frame)) return false;
+        for (let index = 0; index < frames.length; index++) {
+          if (!await this.sendFrame(peer, frames[index])) return false;
+          // sendData returning means submitted to the SDK, not delivered to the peer.
+          hilog.info(0, 'NearbyChat', 'le-frame-submit epoch=%{public}d id=%{public}s index=%{public}d count=%{public}d bytes=%{public}d elapsedMs=%{public}d',
+            peer.epoch, fragmentId, index, frames.length, toBuffer(frames[index]).byteLength, Date.now() - startedAt);
         }
         return this.holds(peer);
       } finally { --peer.pending; }
@@ -983,7 +1003,7 @@ export class LinkEnhanceChannel {
 
   private update(status: string): void {
     this.status = status;
-    this.onConnection?.(this.isConnected(), this.epoch);
+    this.notifyConnection(this.isConnected(), this.epoch);
   }
 
   private drop(peer: Peer, status: string): void {
@@ -1005,7 +1025,7 @@ export class LinkEnhanceChannel {
       (this.server !== null ? '可本机对话 · 等待聊天手机连接' : status) : status;
     else this.refreshStatus();
     this.onInferenceLink?.(peer.epoch);
-    this.onConnection?.(this.isConnected(), peer.epoch);
+    this.notifyConnection(this.isConnected(), peer.epoch);
   }
 
   inferenceReady(): boolean {

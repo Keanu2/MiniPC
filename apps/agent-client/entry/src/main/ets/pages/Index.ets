@@ -23,6 +23,7 @@ import {
   PARTIAL_FINAL_STATUS,
   ParallelDeps,
   ParallelObserver,
+  ParallelTaskSnapshot,
   ParallelTaskRunner,
   ReActAgentRunner,
   saveConversation,
@@ -36,7 +37,13 @@ import {
 import { getLocalLlmBinding } from '../llm/LocalLlmBinding';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
 import { inferenceClient, INFERENCE_STOPPED } from '../model/InferenceClient';
+import { TaskChildSnapshot, TaskSnapshot } from '../protocol/ChatProtocol';
+import { TaskReporter } from '../model/TaskReporter';
+import { TaskProgress, TaskProgressPhase, taskProgressActive } from '../model/TaskProgress';
+import { TaskProgressCard } from '../ui/TaskProgressCard';
 import { RemoteComputeModel } from '../model/RemoteComputeModel';
+import { ChatMode, loadChatMode, saveChatMode } from '../model/ChatModeStore';
+import { buildPlainChatPrompt } from '../model/PlainChat';
 import { pickAttachment, readTextExcerpt, SavedAttachment } from '../media/ChatAttach';
 import { encodeLocalImageBase64 } from '../media/ImageEncode';
 import {
@@ -51,12 +58,10 @@ const LIVE_COMPOSING = '正在整理工具结果…';
 
 /**
  * 算力端请求阶段 → 直播气泡文案（见 InferHooks.onPhase）。
- * 覆盖"加载权重 / prefill"那段静默：真机实测文本路径首字要等约 30s，
- * 期间只显示「正在生成…」的话，用户分不清是在加载还是卡住了。
+ * 加载权重与生成使用同一句，避免直播气泡在「正在加载模型」和「正在生成」之间切换。
  */
 function remotePhaseText(state: string): string {
   if (state === 'queued') { return '排队中…'; }
-  if (state === 'loading') { return '正在加载模型…'; }
   if (state === 'prefill') { return '正在理解问题…'; }
   return LIVE_PLACEHOLDER;
 }
@@ -153,7 +158,8 @@ enum BubbleKind {
   TOOL,
   OBSERVATION,
   ERROR,
-  PROCESS
+  PROCESS,
+  TASK
 }
 
 interface ChatBubble {
@@ -165,6 +171,7 @@ interface ChatBubble {
   collapsible: boolean;
   expanded: boolean;
   revision: number;
+  taskProgress?: TaskProgress;
 }
 
 function bubbleBackground(kind: BubbleKind): string {
@@ -231,6 +238,9 @@ struct Index {
   @State messages: ChatBubble[] = [];
   @State message: string = '';
   @State sending: boolean = false;
+  @State agentEnabled: boolean = false;
+  @State chatMode: ChatMode = 'chat';
+  @State settingsVisible: boolean = false;
   @State modelStatus: string = '远程算力';
   @State titleText: string = '聊天';
   @State statusText: string = '正在寻找算力设备…';
@@ -288,6 +298,8 @@ struct Index {
   private processId: number = -1;
   private activeRunner: ReActAgentRunner | null = null;
   private activeParallel: ParallelTaskRunner | null = null;
+  private activeTaskReporter: TaskReporter | null = null;
+  private activeTaskProgressId: number = -1;
   private parallelHeader: string = '';
   private parallelViews: SubtaskView[] = [];
   private stopRequested: boolean = false;
@@ -304,8 +316,9 @@ struct Index {
     this.pageActive = true;
     this.stopRequested = false;
     const context = this.getAbilityContext();
+    this.chatMode = loadChatMode(context);
+    this.agentEnabled = this.chatMode !== 'chat';
     this.restoreConversation();
-    this.toolRegistryPromise = createConfiguredLoopToolRegistry(context);
     ensureBundledWorkspaceFiles(context).catch((_error: Error): void => {});
     nearbyChannel.initialize(context);
     inferenceClient.bind();
@@ -318,12 +331,15 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.updateTaskProgress('cancelled');
     this.pageActive = false;
     this.remoteRunGeneration++;
     this.stopRequested = true;
     this.activeRunner?.requestStop();
     this.activeRunner = null;
     this.activeParallel?.requestStop();
+    this.activeTaskReporter?.finish('cancelled');
+    this.activeTaskReporter = null;
     this.activeParallel = null;
     inferenceClient.setLinkListener(null);
     this.dropLivePlaceholder();
@@ -342,6 +358,96 @@ struct Index {
   }
 
   build() {
+    if (this.settingsVisible) {
+      this.settingsPage();
+    } else {
+      this.chatPage();
+    }
+  }
+
+  @Builder
+  settingsPage() {
+    Column() {
+      Row() {
+        Button('返回')
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#0F8A74')
+          .backgroundColor(Color.White)
+          .borderRadius(16)
+          .height(36)
+          .padding({ left: 12, right: 12 })
+          .onClick(() => {
+            this.settingsVisible = false;
+          })
+        Text('设置')
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#16332C')
+          .margin({ left: 12 })
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Text('对话模式')
+        .fontSize(13)
+        .fontColor('#6B7F79')
+        .width('100%')
+        .margin({ top: 18, bottom: 8 })
+
+      this.modeOption('chat', '普通聊天', '算力直接回答，不调用工具')
+      this.modeOption('agent', 'Agent（不拆分）', '调用工具，不拆分任务')
+      this.modeOption('agent_split', 'Agent（拆分任务）', '自动规划任务并调用工具')
+
+      if (this.sending) {
+        Text('生成期间需先停止再切换模式。')
+          .fontSize(12)
+          .fontColor('#6B7F79')
+          .width('100%')
+          .margin({ top: 8 })
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding({ left: 16, right: 16, top: 14, bottom: 16 })
+    .backgroundColor('#EEF6F3')
+  }
+
+  @Builder
+  modeOption(mode: ChatMode, title: string, detail: string) {
+    Row() {
+      Column() {
+        Text(title)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#16332C')
+        Text(detail)
+          .fontSize(12)
+          .fontColor('#6B7F79')
+          .margin({ top: 2 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      Text(this.chatMode === mode ? '当前' : '')
+        .fontSize(12)
+        .fontColor('#0F8A74')
+    }
+    .width('100%')
+    .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+    .margin({ bottom: 8 })
+    .backgroundColor(Color.White)
+    .borderRadius(16)
+    .border({ width: this.chatMode === mode ? 1 : 0, color: '#0F8A74' })
+    .enabled(!this.sending)
+    .onClick(() => {
+      this.changeChatMode(mode);
+    })
+  }
+
+  @Builder
+  chatPage() {
     Column() {
       Row() {
         Image($r('app.media.icon'))
@@ -379,6 +485,20 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
         .margin({ left: 10 })
+
+        Button('⚙')
+          .fontSize(18)
+          .fontColor('#0F8A74')
+          .backgroundColor(Color.White)
+          .borderRadius(18)
+          .width(36)
+          .height(36)
+          .padding(0)
+          .margin({ right: 8 })
+          .accessibilityText('设置')
+          .onClick(() => {
+            this.settingsVisible = true;
+          })
 
         Button('清除')
           .fontSize(13)
@@ -429,7 +549,14 @@ struct Index {
 
           ForEach(this.messages, (bubble: ChatBubble) => {
             Row() {
-              if (bubble.kind === BubbleKind.PROCESS) {
+              if (bubble.kind === BubbleKind.TASK && bubble.taskProgress !== undefined) {
+                Column() {
+                  TaskProgressCard({ progress: bubble.taskProgress })
+                }
+                .width('100%')
+                .constraintSize({ maxWidth: 440 })
+                .alignItems(HorizontalAlign.Start)
+              } else if (bubble.kind === BubbleKind.PROCESS) {
                 Column() {
                   Text(bubble.expanded ? '▾ 思考和行动' : '▸ 思考和行动')
                     .fontSize(14)
@@ -484,6 +611,9 @@ struct Index {
             .width('100%')
             .justifyContent(bubble.kind === BubbleKind.USER ? FlexAlign.End : FlexAlign.Start)
             .margin({ bottom: 10 })
+            // The task card already represents waiting; keep detailed parallel progress visible.
+            .visibility(bubble.id === this.liveReplyId && this.liveReplyPending && this.parallelHeader.length === 0 ?
+              Visibility.None : Visibility.Visible)
           }, (bubble: ChatBubble) => `${bubble.id}-${bubble.revision}`)
         }
         .width('100%')
@@ -1079,42 +1209,52 @@ struct Index {
     if (!this.isCurrentRemoteRun(generation)) { return false; }
     nearbyChannel.initialize(this.getAbilityContext());
     nearbyChannel.resume();
-    if (nearbyChannel.isConnected()) {
-      this.refreshLinkChrome();
-      return true;
-    }
     this.linkBusy = true;
     this.refreshLinkChrome();
     try {
-      await nearbyChannel.prepare();
+      if (!nearbyChannel.isConnected()) {
+        await nearbyChannel.prepare();
+        if (!this.isCurrentRemoteRun(generation)) { return false; }
+        await nearbyChannel.computeDevices();
+        if (!this.isCurrentRemoteRun(generation)) { return false; }
+        let ads = nearbyChannel.advertisedComputes();
+        if (ads.length === 0) {
+          this.remoteStatus = nearbyChannel.hasComputeHits()
+            ? '附近的算力还没组网。请用同一华为账号在超级终端中连接后再试。'
+            : '未发现算力设备。请打开算力手机并保持近场开启后重试。';
+          return false;
+        }
+        ads = nearbyChannel.connectComputes();
+        if (ads.length === 0) {
+          this.remoteStatus = '算力设备1尚未确定或不可用，请等待算力设备组网后重试。';
+          return false;
+        }
+        const operation = nearbyChannel.operation();
+        await nearbyChannel.connectAdvertiser(ads[0].mac, operation);
+        if (!this.isCurrentRemoteRun(generation)) { return false; }
+        const connected = await nearbyChannel.waitUntilConnected();
+        if (!this.isCurrentRemoteRun(generation)) { return false; }
+        if (!connected) {
+          this.remoteStatus = nearbyChannel.getStatus();
+          return false;
+        }
+        const serviceError = await nearbyChannel.checkService();
+        if (!this.isCurrentRemoteRun(generation)) { return false; }
+        if (serviceError.length > 0) {
+          this.remoteStatus = serviceError;
+          return false;
+        }
+      }
+      // A ready link is not yet a ready model. Negotiate on connection as well as
+      // first send; ensureReady coalesces callers and reuses the current profile.
+      const negotiate = await inferenceClient.ensureReady();
       if (!this.isCurrentRemoteRun(generation)) { return false; }
-      await nearbyChannel.computeDevices();
-      if (!this.isCurrentRemoteRun(generation)) { return false; }
-      let ads = nearbyChannel.advertisedComputes();
-      if (ads.length === 0) {
-        this.remoteStatus = nearbyChannel.hasComputeHits()
-          ? '附近的算力还没组网。请用同一华为账号在超级终端中连接后再试。'
-          : '未发现算力设备。请打开算力手机并保持近场开启后重试。';
+      if (negotiate.length > 0) {
+        this.remoteStatus = negotiate;
         return false;
       }
-      ads = nearbyChannel.connectComputes();
-      if (ads.length === 0) {
-        this.remoteStatus = '算力设备1尚未确定或不可用，请等待算力设备组网后重试。';
-        return false;
-      }
-      const operation = nearbyChannel.operation();
-      await nearbyChannel.connectAdvertiser(ads[0].mac, operation);
-      if (!this.isCurrentRemoteRun(generation)) { return false; }
-      const connected = await nearbyChannel.waitUntilConnected();
-      if (!this.isCurrentRemoteRun(generation)) { return false; }
-      if (!connected) {
-        this.remoteStatus = nearbyChannel.getStatus();
-        return false;
-      }
-      const serviceError = await nearbyChannel.checkService();
-      if (!this.isCurrentRemoteRun(generation)) { return false; }
-      if (serviceError.length > 0) {
-        this.remoteStatus = serviceError;
+      if (!nearbyChannel.isConnected()) {
+        this.remoteStatus = '连接已中断，请重新连接。';
         return false;
       }
       this.remoteStatus = '算力已连接';
@@ -1137,9 +1277,33 @@ struct Index {
     return this.pageActive && generation === this.remoteRunGeneration && !this.stopRequested;
   }
 
+  private changeAgentMode(enabled: boolean): void {
+    this.changeChatMode(enabled ? 'agent_split' : 'chat');
+  }
+
+  private changeChatMode(mode: ChatMode): void {
+    if (this.sending || mode === this.chatMode) { return; }
+    const leavingAgent = this.agentEnabled && mode === 'chat';
+    this.chatMode = mode;
+    this.agentEnabled = mode !== 'chat';
+    if (leavingAgent) {
+      const tools = this.toolRegistryPromise;
+      this.toolRegistryPromise = null;
+      this.toolRegistryIncludesSkills = false;
+      tools?.then(async (registry: ToolRegistry): Promise<void> => registry.close()).catch((_error: Error): void => {});
+    }
+    saveChatMode(this.getAbilityContext(), mode).catch((_error: Error): void => {
+      if (this.pageActive) {
+        this.appendLine('Error', '模式已切换，但未能保存设置，重启后请重新选择。', BubbleKind.ERROR);
+      }
+    });
+  }
+
   private async runRemoteAgent(task: string, display: string, imagePath: string,
     imagePayload: string = ''): Promise<void> {
     if (!this.pageActive || this.sending) { return; }
+    const mode: ChatMode = this.chatMode === 'agent' || this.chatMode === 'chat' ? this.chatMode : 'agent_split';
+    const useAgent = mode !== 'chat';
     const generation = ++this.remoteRunGeneration;
     this.stopRequested = false;
     this.message = '';
@@ -1147,7 +1311,11 @@ struct Index {
     this.setCollaborationKeepScreenOn(true);
     let finalAnswer: string | null = null;
     let finalPartial = false;
+    let failureText = '';
     const startedAt = Date.now();
+    this.appendUserMessage(display, imagePath);
+    this.beginTaskProgress(imagePath.length > 0 || imagePayload.length > 0 ? '图像' : '文本', startedAt);
+    let reporter: TaskReporter | null = null;
     try {
       const ready = await this.ensureRemoteReady(generation);
       if (!this.isCurrentRemoteRun(generation)) { return; }
@@ -1166,7 +1334,31 @@ struct Index {
         this.appendLine('Error', negotiate, BubbleKind.ERROR);
         return;
       }
-      this.appendUserMessage(display, imagePath);
+      reporter = new TaskReporter('t' + startedAt.toString(36) + '_' + generation.toString(36) + '_' +
+        Math.floor(Math.random() * 1679616).toString(36), task, startedAt,
+        (snapshot: TaskSnapshot): void => inferenceClient.publishTask(snapshot));
+      this.activeTaskReporter = reporter;
+      this.updateTaskProgress('running');
+      if (!useAgent) {
+        const prompt = buildPlainChatPrompt(task, inferenceClient.promptBudgetBytes());
+        const answer = await inferenceClient.complete(prompt, {
+          label: '普通聊天', taskId: reporter.id, subtaskId: 'main',
+          onPhase: (state: string): void => {
+            if (this.isCurrentRemoteRun(generation)) { this.setLivePhase(remotePhaseText(state)); }
+          },
+          onStart: (): void => {
+            if (this.isCurrentRemoteRun(generation)) { this.beginLiveReply(); }
+          },
+          onDelta: (text: string): void => {
+            if (this.isCurrentRemoteRun(generation)) { this.commitLiveAnswer(text); }
+          }
+        }, null, imagePayload);
+        if (!this.isCurrentRemoteRun(generation)) { return; }
+        if (answer.trim().length === 0) { throw new Error('算力未返回回答，请重试'); }
+        finalAnswer = answer;
+        this.commitLiveAnswer(answer);
+        return;
+      }
       const context = this.getAbilityContext();
       const skillSnapshot = this.skillSnapshot ?? await createSkillSnapshot(context);
       if (!this.isCurrentRemoteRun(generation)) { return; }
@@ -1187,6 +1379,7 @@ struct Index {
       // Hooks belong to this run's model only, so a superseded run can never
       // drive the next run's placeholder.
       const model = new RemoteComputeModel({
+        taskId: reporter.id, subtaskId: 'main',
         onStart: (): void => {
           if (!this.isCurrentRemoteRun(generation)) { return; }
           this.beginLiveReply();
@@ -1216,6 +1409,9 @@ struct Index {
         if (!this.isCurrentRemoteRun(generation)) { return; }
         if (event.kind === AgentEventKind.ACTION || event.kind === AgentEventKind.OBSERVATION ||
           event.kind === AgentEventKind.SKILL || event.kind === AgentEventKind.THOUGHT) {
+          if (event.kind === AgentEventKind.ACTION || event.kind === AgentEventKind.OBSERVATION) {
+            reporter?.record(event.kind, event.text, event.toolName, event.input);
+          }
           this.appendProcess(event);
           if (event.kind === AgentEventKind.ACTION) {
             this.setLivePhase(LIVE_TOOL_PREFIX + (event.toolName ?? '工具') + '…');
@@ -1231,6 +1427,7 @@ struct Index {
           this.commitLiveAnswer(event.text);
           return;
         }
+        if (event.kind === AgentEventKind.ERROR) failureText = event.text;
         if (event.kind === AgentEventKind.ERROR && event.text === INFERENCE_STOPPED) {
           this.dropLivePlaceholder();
           if (this.liveReplyId < 0) {
@@ -1244,33 +1441,36 @@ struct Index {
         this.addEvent(event);
       };
       const conversation = this.buildRemoteConversation();
-      // Independent parts of a bundled request run on separate compute devices when
-      // several are idle; every other request keeps the single-device path below.
-      const parallel = this.createParallelRunner(generation, tools, skillSnapshot);
-      this.activeParallel = parallel;
-      // 带图请求不走并行拆分：并行分支会为每个子任务新建 RemoteComputeModel（见
-      // createParallelRunner），附图只注入到上面这一个主模型。带图一律走下面的单模型
-      // 路径，保证图纸只被理解一次、且第一跳就带上。
+      // 不拆分的 Agent 直接走下面的单模型工具循环。拆分模式才把独立子任务分到空闲算力。
+      // 带图请求同样不拆：并行分支会为每个子任务新建 RemoteComputeModel，附图只注入到
+      // 上面这一个主模型。
       let handled = false;
-      if (imagePayload.length === 0) {
-        handled = await parallel.tryRun(task, conversation, this.parallelObserver(generation), listener);
+      if (imagePayload.length === 0 && mode === 'agent_split') {
+        const parallel = this.createParallelRunner(generation, tools, skillSnapshot);
+        this.activeParallel = parallel;
+        handled = await parallel.tryRun(task, conversation, this.parallelObserver(generation, reporter), listener, startedAt + 300000, reporter.id);
       }
       if (!handled && this.isCurrentRemoteRun(generation)) {
         this.parallelHeader = '';
         this.parallelViews = [];
         this.setLivePhase(LIVE_PLACEHOLDER);
-        await runner.run(task, listener, conversation);
+        await runner.run(task, listener, conversation, { namespace: '', goals: [], evidence: [], deadlineAt: startedAt + 300000 });
       }
     } catch (error) {
       if (this.isCurrentRemoteRun(generation)) {
         this.dropLivePlaceholder();
         const message = error instanceof Error ? error.message : '远程推理失败';
+        failureText = message;
         this.appendLine('Error', message, BubbleKind.ERROR);
       }
     } finally {
+      reporter?.finish(this.isCurrentRemoteRun(generation) ?
+        (finalAnswer !== null ? (finalPartial ? 'partial' : 'done') : 'failed') : 'cancelled', finalAnswer ?? failureText);
+      if (this.activeTaskReporter === reporter) this.activeTaskReporter = null;
       // A disposed or superseded run must not clear the next run's listeners
       // or persist a late answer. Stop invalidates the generation immediately.
       if (this.pageActive && generation === this.remoteRunGeneration) {
+        this.updateTaskProgress(finalAnswer !== null ? (finalPartial ? 'partial' : 'done') : 'failed');
         this.finishInferenceMetricsTask();
         if (!this.stopRequested && finalAnswer !== null) {
           // A partial report keeps the question for follow-ups but is not a
@@ -1278,8 +1478,6 @@ struct Index {
           this.conversation.addUser(display);
           this.conversation.addAssistant(finalPartial ? PARTIAL_HISTORY_NOTE : finalAnswer);
           saveConversation(this.getAbilityContext(), this.conversation);
-          // Display only: never part of the conversation sent back to the model.
-          this.appendLine('Loop', '本次任务总耗时 ' + this.formatElapsed(Date.now() - startedAt), BubbleKind.OBSERVATION);
         } else {
           this.dropLivePlaceholder();
         }
@@ -1297,11 +1495,34 @@ struct Index {
     }
   }
 
-  private formatElapsed(ms: number): string {
-    const seconds = Math.max(0, ms) / 1000;
-    if (seconds < 60) { return seconds.toFixed(1) + ' 秒'; }
-    const minutes = Math.floor(seconds / 60);
-    return minutes.toString() + ' 分 ' + (seconds - minutes * 60).toFixed(1) + ' 秒';
+  private beginTaskProgress(kind: string, startedAt: number): void {
+    const bubble = this.createChatBubble('Task', '', BubbleKind.TASK);
+    bubble.taskProgress = { kind: kind, phase: 'preparing', startedAt: startedAt, endedAt: 0 };
+    this.activeTaskProgressId = bubble.id;
+    this.messages = [...this.messages, bubble];
+    this.scroller.scrollEdge(Edge.Bottom);
+  }
+
+  private updateTaskProgress(phase: TaskProgressPhase): void {
+    if (this.activeTaskProgressId < 0) { return; }
+    const next: ChatBubble[] = [];
+    for (const bubble of this.messages) {
+      const progress = bubble.taskProgress;
+      if (bubble.id !== this.activeTaskProgressId || progress === undefined || !taskProgressActive(progress.phase)) {
+        next.push(bubble);
+        continue;
+      }
+      next.push({
+        id: bubble.id, speaker: bubble.speaker, text: bubble.text, kind: bubble.kind,
+        imagePath: bubble.imagePath, collapsible: false, expanded: false, revision: bubble.revision + 1,
+        taskProgress: {
+          kind: progress.kind, phase: phase, startedAt: progress.startedAt,
+          endedAt: taskProgressActive(phase) ? 0 : Date.now()
+        }
+      });
+    }
+    this.messages = next;
+    if (!taskProgressActive(phase)) { this.activeTaskProgressId = -1; }
   }
 
   private createParallelRunner(generation: number, tools: ToolRegistry, skillSnapshot: SkillSnapshot): ParallelTaskRunner {
@@ -1309,9 +1530,10 @@ struct Index {
     const owner = (name: string): string => 'p' + generation.toString() + ':' + name;
     const deps: ParallelDeps = {
       modelFor: (id: string, hooks: SubtaskModelHooks): LocalModel =>
-        new RemoteComputeModel({ owner: owner(id), onAccepted: hooks.onAccepted, label: hooks.label }),
-      splitModel: (): LocalModel => new RemoteComputeModel({ owner: owner('split'), label: '任务拆分' }),
-      mergeModel: (): LocalModel => new RemoteComputeModel({ owner: owner('merge'), label: '合并结果' }),
+        new RemoteComputeModel({ owner: owner(id), onAccepted: hooks.onAccepted, label: hooks.label,
+          taskId: hooks.taskId, subtaskId: hooks.subtaskId }),
+      splitModel: (taskId?: string): LocalModel => new RemoteComputeModel({ owner: owner('split'), label: '任务拆分', taskId: taskId, subtaskId: 'plan' }),
+      mergeModel: (taskId?: string): LocalModel => new RemoteComputeModel({ owner: owner('merge'), label: '合并结果', taskId: taskId, subtaskId: 'merge' }),
       tools: tools,
       skills: skillSnapshot,
       maxSteps: MAX_STEPS,
@@ -1326,8 +1548,26 @@ struct Index {
   }
 
   /** Sub-task rows live in the placeholder bubble until the merged answer replaces it. */
-  private parallelObserver(generation: number): ParallelObserver {
+  private parallelObserver(generation: number, reporter?: TaskReporter): ParallelObserver {
     const observer: ParallelObserver = {
+      onTask: (task: ParallelTaskSnapshot): void => {
+        if (!this.isCurrentRemoteRun(generation) && task.phase !== 'cancelled') { return; }
+        const subtasks: TaskChildSnapshot[] = [];
+        for (const child of task.subtasks) {
+          const copy: TaskChildSnapshot = {
+            id: child.id, title: child.title, input: child.input, activity: child.activity, device: child.device, phase: child.phase,
+            detail: child.detail, result: child.result, resultTruncated: child.resultTruncated,
+            startedAt: child.startedAt, endedAt: child.endedAt
+          };
+          subtasks.push(copy);
+        }
+        const snapshot: TaskSnapshot = {
+          id: task.id, title: task.title, phase: task.phase, revision: task.revision,
+          startedAt: task.startedAt, endedAt: task.endedAt, answer: task.answer, answerTruncated: task.answerTruncated, subtasks: subtasks
+        };
+        if (reporter !== undefined) reporter.update(snapshot);
+        else inferenceClient.publishTask(snapshot);
+      },
       onPhase: (text: string): void => {
         if (!this.isCurrentRemoteRun(generation)) { return; }
         this.beginLiveReply();
@@ -1370,11 +1610,14 @@ struct Index {
 
   private stopGeneration(): void {
     if (!this.sending) { return; }
+    this.updateTaskProgress('cancelled');
     this.stopRequested = true;
     this.remoteRunGeneration++;
     this.activeRunner?.requestStop();
     this.activeRunner = null;
     this.activeParallel?.requestStop();
+    this.activeTaskReporter?.finish('cancelled');
+    this.activeTaskReporter = null;
     this.activeParallel = null;
     inferenceClient.cancelActive();
     this.dropLivePlaceholder();
@@ -2110,6 +2353,7 @@ struct Index {
     this.conversation.clear();
     clearStoredConversation(this.getAbilityContext());
     this.messages = [];
+    this.activeTaskProgressId = -1;
     this.liveReplyId = -1;
     this.liveReplyPending = false;
     this.processId = -1;
@@ -2228,6 +2472,7 @@ struct Index {
         kind: current.kind,
         imagePath: current.imagePath,
         collapsible: collapsible,
+        taskProgress: current.taskProgress,
         expanded: collapsible ? current.expanded : false,
         revision: current.revision + 1
       });
@@ -2250,6 +2495,7 @@ struct Index {
       kind: current.kind,
       imagePath: current.imagePath,
       collapsible: current.collapsible,
+      taskProgress: current.taskProgress,
       expanded: !current.expanded,
       revision: current.revision + 1
     };

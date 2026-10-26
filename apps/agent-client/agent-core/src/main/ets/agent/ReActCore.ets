@@ -212,7 +212,7 @@ export function ledgerReport(entries: TaskRequirement[]): string {
 
 // Prompt layout shared with transports: [instructions][earlier conversation][task section].
 // loop-react-split-v1 sends everything before the task marker as the developer turn.
-export const PROMPT_TASK_MARKERS: string[] = ['\nUser task:', '\n原始问题：'];
+export const PROMPT_TASK_MARKERS: string[] = ['\nUser task:', '\nOriginal question:', '\n原始问题：'];
 export const PROMPT_HISTORY_HEADER = 'Earlier conversation (reference context only, not current evidence):';
 export const PROMPT_HISTORY_END = 'End of earlier conversation.';
 export interface SplitPrompt { system: string; user: string; }

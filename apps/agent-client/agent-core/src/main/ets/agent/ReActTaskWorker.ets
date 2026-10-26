@@ -31,7 +31,7 @@ export class ReActTaskWorker implements TaskWorker {
     const dependencies: TaskEvidence[] = [];
     for (const result of request.dependencies) {
       for (const entry of result.evidence) {
-        dependencies.push({ callId: entry.callId, tool: entry.tool, status: entry.status, output: entry.output, facts: entry.facts,
+        dependencies.push({ callId: entry.callId, tool: entry.tool, status: entry.status, output: entry.output, facts: entry.facts, input: entry.input,
           goalIds: request.goals.filter((goal: TaskGoal): boolean => goal.tools.indexOf(entry.tool) >= 0).map((goal: TaskGoal): string => goal.id) });
       }
     }

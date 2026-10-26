@@ -104,20 +104,24 @@ export class ToolRegistry {
     return description;
   }
 
-  describeTools(): string {
-    let description = 'Tool-call format (required):\n';
-    description += 'Execution: serial\n';
-    description += 'Action: exact_tool_name[<input>]\n';
-    description += 'Execution must contain only serial or parallel; put every tool call on an Action line. ';
-    description += 'When a tool requires Input JSON, place exactly one JSON object inside the Action brackets, ';
-    description += 'without an extra array or an input: label. Required string fields must not be empty.\n';
+  describeTools(compact: boolean = false): string {
+    let description = compact ? 'Output Execution: serial|parallel, then Action: exact_tool_name[<input>]. JSON inputs are one object, never an array or input: wrapper. Required strings cannot be empty.\n' : 'Tool-call format (required):\n';
+    if (!compact) {
+      description += 'Execution: serial\n';
+      description += 'Action: exact_tool_name[<input>]\n';
+      description += 'Execution must contain only serial or parallel; put every tool call on an Action line. ';
+      description += 'When a tool requires Input JSON, place exactly one JSON object inside the Action brackets, ';
+      description += 'without an extra array or an input: label. Required string fields must not be empty.\n';
+    }
     description += 'Available tools:\n';
     this.tools.forEach((tool: AgentTool) => {
-      description += `- ${tool.name()}: ${tool.description()}\n`;
+      description += `- ${tool.name()}: ${compact ? tool.description().replace(/\s+/g, ' ').trim() : tool.description()}\n`;
       const declaration = this.contractCatalog.get(tool.name());
       if (declaration !== undefined) {
         description += '  Input format: ' + declaration.inputFormat + '. Schema: ' + JSON.stringify(declaration.inputSchema ?? {}) + '\n';
-        if ((declaration.evidenceFields ?? []).length > 0) { description += '  Answer evidence: ' + JSON.stringify(declaration.evidenceFields) + '. Scope fields: ' + JSON.stringify(declaration.answerScopeFields ?? []) + '\n'; }
+        // These are executor-side answer checks, not tool input/permission constraints.
+        // Actual returned facts are provided with observations after a call completes.
+        if (!compact && (declaration.evidenceFields ?? []).length > 0) { const scope = declaration.answerScopeFields ?? []; description += '  Answer evidence: ' + JSON.stringify(declaration.evidenceFields) + (scope.length > 0 ? '. Scope fields: ' + JSON.stringify(scope) : '') + '\n'; }
       }
     });
     return description;

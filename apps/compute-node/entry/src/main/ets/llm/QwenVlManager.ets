@@ -13,7 +13,7 @@
 import engine from 'libqwenvl_engine.so';
 import { fileIo } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { readyModelDirs, isVlLayout, readinessOf } from './ModelRegistry';
+import { activeModelDirs, isVlLayout, readinessOf } from './ModelRegistry';
 
 const TAG: string = 'QwenVlManager';
 const DOMAIN: number = 0x0004;
@@ -130,7 +130,7 @@ export class QwenVlManager {
       return '模型服务未初始化';
     }
     if (this.vlModelDir === '') {
-      return 'VL 模型未部署（需在 filesDir/models/ 下放置含 vl_params 的模型目录）';
+      return '当前未启用图片模型，请在模型选择中选择已部署的 VL 模型。';
     }
     const missing = readinessOf(this.modelPath());
     if (missing !== '') {
@@ -145,7 +145,7 @@ export class QwenVlManager {
       return '';
     }
     try {
-      for (const dir of readyModelDirs(this.filesDir)) {
+      for (const dir of activeModelDirs(this.filesDir)) {
         const full = this.filesDir + '/models/' + dir;
         if (isVlLayout(full) && readinessOf(full) === '') {
           return dir;
@@ -160,7 +160,7 @@ export class QwenVlManager {
 
   /**
    * 发起一次 VL 推理（图片 + 文字）。
-   * @param imagePath 图片绝对路径（多模态请求必需；空串按纯文本处理，引擎可处理）
+   * @param imagePath 图片绝对路径（当前 SDK 要求非空且为可读取的图片）
    * @param prompt    用户文字（空时自动补默认描述提示词）
    * @param callback  流式回调（delta/done/error/loading）
    */

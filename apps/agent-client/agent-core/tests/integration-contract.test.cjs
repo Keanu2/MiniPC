@@ -45,7 +45,8 @@ const sent = []; let throwSend = false;
 const {inferenceClient: client, INFERENCE_STOPPED} = load('../entry/src/main/ets/model/InferenceClient.ets', {
   '@kit.PerformanceAnalysisKit': {hilog:{info(){}, warn(){}}},
   '../nearby/LinkEnhanceChannel': {nearbyChannel: {inferenceReady: () => true, readyEpoch: () => 0, setInferenceHandler() {}, setInferenceLinkHandler() {}, send(m) {if (throwSend) throw new Error('disconnected'); sent.push(m);}}},
-  './InferenceWire': {utf8Bytes: s => Buffer.from(s), sha256Hex: () => ''}, './Utf8Repair': {repairUtf8FromSource: s => s}
+  './InferenceWire': {utf8Bytes: s => Buffer.from(s), sha256Hex: () => ''}, './Utf8Repair': {repairUtf8FromSource: s => s},
+  '../protocol/ChatProtocol': load('../entry/src/main/ets/protocol/ChatProtocol.ets', {'@kit.ArkTS': {util: {}}})
 });
 const profile = {ready:true,modelId:'m',modelRevision:'1',promptFormat:'loop-react-split-v1',maxPromptBytes:32768,maxOutputTokens:2048,maxContextTokens:32768};
 function capabilities(id) {client.onMessage({type:'infer.capabilities',requestId:id,profiles:[profile]});}

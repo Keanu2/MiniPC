@@ -8,7 +8,7 @@ export interface DomainScope {
 }
 export function scopeOf(entry: ContractRequirement): DomainScope { return entry.scope as DomainScope; }
 export function clauses(task: string): string[] { return task.split(/[，,。；;！？!?\n]|并且|以及|还有|另外|同时|然后|顺便|接着|还要/); }
-export function cleanRequest(text: string): string { return text.trim().replace(/^(?:请|帮我|帮忙|请问|告诉我|查询一下|查询|查一下|查下|查|看看|看一下)+/, '').trim(); }
+export function cleanRequest(text: string): string { return text.trim().replace(/^(?:请|帮我|帮忙|请问|告诉我|根据|按照|依据|基于|参考|结合|查询一下|查询|查一下|查下|查|看看|看一下)+/, '').trim(); }
 export function cleanEntity(text: string): string { return cleanRequest(text.replace(/[？?！!。，,；;]+$/g, '').trim()).replace(/的$/, '').trim(); }
 export function dates(text: string): string[] { return text.match(/\d{4}-\d{2}-\d{2}|大后天|后天|明天|今天/g) ?? []; }
 export function normalizeDate(text: string, anchorTime: number): string {

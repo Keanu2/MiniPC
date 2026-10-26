@@ -29,6 +29,7 @@ struct Job {
     // that callback is terminal; waiting for a JS round trip only adds stalls.
     bool singleShot = false;
     int waitSeconds = 0;
+    int64_t startedMs = 0;
     std::string utf8Pending;
 };
 
@@ -49,11 +50,59 @@ struct Probe {
 
 static Probe& State() { static auto* state = new Probe; return *state; }
 
+// Optional session reuse. A request that names a session key keeps its native session
+// (and so its KV cache) for the next request with the same key. Without a key every
+// request still creates and destroys its own session, exactly as before.
+using SessionHandle = decltype(OH_QoS_GewuCreateSession("").session);
+static constexpr size_t MAX_CACHED_SESSIONS = 4;
+static constexpr int64_t SESSION_IDLE_MS = 180000;
+struct CachedSession {
+    std::string key;
+    SessionHandle session;
+    int64_t lastUsed = 0;
+    bool inUse = false;
+    bool drop = false;
+};
+static std::vector<CachedSession> g_cached;
+static std::mutex g_cachedMutex;
+
 static int64_t NowMs()
 {
     timespec ts {};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void DestroyAll(const std::vector<SessionHandle>& doomed)
+{
+    for (const auto& handle : doomed) OH_QoS_GewuDestroySession(handle);
+}
+
+// Removes idle-expired entries; the caller destroys the returned handles outside the lock.
+static void ExpireLocked(std::vector<SessionHandle>& doomed)
+{
+    const int64_t now = NowMs();
+    for (size_t i = 0; i < g_cached.size();) {
+        if (!g_cached[i].inUse && now - g_cached[i].lastUsed > SESSION_IDLE_MS) {
+            doomed.push_back(g_cached[i].session);
+            g_cached.erase(g_cached.begin() + static_cast<std::ptrdiff_t>(i));
+        } else ++i;
+    }
+}
+
+static void CloseSession(const std::string& key)
+{
+    std::vector<SessionHandle> doomed;
+    {
+        std::lock_guard<std::mutex> lock(g_cachedMutex);
+        for (size_t i = 0; i < g_cached.size();) {
+            if (g_cached[i].key != key) { ++i; continue; }
+            if (g_cached[i].inUse) { g_cached[i].drop = true; ++i; continue; }
+            doomed.push_back(g_cached[i].session);
+            g_cached.erase(g_cached.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+    }
+    DestroyAll(doomed);
 }
 
 static int FieldKb(const std::string& line, const char* key)
@@ -133,8 +182,11 @@ static Job* OccupyJobLocked(Probe& state)
 static void EventLocked(Probe& state, uintptr_t id, const std::string& event, const std::string& payload)
 {
     const int64_t t = state.t0 == 0 ? 0 : NowMs() - state.t0;
+    const Job* job = FindJobLocked(state, id);
+    const std::string elapsed = job == nullptr ? "" :
+        ",\"elapsedMs\":" + std::to_string(NowMs() - job->startedMs);
     std::string line = "{\"event\":" + Quote(event) + ",\"id\":" + Quote(std::to_string(id)) +
-        ",\"t\":" + std::to_string(t) + ",\"payload\":" + Quote(payload) + "}";
+        ",\"t\":" + std::to_string(t) + elapsed + ",\"payload\":" + Quote(payload) + "}";
     if (state.log.is_open()) state.log << line << std::endl;
     state.events.push_back(line);
     OH_LOG_Print(LOG_APP, LOG_INFO, 0xD003F00, "GewuProbe", "%{public}s", line.c_str());
@@ -253,9 +305,8 @@ static int DefaultWaitSeconds()
 #ifdef GEWU_PROBE_TEST
     return probeWaitSeconds;
 #else
-    // stream:false delivers one callback when generation finishes. A long answer
-    // has no callback until then, so this must stay inside the chat hard budget
-    // and must not retry the same prompt.
+    // Both streaming and single-shot requests stay inside the chat hard budget.
+    // A missing finish marker must time out without reissuing the same prompt.
     return 150;
 #endif
 }
@@ -280,13 +331,90 @@ static bool WaitUntilDone(uintptr_t id, Job* owned, int seconds)
 // finish. Abort it once. Submitting the same prompt again does not finish it.
 enum class Attempt { Done, Stalled, CreateFailed, SubmitFailed };
 
-static Attempt SubmitOnce(const std::string& attributes, const std::string& request, uintptr_t id, Job* owned)
+// Returns the session to use. reused is true when a cached session was taken instead of created.
+static bool AcquireSession(const std::string& key, const std::string& attributes, uintptr_t id,
+    SessionHandle& session, bool& reused)
 {
-    auto& state = State();
+    reused = false;
+    std::vector<SessionHandle> doomed;
+    if (!key.empty()) {
+        std::lock_guard<std::mutex> lock(g_cachedMutex);
+        ExpireLocked(doomed);
+        for (auto& entry : g_cached) {
+            if (entry.key == key && !entry.inUse && !entry.drop) {
+                entry.inUse = true;
+                session = entry.session;
+                reused = true;
+                break;
+            }
+        }
+    }
+    DestroyAll(doomed);
+    if (reused) {
+        Event(id, "reuse", "0");
+        Event(id, "mem_after_create", ReadMem());
+        return true;
+    }
     auto created = OH_QoS_GewuCreateSession(attributes.c_str());
     Event(id, "create", std::to_string(created.error));
     Event(id, "mem_after_create", ReadMem());
-    if (created.error != OH_QOS_GEWU_OK) return Attempt::CreateFailed;
+    if (created.error != OH_QOS_GEWU_OK) return false;
+    session = created.session;
+    if (!key.empty()) {
+        std::vector<SessionHandle> evicted;
+        {
+            std::lock_guard<std::mutex> lock(g_cachedMutex);
+            while (g_cached.size() >= MAX_CACHED_SESSIONS) {
+                size_t oldest = g_cached.size();
+                for (size_t i = 0; i < g_cached.size(); ++i) {
+                    if (g_cached[i].inUse) continue;
+                    if (oldest == g_cached.size() || g_cached[i].lastUsed < g_cached[oldest].lastUsed) oldest = i;
+                }
+                if (oldest == g_cached.size()) break;
+                evicted.push_back(g_cached[oldest].session);
+                g_cached.erase(g_cached.begin() + static_cast<std::ptrdiff_t>(oldest));
+            }
+            CachedSession entry;
+            entry.key = key;
+            entry.session = session;
+            entry.lastUsed = NowMs();
+            entry.inUse = true;
+            g_cached.push_back(entry);
+        }
+        DestroyAll(evicted);
+    }
+    return true;
+}
+
+// keep=true leaves a keyed session cached for the next request; otherwise it is destroyed.
+static void ReleaseSession(const std::string& key, SessionHandle session, bool keep, uintptr_t id)
+{
+    bool destroy = true;
+    if (!key.empty()) {
+        std::lock_guard<std::mutex> lock(g_cachedMutex);
+        for (size_t i = 0; i < g_cached.size(); ++i) {
+            if (g_cached[i].key != key || !g_cached[i].inUse) continue;
+            if (keep && !g_cached[i].drop) {
+                g_cached[i].inUse = false;
+                g_cached[i].lastUsed = NowMs();
+                destroy = false;
+            } else {
+                g_cached.erase(g_cached.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+            break;
+        }
+    }
+    if (destroy) Event(id, "destroy", std::to_string(OH_QoS_GewuDestroySession(session)));
+    else Event(id, "keep", "0");
+}
+
+static Attempt SubmitOnce(const std::string& attributes, const std::string& request, uintptr_t id, Job* owned,
+    const std::string& sessionKey)
+{
+    auto& state = State();
+    SessionHandle session {};
+    bool reused = false;
+    if (!AcquireSession(sessionKey, attributes, id, session, reused)) return Attempt::CreateFailed;
     bool shouldSubmit = false;
     int waitSeconds = DefaultWaitSeconds();
     {
@@ -301,7 +429,7 @@ static Attempt SubmitOnce(const std::string& attributes, const std::string& requ
     bool stalled = false;
     if (shouldSubmit) {
         Event(id, "request", request);
-        auto submitted = OH_QoS_GewuSubmitRequest(created.session, request.c_str(), OnResponse,
+        auto submitted = OH_QoS_GewuSubmitRequest(session, request.c_str(), OnResponse,
             reinterpret_cast<void*>(id));
         Event(id, "submit", std::to_string(submitted.error));
         if (submitted.error != OH_QOS_GEWU_OK) {
@@ -309,7 +437,7 @@ static Attempt SubmitOnce(const std::string& attributes, const std::string& requ
                 std::lock_guard<std::mutex> lock(state.mutex);
                 if (owned->id == id) owned->active = false;
             }
-            Event(id, "destroy", std::to_string(OH_QoS_GewuDestroySession(created.session)));
+            ReleaseSession(sessionKey, session, false, id);
             return Attempt::SubmitFailed;
         }
         bool signaled = WaitUntilDone(id, owned, waitSeconds);
@@ -328,7 +456,7 @@ static Attempt SubmitOnce(const std::string& attributes, const std::string& requ
             if (abort) owned->active = false;
         }
         if (abort) {
-            const std::string result = std::to_string(OH_QoS_GewuAbortRequest(created.session, submitted.request));
+            const std::string result = std::to_string(OH_QoS_GewuAbortRequest(session, submitted.request));
             Event(id, stalled ? "stall" : "abort", result);
         }
     }
@@ -336,11 +464,16 @@ static Attempt SubmitOnce(const std::string& attributes, const std::string& requ
         std::lock_guard<std::mutex> lock(state.mutex);
         if (owned->id == id) owned->active = false;
     }
-    Event(id, "destroy", std::to_string(OH_QoS_GewuDestroySession(created.session)));
+    bool keep = false;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        keep = shouldSubmit && !stalled && !owned->cancelled && owned->id == id && owned->completed;
+    }
+    ReleaseSession(sessionKey, session, keep, id);
     return stalled ? Attempt::Stalled : Attempt::Done;
 }
 
-static void Run(std::string modelPath, std::string request, uintptr_t id, Job* owned)
+static void Run(std::string modelPath, std::string request, uintptr_t id, Job* owned, std::string sessionKey)
 {
     for (const char* name : {"api_config.json", "tokenizer.json", "params"}) {
         std::string path = modelPath + "/" + name;
@@ -358,14 +491,14 @@ static void Run(std::string modelPath, std::string request, uintptr_t id, Job* o
     const std::string attributes = "{\"model\":" + Quote(modelPath) +
         ",\"eval_settings\":{\"backend\":\"knpu\",\"max_ctx\":32768}}";
     Event(id, "attributes", attributes);
-    const Attempt attempt = SubmitOnce(attributes, request, id, owned);
+    const Attempt attempt = SubmitOnce(attributes, request, id, owned, sessionKey);
     if (attempt == Attempt::CreateFailed) FinishJob(*owned, "create_failed");
     else if (attempt == Attempt::Stalled) FinishJob(*owned, "stalled");
     else FinishJob(*owned, "closed");
 }
 
 static uintptr_t Begin(const std::string& modelPath, const std::string& request, const std::string& path,
-    int waitSeconds = 0)
+    int waitSeconds = 0, const std::string& sessionKey = "")
 {
     auto& state = State();
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -378,13 +511,14 @@ static uintptr_t Begin(const std::string& modelPath, const std::string& request,
     }
     Job* job = OccupyJobLocked(state);
     job->id = ++state.nextId;
+    job->startedMs = NowMs();
     job->running = true;
     job->singleShot = request.find("\"stream\":false") != std::string::npos;
     job->waitSeconds = WaitSecondsFor(waitSeconds);
     state.started = true;
     const uintptr_t id = job->id;
     try {
-        std::thread(Run, modelPath, request, id, job).detach();
+        std::thread(Run, modelPath, request, id, job, sessionKey).detach();
     } catch (...) {
         job->running = false;
         state.started = RunningCountLocked(state) > 0;
@@ -452,18 +586,20 @@ static bool IntArg(napi_env env, napi_value arg, int32_t& result)
 
 static napi_value Start(napi_env env, napi_callback_info info)
 {
-    size_t argc = 4;
-    napi_value args[4];
+    size_t argc = 5;
+    napi_value args[5];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     std::string modelPath, request, path;
-    if ((argc != 3 && argc != 4) || !StringArg(env, args[0], modelPath) || !StringArg(env, args[1], request) ||
+    if (argc < 3 || argc > 5 || !StringArg(env, args[0], modelPath) || !StringArg(env, args[1], request) ||
         !StringArg(env, args[2], path) || path.find('\0') != std::string::npos) {
         napi_throw_type_error(env, nullptr, "Expected model path, request and log path strings");
         return nullptr;
     }
     int32_t waitSeconds = 0;
-    if (argc == 4 && !IntArg(env, args[3], waitSeconds)) waitSeconds = 0;
-    const uintptr_t id = Begin(modelPath, request, path, waitSeconds);
+    if (argc >= 4 && !IntArg(env, args[3], waitSeconds)) waitSeconds = 0;
+    std::string sessionKey;
+    if (argc == 5 && (!StringArg(env, args[4], sessionKey) || sessionKey.size() > 128)) sessionKey.clear();
+    const uintptr_t id = Begin(modelPath, request, path, waitSeconds, sessionKey);
     napi_value value;
     napi_create_int32(env, static_cast<int32_t>(id), &value);
     return value;
@@ -511,15 +647,28 @@ static napi_value Cancel(napi_env env, napi_callback_info info)
     return value;
 }
 
+static napi_value CloseSessionJs(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::string key;
+    if (argc == 1 && StringArg(env, args[0], key) && !key.empty()) CloseSession(key);
+    napi_value value;
+    napi_get_undefined(env, &value);
+    return value;
+}
+
 static napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor properties[] = {
         {"start", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeEvents", nullptr, TakeEvents, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"complete", nullptr, Complete, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr}
+        {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"closeSession", nullptr, CloseSessionJs, nullptr, nullptr, nullptr, napi_default, nullptr}
     };
-    napi_define_properties(env, exports, 4, properties);
+    napi_define_properties(env, exports, 5, properties);
     return exports;
 }
 static napi_module module = {1, 0, nullptr, Init, "gewu_probe", nullptr, {0}};

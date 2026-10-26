@@ -11,6 +11,7 @@ const kits = {
 // 模型发现由 llm/ModelRegistry 提供并有专项测试；这里用可变状态验证委托语义。
 let registryDirs = [];
 let unionCaps = [];
+let registryTier = 0;
 const context = {
   exports: {}, Error, Map, Math, Number, Date,
   require(name) {
@@ -30,8 +31,9 @@ const context = {
     }
     if (name === '../llm/ModelRegistry') {
       return {
-        readyModelDirs: () => registryDirs.slice(),
-        deviceCapabilities: () => unionCaps.slice()
+        activeModelDirs: () => registryDirs.slice(),
+        deviceCapabilities: () => unionCaps.slice(),
+        deviceTier: () => registryTier
       };
     }
     return {};
@@ -39,7 +41,7 @@ const context = {
 };
 vm.runInNewContext(transpile(__dirname + '/DeviceInfo.ets'), context);
 const { DEVICE_INFO_POLL_MS, sampleMemory, formatHeat, thermalLabel, toDeviceInfoReply, formatComputeStatus,
-  buildSelfEntry, deployedCapabilities, deployedModelName } = context.exports;
+  buildSelfEntry, deployedCapabilities, deployedModelName, applyDeviceInfo } = context.exports;
 assert.equal(DEVICE_INFO_POLL_MS, 2000);
 assert.equal(thermalLabel(0), '清凉');
 assert.equal(thermalLabel(2), '温热');
@@ -73,7 +75,30 @@ assert.equal(buildSelfEntry('/app', 0, '本机', 'self').model, 'Qwen2.5-7B-Inst
 assert.equal(deployedCapabilities('/app').join(','), 'text');
 registryDirs = ['Qwen2.5-7B-Instruct-Q4_N_0', 'Qwen2.5-VL-7B-Q4_N_0'];
 unionCaps = ['text', 'vision'];
-assert.equal(deployedModelName('/app'), 'Qwen2.5-7B-Instruct-Q4_N_0', 'display model is the first ready dir');
+assert.equal(deployedModelName('/app'), registryDirs.join(' / '), 'display includes all active models');
 assert.equal(buildSelfEntry('/app', 0, '本机', 'self').capabilities.join(','), 'text,vision',
   'device capability is the union across deployed models');
-console.log('PASS: thermal/battery/CPU sampling, heat label, deviceInfo reply fields, registry delegation');
+registryDirs = ['A'.repeat(100), 'B'.repeat(100)];
+assert.equal(deployedModelName('/app').length, 128, 'multiple model names stay within the deviceInfo wire limit');
+// 档位上报：无模型省略字段；有声明带上；reply 透传；applyDeviceInfo 只拷合法值（旧构建的 3 归一为 2）
+assert.equal(buildSelfEntry('/app', 0, '本机', 'self').modelTier, undefined,
+  'no ready model omits modelTier (old-peer semantics)');
+registryTier = 2;
+assert.equal(buildSelfEntry('/app', 0, '本机', 'self').modelTier, 2);
+assert.equal(toDeviceInfoReply('info-2', buildSelfEntry('/app', 0, '本机', 'self')).modelTier, 2,
+  'deviceInfo reply carries the declared tier');
+registryTier = 0;
+assert.equal(toDeviceInfoReply('info-3', buildSelfEntry('/app', 0, '本机', 'self')).modelTier, undefined,
+  'reply omits the field when undeclared');
+const peer = { role: 'compute', capabilities: [] };
+applyDeviceInfo(peer, { modelTier: 2 });
+assert.equal(peer.modelTier, 2);
+applyDeviceInfo(peer, { modelTier: 3 });
+assert.equal(peer.modelTier, 2, 'legacy 3 from an old build normalizes to strong 2');
+applyDeviceInfo(peer, { modelTier: 1 });
+assert.equal(peer.modelTier, 1);
+for (const bad of [5, 0, '3', 2.5]) {
+  applyDeviceInfo(peer, { modelTier: bad });
+  assert.equal(peer.modelTier, 1, 'out-of-range modelTier is ignored: ' + JSON.stringify(bad));
+}
+console.log('PASS: thermal/battery/CPU sampling, heat label, deviceInfo reply fields, registry delegation, tier reporting');

@@ -30,7 +30,7 @@ const action=(name,input)=>'Action: '+name+'['+JSON.stringify(input)+']';
 const manifest=specs=>'Plan: '+JSON.stringify({requirements:specs});
 async function run(registry,task,responses,options={}){const prompts=[],events=[],contexts=[];let index=0;
  const model={complete:async(prompt,context)=>{prompts.push(prompt);contexts.push(context);options.onModelPrompt?.(prompt);const value=responses[Math.min(index++,responses.length-1)];if(value instanceof Error)throw value;return value;},cancel:()=>options.onModelCancel?.()};
- const runner=new ReActAgentRunner(model,registry,options.steps||12,undefined,false,false,false,()=>options.budget||32768,options.taskContracts===true,options.finalReview===true);
+ const runner=new ReActAgentRunner(model,registry,options.steps||12,undefined,false,false,options.compact===true,()=>options.budget||32768,options.taskContracts===true,options.finalReview===true);
  options.onRunner?.(runner);await runner.run(task,event=>{events.push(event);options.onEvent?.(event,runner);},options.conversation);
  return{events,prompts,contexts,final:events.filter(e=>e.kind===K.FINAL).map(e=>e.text).join('\n')};}
 const tests=[];const test=(name,body)=>tests.push({name,body});
@@ -232,20 +232,35 @@ test('validated result synthesis preserves additional writing after dependent ca
  const b=await run(books,'Use new.books to read A',[action('new.books',{isbn:'A'}),'Final: Edition A']);assert.equal(b.final,'Edition A');
 });
 const taskContract=load('agent/TaskContract.ets');
-test('final review is a generic evidence phase with no replayed action and preserves extra deliverables',async()=>{
+test('valid synthesis covers extra deliverables in two model calls without an unconditional review',async()=>{
  for(const task of ['读取资料并解释结论，再写一首诗','先核对数据，我还想知道建议的规模和理由']){
-  const r=await run(probes('arbitrary.lookup'),task,[action('arbitrary.lookup',{key:'A'}),'Final: value 10','Final: value 10. 建议规模为两组，理由是易于比较。云随风起。'],{finalReview:true});
-  assert.equal(r.prompts.length,3);assert.equal(r.events.filter(e=>e.kind===K.ACTION).length,1);assert.match(r.final,/两组/);assert.match(r.final,/云随风起/);
-  assert.match(r.prompts[2],/Final review phase/);assert.match(r.prompts[2],new RegExp(task));assert.match(r.prompts[2],/调用：call-1/);assert.ok(!r.prompts[2].includes(action('arbitrary.lookup',{key:'A'})));
+  const r=await run(probes('arbitrary.lookup'),task,[action('arbitrary.lookup',{key:'A'}),'Final: value 10. 建议规模为两组，理由是易于比较。云随风起。',new Error('an unnecessary third call')],{finalReview:true});
+  assert.equal(r.prompts.length,2);assert.equal(r.events.filter(e=>e.kind===K.ACTION).length,1);assert.match(r.final,/两组/);assert.match(r.final,/云随风起/);
+  assert.match(r.prompts[1],new RegExp(task));assert.match(r.prompts[1],/Call call-1/);assert.match(r.prompts[1],/quantities|quantity/);assert.ok(!r.prompts[1].includes(action('arbitrary.lookup',{key:'A'})));
  }
 });
-test('review cannot execute another tool or repeatedly request a new review',async()=>{
- const r=await run(probes(),'读取结果',[action('probe',{key:'A'}),'Final: value 10',action('probe',{key:'B'})],{finalReview:true});
- assert.equal(r.prompts.length,3);assert.equal(r.events.filter(e=>e.kind===K.ACTION).length,1);assert.match(r.final,/value 10/);assert.match(r.final,/最终复核未完成/);
+function editionRegistry(){const registry=new ToolRegistry();registry.register(fixture('edition.lookup',async()=>({...typed({isbn:'A',title:'Edition A'}),displayText:'Edition A'}),bookContract()),policy);return registry;}
+
+test('synthesis and conditional review retain executed inputs and concrete issues without importing a rejected draft',async()=>{
+ for(const name of ['catalog.lookup','renamed.reader']){
+  const registry=new ToolRegistry(),inputs=[];
+  registry.register(fixture(name,async input=>{inputs.push(input);return typed({isbn:'A',title:'Edition A'});},
+   {...bookContract(),prepareInput:()=>JSON.stringify({isbn:'A'})}),policy);
+  const r=await run(registry,'使用'+name+'读取目标资料',[action(name,{isbn:'B'}),'Final: REJECTED_DRAFT Edition B','Final: Edition A'],{compact:true,finalReview:true});
+  assert.deepEqual(inputs,['{"isbn":"A"}']);assert.equal(r.prompts.length,3);assert.equal(r.final,'Edition A');
+  assert.match(r.prompts[1],/Executed input: \{"isbn":"A"\}/);
+  assert.match(r.prompts[2],/执行输入（数据）：\{"isbn":"A"\}/);
+  assert.match(r.prompts[2],/待修正问题（数据）：\n\["[^\n]+"\]/);
+  assert.doesNotMatch(r.prompts[2],/REJECTED_DRAFT|Edition B|"isbn":"B"/);
+ }
 });
-test('review transport failure preserves a fact-validated draft and reports incomplete review',async()=>{
- const r=await run(probes(),'读取结果',[action('probe',{key:'A'}),'Final: value 10',new Error('review offline')],{finalReview:true});
- assert.equal(r.prompts.length,3);assert.match(r.final,/value 10/);assert.match(r.final,/review offline/);assert.doesNotMatch(r.final,/工具.*失败/);
+test('conditional repair cannot execute another tool or repeatedly request a new review',async()=>{
+ const r=await run(editionRegistry(),'使用edition.lookup读取A',[action('edition.lookup',{isbn:'A'}),'Final: Edition B',action('edition.lookup',{isbn:'B'})],{finalReview:true});
+ assert.equal(r.prompts.length,3);assert.equal(r.events.filter(e=>e.kind===K.ACTION).length,1);assert.match(r.final,/Edition A/);assert.doesNotMatch(r.final,/Edition B/);
+});
+test('conditional repair transport failure preserves real tool evidence rather than an invalid draft',async()=>{
+ const r=await run(editionRegistry(),'使用edition.lookup读取A',[action('edition.lookup',{isbn:'A'}),'Final: Edition B',new Error('review offline')],{finalReview:true});
+ assert.equal(r.prompts.length,3);assert.match(r.final,/Edition A/);assert.doesNotMatch(r.final,/Edition B|工具.*失败/);
 });
 test('review cannot override owner evidence validation and never loops over unsupported facts',async()=>{
  const registry=new ToolRegistry();registry.register(fixture('edition.lookup',async()=>({...typed({isbn:'A',title:'Edition A'}),displayText:'Edition A'}),bookContract()),policy);
@@ -253,7 +268,7 @@ test('review cannot override owner evidence validation and never loops over unsu
  assert.equal(r.prompts.length,3);assert.match(r.final,/Edition A/);assert.doesNotMatch(r.final,/Edition B/);assert.equal(r.events.filter(e=>e.kind===K.ACTION).length,1);
 });
 test('review cancellation publishes neither draft nor late final',async()=>{
- let runner;const r=await run(probes(),'读取结果',[action('probe',{key:'A'}),'Final: value 10','Final: late value 10'],{finalReview:true,onRunner:x=>runner=x,onModelPrompt:p=>{if(p.includes('Final review phase'))runner.requestStop();}});
+ let runner;const r=await run(editionRegistry(),'使用edition.lookup读取A',[action('edition.lookup',{isbn:'A'}),'Final: Edition B','Final: late Edition A'],{finalReview:true,onRunner:x=>runner=x,onModelPrompt:p=>{if(p.includes('Final review phase'))runner.requestStop();}});
  assert.equal(r.prompts.length,3);assert.equal(r.events.filter(e=>e.kind===K.FINAL).length,0);assert.ok(r.events.some(e=>e.kind===K.ERROR&&/已停止/.test(e.text)));
 });
 test('rail adapter preserves requested category across routes without changing ambiguous calls',()=>{
@@ -298,9 +313,9 @@ test('list numbering is presentation rather than a numeric fact and cannot satis
 });
 test('final composition isolates prior answers in both prompt and model context while execution retains references',async()=>{
  const conversation={isEmpty:()=>false,toChatMessages:()=>[{role:'user',content:'Previous context: object A'},{role:'assistant',content:'STALE_ANSWER value 99'}]};
- const r=await run(probes(),'Read that object and explain the current result',[action('probe',{key:'A'}),'Final: value 10','Final: current value 10'],{conversation,finalReview:true});
- assert.equal(r.prompts.length,3);assert.match(r.prompts[0],/STALE_ANSWER/);assert.equal(r.contexts[0],conversation);
- assert.doesNotMatch(r.prompts[2],/STALE_ANSWER|99/);assert.equal(r.contexts[2],undefined);assert.match(r.prompts[2],/value: 10/);assert.match(r.final,/current value 10/);
+ const r=await run(probes(),'Read that object and explain the current result',[action('probe',{key:'A'}),'Final: current value 10'],{conversation,finalReview:true});
+ assert.equal(r.prompts.length,2);assert.match(r.prompts[0],/STALE_ANSWER/);assert.equal(r.contexts[0],conversation);
+ assert.doesNotMatch(r.prompts[1],/STALE_ANSWER|99/);assert.equal(r.contexts[1],undefined);assert.match(r.prompts[1],/value: 10/);assert.match(r.final,/current value 10/);
 });
 test('preparation receives immutable original task context independently of requirement recognizers',async()=>{
  let received;const registry=new ToolRegistry();registry.register(fixture('arbitrary.input',async()=> 'ok',{
@@ -326,7 +341,8 @@ test('partial evidence for a new request drops past answers but still permits mi
  const context={isEmpty:()=>false,toChatMessages:()=>[{role:'user',content:'old request'},{role:'assistant',content:'OLD_UNSUPPORTED_FACT 99'}]};
  const r=await run(probes(),'Read two new independent objects',[action('probe',{key:'A'}),action('probe',{key:'B'}),'Final: value 10 and value 20'],{conversation:context});
  assert.match(r.prompts[0],/OLD_UNSUPPORTED_FACT/);assert.doesNotMatch(r.prompts[1],/OLD_UNSUPPORTED_FACT/);assert.equal(r.contexts[1],undefined);
- assert.match(r.prompts[1],/including independent queries/);assert.equal(r.events.filter(e=>e.kind===K.ACTION).length,2);
+ assert.deepEqual(r.events.filter(e=>e.kind===K.ACTION).map(e=>JSON.parse(e.input).key),['A','B']);
+ assert.equal(r.final,'value 10 and value 20');
 });
 test('ordinary callers default to text ReAct without requiring a task-goal protocol',async()=>{
  const registry=new ToolRegistry(),prompts=[],events=[];
@@ -449,10 +465,10 @@ test('actual ReAct workers isolate call IDs reuse dependency evidence and aggreg
  const workers=['cpu-a','cpu-b'].map(id=>new ReActTaskWorker(id,1,async req=>{
   const registry=probes(),isDerived=req.subtaskId==='c';let step=0;
   const proof=isDerived?req.dependencies[0].evidence[0].callId:req.attemptId+'/call-1';
-  const model={complete:async()=>{calls++;if(!isDerived&&step++===0)return action('probe',{key:req.subtaskId==='a'?'A':'B'});return final([answer(req.goals[0].id,{[req.goals[0].fields[0]]:isDerived?'derived 2':req.subtaskId==='a'?10:20},[proof])]);}};
+  const model={complete:async prompt=>{calls++;if(isDerived){const input=req.dependencies[0].evidence[0].input;assert.equal(typeof input,'string');assert.ok(prompt.includes(JSON.stringify(input)));}if(!isDerived&&step++===0)return action('probe',{key:req.subtaskId==='a'?'A':'B'});return final([answer(req.goals[0].id,{[req.goals[0].fields[0]]:isDerived?'derived 2':req.subtaskId==='a'?10:20},[proof])]);}};
   return{model,tools:registry,prompt:'Execute assigned goals',maxPromptBytes:()=>32768};
  },()=>true));
- const modelAggregator=new ModelTaskAggregator({complete:async prompt=>{aggregateCalls++;assert.match(prompt,/Aggregation phase ONLY/);return final([answer('a',{'值':10},['actual/a/1-1/call-1']),answer('b',{'值':20},['actual/b/1-2/call-1']),answer('c',{'建议':'derived 2'},['actual/a/1-1/call-1'])]);}});
+ const modelAggregator=new ModelTaskAggregator({complete:async prompt=>{aggregateCalls++;assert.match(prompt,/Aggregation phase ONLY/);assert.ok(prompt.includes(JSON.stringify('{"key":"A"}')));return final([answer('a',{'值':10},['actual/a/1-1/call-1']),answer('b',{'值':20},['actual/b/1-2/call-1']),answer('c',{'建议':'derived 2'},['actual/a/1-1/call-1'])]);}});
  const r=await new TaskCoordinator(2).run('actual',g,workers,()=>true,modelAggregator);assert.equal(r.status,'success');assert.equal(calls,5);assert.equal(aggregateCalls,1);assert.equal(r.results[2].evidence.length,0);assert.match(r.answer,/推导建议/);
 });
 test('coordinator and task contract modules contain no built-in domain rules',()=>{
@@ -511,4 +527,118 @@ test('worker pending factory reserves capacity cancellation wins and stale depen
  open({tools:probes(),prompt:'task',maxPromptBytes:()=>32768,model:{complete:async()=>{modelCalls++;return final([]);},cancel:()=>{}}});const r=await pending;assert.equal(r.status,'cancelled');assert.equal(modelCalls,0);assert.equal(worker.supports(req),true);
  await assert.rejects(worker.execute({...req,dependencies:[{taskId:'other',status:'success',evidence:[]}]}),/another task/);
 });
+test('compact prompts retain input schemas and permission text while removing examples and duplicate evidence schemas',async()=>{
+ const registry=new ToolRegistry(),declaration=bookContract();let executions=0;
+ registry.register({name:()=>'edition.lookup',description:()=>'Read only; never send or modify files without confirmation.',contract:()=>declaration,
+  run:async()=>{executions++;return typed({isbn:'A',title:'Edition A'});}},policy);
+ const responses=[action('edition.lookup',{isbn:'A'}),'Final: Edition A'];
+ const full=await run(registry,'Use edition.lookup to read A',responses,{finalReview:true});
+ const compact=await run(registry,'Use edition.lookup to read A',responses,{compact:true,finalReview:true});
+ assert.equal(compact.prompts.length,2);assert.equal(executions,2);assert.equal(compact.final,'Edition A');
+ assert(compact.prompts[0].length<full.prompts[0].length*0.8);
+ assert(compact.prompts[0].includes(JSON.stringify(declaration.inputSchema)));
+ assert.match(compact.prompts[0],/never send or modify files without confirmation/);
+ assert.doesNotMatch(compact.prompts[0],/Example 1|Answer evidence:/);
+ assert.match(compact.prompts[1],/Edition A/);
+ const invalid=await run(registry,'Use edition.lookup to read A',[action('edition.lookup',{}),...responses],{compact:true,finalReview:true});
+ assert.equal(executions,3,'invalid compact input was rejected before the provider ran');assert.equal(invalid.final,'Edition A');
+});
+
+test('absolute Agent deadline does not start expired work and cancels an unresponsive model without late tool execution',async()=>{
+ let calls=0,cancels=0,release;const events=[];const registry=probes();
+ const model={complete:()=>{calls++;return new Promise(resolve=>release=resolve);},cancel(){cancels++;}};
+ const expired=new ReActAgentRunner(model,registry,10);
+ await expired.run('read A',event=>events.push(event),undefined,{namespace:'expired',goals:[],evidence:[],deadlineAt:Date.now()-1});
+ assert.equal(calls,0);assert.match(events[0].text,/总时限/);
+ events.length=0;
+ const runner=new ReActAgentRunner(model,registry,10);
+ await runner.run('read A',event=>events.push(event),undefined,{namespace:'bounded',goals:[],evidence:[],deadlineAt:Date.now()+40});
+ assert.equal(calls,1);assert.equal(cancels,1);assert.equal(events.length,1);assert.match(events[0].text,/总时限/);
+ release(action('probe',{key:'A'}));await tick();await tick();
+ assert.equal(events.length,1);assert.equal(calls,1,'late model completion cannot start another round');
+});
+
+test('Agent timeout returns completed evidence when synthesis ignores cancellation and suppresses a late answer',async()=>{
+ let calls=0,release,cancels=0;const events=[];
+ const model={complete:async()=>{calls++;if(calls===1)return action('probe',{key:'A'});return new Promise(resolve=>release=resolve);},cancel(){cancels++;}};
+ const runner=new ReActAgentRunner(model,probes(),10,undefined,false,false,true,()=>32768,false,true);
+ await runner.run('Read A and explain it',event=>events.push(event),undefined,{namespace:'timeout',goals:[],evidence:[],deadlineAt:Date.now()+60});
+ const terminal=events.at(-1);assert.equal(terminal.kind,K.FINAL);assert.equal(terminal.status,'partial');assert.match(terminal.text,/总时限|value 10/);assert.match(terminal.text,/value: 10/);assert.equal(cancels,1);
+ const count=events.length;release('Final: late value 10');await tick();await tick();assert.equal(events.length,count);
+});
+
+test('a parallel batch publishes and retains each finished call before a slower sibling and starts synthesis only after all settle',async()=>{
+ const registry=new ToolRegistry(),events=[],prompts=[];let releaseSlow;
+ const declaration={version:'1',inputFormat:'json'};
+ registry.register(fixture('source.quick',async()=>({...typed({value:10}),displayText:'value: 10'}),declaration),policy);
+ registry.register(fixture('source.slow',()=>new Promise(resolve=>releaseSlow=resolve),declaration),policy);
+ const model={complete:async prompt=>{prompts.push(prompt);return prompts.length===1?'Execution: parallel\n'+action('source.slow',{})+'\n'+action('source.quick',{}):'Final: values 10 and 20';}};
+ const runner=new ReActAgentRunner(model,registry,6),job=runner.run('Read two independent sources',event=>events.push(event));
+ await tick();await tick();
+ const before={evidence:runner.getEvidence(),observations:events.filter(e=>e.kind===K.OBSERVATION),modelCalls:prompts.length};
+ releaseSlow({...typed({value:20}),displayText:'value: 20'});await job;
+ assert.equal(before.evidence.length,1);assert.equal(before.evidence[0].tool,'source.quick');assert.equal(before.evidence[0].input,'{}');
+ assert.equal(before.evidence[0].callId,'call-2','completion order cannot reassign a result to a different invocation');
+ assert.equal(before.observations.length,1);assert.equal(before.modelCalls,1,'no synthesis while another batch member is still running');
+ assert.equal(prompts.length,2);assert.equal(runner.getEvidence().length,2);assert.equal(events.filter(e=>e.kind===K.FINAL).length,1);
+ assert.match(prompts[1],/value.*10/);assert.match(prompts[1],/value.*20/);
+});
+
+test('whole-task timeout preserves a completed parallel result even when another tool ignores cancellation',async()=>{
+ const registry=new ToolRegistry(),events=[];let releaseSlow,cancels=0;
+ registry.register(fixture('source.quick',async()=>({...typed({value:10}),displayText:'value: 10'}),{version:'1',inputFormat:'json'}),policy);
+ registry.register(fixture('source.slow',()=>new Promise(resolve=>releaseSlow=resolve),{version:'1',inputFormat:'json'}),policy);
+ const runner=new ReActAgentRunner({complete:async()=> 'Execution: parallel\n'+action('source.quick',{})+'\n'+action('source.slow',{}),cancel(){cancels++;}},registry,6);
+ await runner.run('Read independent sources',event=>events.push(event),undefined,{namespace:'batch',goals:[],evidence:[],deadlineAt:Date.now()+60});
+ const terminal=events.at(-1);assert.equal(terminal.kind,K.FINAL);assert.equal(terminal.status,'partial');assert.match(terminal.text,/10/);
+ assert.equal(runner.getEvidence().length,1);assert.equal(cancels,1);
+ const count=events.length;releaseSlow(typed({value:20}));await tick();await tick();
+ assert.equal(events.length,count);assert.equal(runner.getEvidence().length,1);
+});
+
+test('stopping on a serial result prevents the next authorized side effect in the same model batch',async()=>{
+ const registry=new ToolRegistry(),executed=[],events=[];
+ for(const name of ['first.change','next.change'])registry.register(fixture(name,async()=>{executed.push(name);return 'completed '+name;},{version:'1',inputFormat:'json'}));
+ const runner=new ReActAgentRunner({complete:async()=> 'Execution: serial\n'+action('first.change',{})+'\n'+action('next.change',{})},registry,6);
+ await runner.run('Execute the two authorized changes',event=>{events.push(event);if(event.kind===K.OBSERVATION)runner.requestStop();});
+ assert.deepEqual(executed,['first.change']);assert.equal(events.filter(e=>e.kind===K.ACTION).length,1);
+ assert.equal(runner.getEvidence().length,1);assert.equal(events.at(-1).kind,K.ERROR);
+});
+
+test('a progress observer failure cancels parallel siblings before returning and ignores their late completions',async()=>{
+ const registry=new ToolRegistry(),events=[];let slowContext,releaseSlow;
+ registry.register(fixture('source.quick',async()=> 'quick result',{version:'1',inputFormat:'json'}),policy);
+ registry.register(fixture('source.slow',(_input,context)=>{slowContext=context;return new Promise(resolve=>releaseSlow=resolve);},{version:'1',inputFormat:'json'}),policy);
+ const runner=new ReActAgentRunner({complete:async()=> 'Execution: parallel\n'+action('source.slow',{})+'\n'+action('source.quick',{})},registry,6);
+ try{
+  await assert.rejects(runner.run('Read independent sources',event=>{events.push(event);if(event.kind===K.OBSERVATION)throw Error('observer closed');}),/observer closed/);
+  assert.equal(slowContext.isCancelled(),true);assert.equal(runner.getEvidence().length,1);
+  const count=events.length;releaseSlow('late result');await tick();await tick();
+  assert.equal(events.length,count);assert.equal(runner.getEvidence().length,1);
+ }finally{await registry.close();}
+});
+
+test('a tool completion past the absolute deadline cannot enter evidence before a delayed timer callback runs',async()=>{
+ const originalNow=Date.now;let now=originalNow(),executions=0;const registry=new ToolRegistry(),events=[];
+ registry.register(fixture('source',async()=>{executions++;now+=100;return 'late result';},{version:'1',inputFormat:'json'}),policy);
+ const runner=new ReActAgentRunner({complete:async()=>action('source',{})},registry,6);
+ try{
+  Date.now=()=>now;
+  await runner.run('Read a source',event=>events.push(event),undefined,{namespace:'clock',goals:[],evidence:[],deadlineAt:now+50});
+ }finally{Date.now=originalNow;}
+ assert.equal(executions,1);assert.equal(runner.getEvidence().length,0);assert.equal(events.filter(e=>e.kind===K.OBSERVATION).length,0);
+ assert.match(events.at(-1).text,/总时限/);
+});
+
+test('a model fulfilled after the deadline cannot dispatch tools before the expired timer callback runs',async()=>{
+ const originalNow=Date.now;let now=originalNow(),executed=0;const events=[];
+ const registry=new ToolRegistry();registry.register(fixture('probe',async()=>{executed++;return 'ok';}),policy);
+ const runner=new ReActAgentRunner({complete:async()=>{now+=100;return action('probe',{key:'A'});}},registry,10);
+ try{
+  Date.now=()=>now;
+  await runner.run('read A',event=>events.push(event),undefined,{namespace:'clock',goals:[],evidence:[],deadlineAt:now+50});
+ }finally{Date.now=originalNow;}
+ assert.equal(executed,0);assert.match(events.at(-1).text,/总时限/);
+});
+
 (async()=>{let passed=0;for(const {name,body}of tests){try{await body();passed++;console.log('PASS '+name);}catch(error){console.error('FAIL '+name+'\n'+error.stack);process.exitCode=1;}}console.log(passed+'/'+tests.length+' actual-registry contract tests passed; controlled providers, no real external writes');})().catch(e=>{console.error(e);process.exitCode=1;});

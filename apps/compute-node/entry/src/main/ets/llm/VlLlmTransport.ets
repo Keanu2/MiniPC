@@ -18,6 +18,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ChatMessage, ChatUpdate } from './LocalChat';
 import { LlmTransport } from './LlmTransport';
 import { QwenVlManager, QwenVlUpdate } from './QwenVlManager';
+import { outputSettings } from './OutputSettings';
 
 const TAG: string = 'VlLlmTransport';
 const DOMAIN: number = 0x0005;
@@ -79,6 +80,7 @@ function controlLineAt(text: string): number {
 }
 
 export class VlLlmTransport implements LlmTransport {
+  private streaming: boolean = true;
   private cacheDir: string;
   private filesDir: string;
   private vlm: QwenVlManager;
@@ -112,6 +114,7 @@ export class VlLlmTransport implements LlmTransport {
       return '图片写入缓存失败，请重试。';
     }
     this.callback = callback;
+    this.streaming = outputSettings(this.filesDir).streaming;
     const ok = this.vlm.start(imagePath, prompt, (u: QwenVlUpdate) => this.toChatUpdate(u));
     if (!ok) {
       this.callback = null;
@@ -249,13 +252,16 @@ export class VlLlmTransport implements LlmTransport {
       return;
     }
     if (u.delta !== undefined) {
-      cb({ kind: 'delta', text: u.delta });
+      if (this.streaming) cb({ kind: 'delta', text: u.delta, metrics: { streaming: true } });
       return;
     }
     if (u.done !== undefined) {
+      if (!this.streaming && !u.error && u.done.length > 0) {
+        cb({ kind: 'delta', text: u.done, metrics: { streaming: false } });
+      }
       const text = u.error !== undefined && u.error.length > 0 ? u.done :
         (u.done + (SOURCE_TAG.length > 0 && u.done.length > 0 ? `\n\n${SOURCE_TAG}` : ''));
-      const update: ChatUpdate = { kind: 'done', text: text };
+      const update: ChatUpdate = { kind: 'done', text: text, metrics: { streaming: this.streaming } };
       if (u.error !== undefined) {
         update.error = u.error;
       }

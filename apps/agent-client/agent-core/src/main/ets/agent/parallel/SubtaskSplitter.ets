@@ -36,16 +36,32 @@ function clip(text: string, max: number): string {
   return value.length <= max ? value : value.substring(0, max);
 }
 
+const SPLIT_INSTRUCTIONS =
+  '# Role\n' +
+  'You split one user request into independent subtasks that can run at the same time.\n\n' +
+  '## Output language\n' +
+  '- The "title" and "task" values must be written in Simplified Chinese.\n\n' +
+  '## Rules\n' +
+  '1. Every subtask must be one complete, self-contained sentence. Replace references such as "this", "that", "above", "it" with the concrete content.\n' +
+  '2. Subtasks must not depend on each other or refer to another subtask result. A part that needs information another part looks up (advice based on the weather, a choice based on a search result) belongs in the same subtask as that lookup; never split it out.\n' +
+  '3. If the request contains only one thing, or the parts depend on each other in order, output [].\n' +
+  '4. At most ' + MAX_SUBTASKS.toString() + ' subtasks. Do not omit anything the user asked for and do not add anything the user did not ask for.\n\n' +
+  '## Output format\n' +
+  'Output exactly one JSON array and nothing else: [{"title":"short title","task":"complete subtask"}]\n\n' +
+  '## Examples\n' +
+  'Request: 查一下明天北京的天气，再查一下华为北京研究所在哪里\n' +
+  'Output: [{"title":"北京天气","task":"查询明天北京的天气情况"},{"title":"研究所位置","task":"查询华为北京研究所的具体位置"}]\n\n' +
+  'Request: 查一下上海周末的天气适合穿什么，再查一下故宫的开放时间\n' +
+  'Output: [{"title":"上海天气与穿衣","task":"查询上海周末的天气，并根据天气建议穿什么"},{"title":"故宫开放时间","task":"查询故宫的开放时间"}]\n\n' +
+  'Request: 先查明天深圳到北京的高铁，再根据到达时间推荐酒店\n' +
+  'Output: []\n\n' +
+  'Request: 你好\n' +
+  'Output: []\n\n';
+
 export function buildSplitPrompt(task: string, context: string): string {
-  return '把用户请求拆成互相独立、可以同时进行的子任务。\n' +
-    '规则：\n' +
-    '1. 每个子任务必须自成一句完整的话，把“这个/那个/上面/它”等指代替换成具体内容。\n' +
-    '2. 子任务之间不能互相依赖，也不能引用其他子任务的结果。\n' +
-    '3. 请求只有一件事、或子任务之间有先后依赖时，输出 []。\n' +
-    '4. 最多 ' + MAX_SUBTASKS.toString() + ' 个，不要遗漏用户要求的任何一项，也不要添加用户没有要求的事。\n' +
-    '只输出一个 JSON 数组，不要任何解释：[{"title":"简短标题","task":"完整的子任务"}]\n' +
-    (context.length > 0 ? '最近的对话（仅用于展开指代）：\n' + clip(context, MAX_CONTEXT_CHARS) + '\n' : '') +
-    '用户请求：\n' + task.trim();
+  return SPLIT_INSTRUCTIONS +
+    (context.length > 0 ? '## Recent conversation (only for resolving references)\n' + clip(context, MAX_CONTEXT_CHARS) + '\n\n' : '') +
+    '## User request\n' + task.trim();
 }
 
 /** Strict parse: anything doubtful returns null so the caller keeps the single-device path. */

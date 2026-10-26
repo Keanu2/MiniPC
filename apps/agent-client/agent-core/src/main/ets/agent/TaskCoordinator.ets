@@ -188,7 +188,7 @@ export class TaskCoordinator {
               if (seen.indexOf(dependent.id) < 0 && dependent.dependsOn.some((id: string): boolean => seen.indexOf(id) >= 0)) { seen.push(dependent.id); accessible.push(...dependent.goalIds); }
             }
           }
-          evidence.push({ callId: item.callId, tool: item.tool, status: item.status, output: item.output, facts: item.facts,
+          evidence.push({ callId: item.callId, tool: item.tool, status: item.status, output: item.output, facts: item.facts, input: item.input,
             goalIds: graph.goals.filter((goal: TaskGoal): boolean => accessible.indexOf(goal.id) >= 0 && goal.tools.indexOf(item.tool) >= 0).map((goal: TaskGoal): string => goal.id) });
         }
         if (result.status !== 'success') {

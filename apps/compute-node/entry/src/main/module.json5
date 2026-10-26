@@ -11,6 +11,7 @@
     "requestPermissions": [
       { "name": "ohos.permission.INTERNET" },
       { "name": "ohos.permission.GET_NETWORK_INFO" },
+      { "name": "ohos.permission.KEEP_BACKGROUND_RUNNING" },
       { "name": "ohos.permission.SET_NETWORK_INFO" },
       {
         "name": "ohos.permission.DISTRIBUTED_DATASYNC",
@@ -30,6 +31,7 @@
     ],
     "abilities": [{
       "name": "EntryAbility",
+      "backgroundModes": ["multiDeviceConnection"],
       "srcEntry": "./ets/entryability/EntryAbility.ets",
       "icon": "$media:app_icon",
       "label": "$string:EntryAbility_label",

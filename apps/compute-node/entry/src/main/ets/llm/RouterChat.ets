@@ -104,6 +104,8 @@ export class RouterChat implements ChatBackend {
     return this.local.readinessError();
   }
 
+  hasPendingNativeJobs(): boolean { return this.local.hasPendingNativeJobs(); }
+
   start(messages: ChatMessage[], callback: (update: ChatUpdate) => void, requestId: string = '',
     options: ChatStartOptions = {}): string {
     if (this.closed) return '模型服务已关闭。';

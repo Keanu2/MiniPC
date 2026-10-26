@@ -1,5 +1,19 @@
 import { util } from '@kit.ArkTS';
 
+/** Engine-reported durations are separate from the caller's end-to-end clock. */
+export interface InferenceMetrics {
+  streaming: boolean;
+  outputChunks?: number;
+  /** Monotonic durations since native request start, never remote wall clocks. */
+  firstOutputMs?: number;
+  lastOutputMs?: number;
+  modelLoadMs?: number;
+  prefillMs?: number;
+  decodeMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
 export interface ChatMessage { role: string; content: string; }
 /** Capability vocabulary shared by device declarations and request needs. */
 export const CAPABILITY_TAGS: string[] = ['text', 'vision'];
@@ -30,12 +44,52 @@ export interface DeviceInfoEntry {
    * 缺省 = 老对端（v1）未声明，按纯文本处理。
    */
   capabilities?: string[];
+  /**
+   * 部署模型声明的最高强度档位 1-2（1 弱、2 强）；缺省 = 老对端/未部署，消费侧
+   * 按 2（强档）处理。线上容忍旧构建上报的 3，消费侧归一为 2。
+   * 档位是质量偏好：绝不参与 fail closed 判定。
+   */
+  modelTier?: number;
   ready?: boolean;
   slot?: number;
 }
+export interface TaskChildSnapshot {
+  input?: string;
+  activity?: string;
+  id: string;
+  title: string;
+  device: string;
+  phase: string;
+  detail: string;
+  result?: string;
+  resultTruncated?: boolean;
+  startedAt?: number;
+  endedAt?: number;
+}
+
+/** Display-only parent/child state; never used to authorize or schedule work. */
+export interface TaskSnapshot {
+  input?: string;
+  activity?: string;
+  inputTruncated?: boolean;
+  answerTruncated?: boolean;
+  id: string;
+  title: string;
+  phase: string;
+  revision: number;
+  startedAt: number;
+  endedAt: number;
+  subtasks: TaskChildSnapshot[];
+  answer: string;
+}
+
 export interface WireMessage {
+  metrics?: InferenceMetrics;
   protocol?: string;
   type: string;
+  taskId?: string;
+  subtaskId?: string;
+  task?: TaskSnapshot;
   requestId?: string;
   messages?: ChatMessage[];
   text?: string;
@@ -56,6 +110,8 @@ export interface WireMessage {
   model?: string;
   modelRequests?: number;
   capabilities?: string[];
+  /** 部署模型声明的最高强度档位 1-3；仅 deviceInfo 声明携带，消费侧缺省按 2。 */
+  modelTier?: number;
   /** Capabilities a request needs; routing fails closed when no device has them. */
   needs?: string[];
   /** 本次请求携带的 JPEG 图片，裸 base64（无 data: 前缀）；带图请求必须需要 vision。 */
@@ -154,6 +210,15 @@ function validCapabilities(value: string[] | undefined, max: number): boolean {
   return true;
 }
 
+/**
+ * 强度档位：undefined（老对端未声明）或整数 1-3（容忍旧构建上报的 3，消费侧归一为 2）。
+ * 档位是质量偏好，只影响选点偏好，绝不构成拒收理由——这里仅拦畸形值。
+ */
+function validModelTier(value: number | undefined): boolean {
+  return value === undefined ||
+    (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 3);
+}
+
 function validDeviceEntry(entry: DeviceInfoEntry): boolean {
   if (entry === null || typeof entry !== 'object') return false;
   return validOptionalString(entry.id, 128) && validOptionalString(entry.deviceUid, 64) &&
@@ -165,6 +230,7 @@ function validDeviceEntry(entry: DeviceInfoEntry): boolean {
     validOptionalString(entry.model, 128) &&
     validOptionalNumber(entry.modelRequests) &&
     validCapabilities(entry.capabilities, 8) &&
+    validModelTier(entry.modelTier) &&
     (entry.ready === undefined || typeof entry.ready === 'boolean') &&
     (entry.slot === undefined || (Number.isInteger(entry.slot) && entry.slot >= 1 && entry.slot <= 64));
 }
@@ -175,6 +241,7 @@ function validDeviceInfo(m: WireMessage): boolean {
     validOptionalNumber(m.memUsage) && validOptionalNumber(m.thermalLevel) &&
     validOptionalNumber(m.batteryTemp) && validOptionalNumber(m.cpuUsage) &&
     validOptionalNumber(m.modelRequests) && validCapabilities(m.capabilities, 8) &&
+    validModelTier(m.modelTier) &&
     (m.peerRole === undefined || m.peerRole === 'compute' || m.peerRole === 'chat');
 }
 
@@ -186,9 +253,26 @@ function validDeviceInfoSync(m: WireMessage): boolean {
   return true;
 }
 
+function metricNumber(value: number | undefined, integer: boolean = false): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0 &&
+    (!integer || Number.isSafeInteger(value)));
+}
+
+function validInferenceMetrics(metrics: InferenceMetrics | undefined): boolean {
+  return metrics === undefined || (metrics !== null && typeof metrics === 'object' &&
+    typeof metrics.streaming === 'boolean' && metricNumber(metrics.modelLoadMs) &&
+    metricNumber(metrics.outputChunks, true) && metricNumber(metrics.firstOutputMs) &&
+    metricNumber(metrics.lastOutputMs) &&
+    metricNumber(metrics.outputChunks, true) && metricNumber(metrics.firstOutputMs) &&
+    metricNumber(metrics.lastOutputMs) &&
+    metricNumber(metrics.prefillMs) && metricNumber(metrics.decodeMs) &&
+    metricNumber(metrics.promptTokens, true) && metricNumber(metrics.completionTokens, true));
+}
+
 // Validate before forwarding anything to the model or UI.
 export function validMessage(m: WireMessage): boolean {
   if (m === null || typeof m !== 'object' || m.protocol !== PROTOCOL || typeof m.type !== 'string') return false;
+  if (!validInferenceMetrics(m.metrics)) return false;
   if (['hello', 'hello_ack'].includes(m.type)) {
     if (m.peerRole !== undefined && m.peerRole !== 'compute' && m.peerRole !== 'chat') return false;
     if (!validOptionalString(m.name, 128)) return false;
@@ -234,18 +318,57 @@ export function validMessage(m: WireMessage): boolean {
 const CHUNK_BYTES = 480;
 const MAX_PARTS = Math.ceil(MAX_FRAME / CHUNK_BYTES);
 const MAX_PENDING = 8;
+// Only NEW fragments renew the idle budget. Keep an absolute bound against drip feeds.
 const FRAGMENT_TIMEOUT = 15000;
+const FRAGMENT_MAX_DURATION = 120000;
 interface Fragment { version: number; id: string; index: number; count: number; data: string; }
 class PendingMessage {
   created: number = Date.now();
+  progressed: number = this.created;
   count: number;
   bytes: number = 0;
   parts: Map<number, Uint8Array> = new Map();
   constructor(count: number) { this.count = count; }
 }
 
+export function validTaskSnapshot(task: TaskSnapshot): boolean {
+  if (task === null || typeof task !== 'object' || !/^[A-Za-z0-9_-]{1,64}$/.test(task.id) ||
+    typeof task.id !== 'string' || typeof task.title !== 'string' || task.title.length === 0 || task.title.length > 1000 ||
+    !['running', 'merging', 'done', 'partial', 'failed', 'cancelled'].includes(task.phase) ||
+    !Number.isSafeInteger(task.revision) || task.revision < 1 ||
+    !Number.isSafeInteger(task.startedAt) || task.startedAt < 1 || !Number.isSafeInteger(task.endedAt) || task.endedAt < 0 ||
+    typeof task.answer !== 'string' || task.answer.length > 4096 ||
+    !validOptionalString(task.input, 32768) || !validOptionalString(task.activity, 2048) ||
+    (task.inputTruncated !== undefined && typeof task.inputTruncated !== 'boolean') ||
+    (task.answerTruncated !== undefined && typeof task.answerTruncated !== 'boolean') ||
+    !Array.isArray(task.subtasks) || task.subtasks.length === 1 || task.subtasks.length > 4) return false;
+  const terminal = ['done', 'partial', 'failed', 'cancelled'].includes(task.phase);
+  if (terminal ? task.endedAt < task.startedAt : task.endedAt !== 0) return false;
+  const ids: string[] = [];
+  for (const child of task.subtasks) {
+    if (child === null || typeof child !== 'object' || typeof child.id !== 'string' ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(child.id) || ids.includes(child.id) ||
+      typeof child.title !== 'string' || child.title.length === 0 || child.title.length > 160 ||
+      typeof child.device !== 'string' || (child.device !== '' && !/^算力设备[1-9][0-9]*$/.test(child.device)) ||
+      !['queued', 'running', 'done', 'partial', 'failed', 'cancelled'].includes(child.phase) ||
+      typeof child.detail !== 'string' || child.detail.length > 256 ||
+      !validOptionalString(child.input, 500) || !validOptionalString(child.activity, 1024) || !validOptionalString(child.result, 2048) ||
+      (child.resultTruncated !== undefined && typeof child.resultTruncated !== 'boolean') ||
+      (child.startedAt !== undefined && (!Number.isSafeInteger(child.startedAt) || child.startedAt < 0)) ||
+      (child.endedAt !== undefined && (!Number.isSafeInteger(child.endedAt) || child.endedAt < 0))) return false;
+    ids.push(child.id);
+  }
+  return task.phase !== 'done' || task.subtasks.every((child: TaskChildSnapshot): boolean => child.phase === 'done');
+}
+
 function validInference(m: WireMessage): boolean {
   if (m.version !== undefined && m.version !== 2) return false;
+  if (!validOptionalString(m.origin, 64)) return false;
+  if ((m.taskId === undefined) !== (m.subtaskId === undefined)) return false;
+  if (m.taskId !== undefined && (typeof m.taskId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(m.taskId) ||
+    typeof m.subtaskId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(m.subtaskId))) return false;
+  if (m.type === 'infer.task') return m.version === 2 && validTaskSnapshot(m.task as TaskSnapshot) && m.requestId === m.task?.id;
+  if (m.task !== undefined) return false;
   if (typeof m.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(m.requestId)) return false;
   if (m.prompt !== undefined && (typeof m.prompt !== 'string' ||
     new util.TextEncoder().encodeInto(m.prompt).length > 32768)) return false;
@@ -304,7 +427,17 @@ export function encodeMessage(message: WireMessage, id: string): string[] {
   return output;
 }
 
+/** Metadata only: never expose fragment bytes or inference input to diagnostics. */
+export interface FragmentReceipt {
+  id: string; index: number; count: number; received: number; bytes: number;
+  elapsedMs: number; gapMs: number;
+}
+
 export class MessageAssembler {
+  private fragmentObserver: ((receipt: FragmentReceipt) => void) | null = null;
+
+  setFragmentObserver(observer: (receipt: FragmentReceipt) => void): void { this.fragmentObserver = observer; }
+
   private pending: Map<string, PendingMessage> = new Map();
   // Session-local replay window; clear on disconnect. No timers apply to inference.
   private completed: string[] = [];
@@ -313,9 +446,15 @@ export class MessageAssembler {
 
   checkExpiry(): void {
     for (const entry of this.pending) {
-      if (Date.now() - entry[1].created >= FRAGMENT_TIMEOUT) {
+      const pending = entry[1];
+      const age = Date.now() - pending.created;
+      const idle = Date.now() - pending.progressed;
+      if (idle >= FRAGMENT_TIMEOUT || age >= FRAGMENT_MAX_DURATION) {
+        const reason = 'Incomplete chat fragments timed out id=' + entry[0] +
+          ' received=' + pending.parts.size.toString() + '/' + pending.count.toString() +
+          ' bytes=' + pending.bytes.toString() + ' ageMs=' + age.toString() + ' idleMs=' + idle.toString();
         this.clear();
-        throw new Error('Incomplete chat fragments timed out');
+        throw new Error(reason);
       }
     }
   }
@@ -352,8 +491,14 @@ export class MessageAssembler {
       if (new util.Base64Helper().encodeToStringSync(previous) !== fragment.data) throw new Error('Conflicting duplicate fragment');
       return null;
     }
+    const gap = Date.now() - pending.progressed;
     pending.parts.set(fragment.index, bytes);
+    pending.progressed = Date.now();
     pending.bytes += bytes.length;
+    try {
+      this.fragmentObserver?.({ id: fragment.id, index: fragment.index, count: fragment.count,
+        received: pending.parts.size, bytes: pending.bytes, elapsedMs: Date.now() - pending.created, gapMs: gap });
+    } catch (_) { /* Diagnostics must never interrupt delivery. */ }
     if (pending.bytes > MAX_FRAME) throw new Error('Chat message exceeds 64 KiB');
     if (pending.parts.size !== pending.count) return null;
     const joined = new Uint8Array(pending.bytes);

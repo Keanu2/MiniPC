@@ -7,6 +7,8 @@
 | [工具契约](agent-tool-contracts.md) | 工具注册、输入输出、权限、并行和缓存 |
 | [多算力协作](multi-compute.md) | 设备组网、独立子任务并行和推理转发 |
 | [通信协议](protocol.md) | 消息类型、分片、结果校验、预算和错误 |
+| [模型选择](model-selection.md) | 已部署模型、文字/图片能力与切换 |
+| [VL 应用内直连](vl-direct-mode.md) | 私有 VL SDK 的实际执行路径与调试设备权限 |
 | [本地模型接口](local-model.md) | GEWU Native 接口及两种模型适配链路 |
 | [工具与外部集成](integrations.md) | 内置工具、配置模板、Composio 和 ModelScope |
 | [测试](testing.md) | 测试入口、覆盖范围及设备检查 |

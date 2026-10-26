@@ -1,11 +1,11 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ChatMessage as WireChatMessage, ClusterInfo, InferProfile, WireMessage } from '../protocol/ChatProtocol';
+import { ChatMessage as WireChatMessage, ClusterInfo, InferProfile, WireMessage, InferenceMetrics } from '../protocol/ChatProtocol';
 import { ChatBackend, ChatMessage, ChatUpdate } from './LocalChat';
 import { LlmTransport } from './LlmTransport';
 import { QwenVlManager } from './QwenVlManager';
 import { RelayLocal } from './InferenceRelay';
 import { sha256Hex, splitUtf8, utf8Bytes } from './InferenceWire';
-import { repairUtf8FromSource } from './Utf8Repair';
+import { sanitizeModelOutput } from './Utf8Repair';
 
 // Must equal the native session max_ctx in gewu_probe.cpp.
 const MAX_CONTEXT = 32768;
@@ -20,9 +20,14 @@ const MIN_WAIT_SECONDS = 10;
 
 /** Mirrors one accepted infer request onto the compute task rail. */
 export class InferCardHooks {
+  phase: (requestId: string, epoch: number, phase: string) => void =
+    (_requestId: string, _epoch: number, _phase: string): void => {};
+  metrics: (requestId: string, epoch: number, metrics: InferenceMetrics) => void =
+    (_requestId: string, _epoch: number, _metrics: InferenceMetrics): void => {};
   begin: (requestId: string, epoch: number, prompt: string, label: string) => void =
     (_requestId: string, _epoch: number, _prompt: string, _label: string): void => {};
-  delta: (requestId: string, epoch: number, answer: string) => void = (_requestId: string, _epoch: number, _answer: string): void => {};
+  delta: (requestId: string, epoch: number, answer: string, outputAt?: number) => void =
+    (_requestId: string, _epoch: number, _answer: string, _outputAt?: number): void => {};
   end: (requestId: string, epoch: number, answer: string, failed: boolean) => void =
     (_requestId: string, _epoch: number, _answer: string, _failed: boolean): void => {};
 }
@@ -43,11 +48,6 @@ function messageBytes(messages: ChatMessage[]): number {
   return total;
 }
 
-function outputBudget(requested: number | undefined): number {
-  return typeof requested === 'number' && Number.isInteger(requested) && requested > 0 ?
-    Math.min(MAX_OUTPUT, requested) : MAX_OUTPUT;
-}
-
 /** Native wait derived from the requester's deadline; 0 keeps the native default. */
 function waitSeconds(deadlineMs: number | undefined): number {
   if (typeof deadlineMs !== 'number' || !Number.isInteger(deadlineMs) || deadlineMs <= 0) {
@@ -56,20 +56,31 @@ function waitSeconds(deadlineMs: number | undefined): number {
   return Math.max(MIN_WAIT_SECONDS, Math.floor((deadlineMs - REPORT_MARGIN_MS) / 1000));
 }
 
+class HostRequest {
+  metrics?: InferenceMetrics;
+  key: string = '';
+  requestId: string = '';
+  epoch: number = 0;
+  modelRequestId: string = '';
+  seq: number = 0;
+  answer: string = '';
+  promptText: string = '';
+  cancelled: boolean = false;
+  dropped: boolean = false;
+  startedAt: number = Date.now();
+  statusSent: boolean = false;
+  vision: boolean = false;
+}
+
 export class InferenceHost implements RelayLocal {
   private model: ChatBackend;
+  private vision: LlmTransport | null = null;
   private sender: (message: WireMessage, epoch: number) => Promise<boolean>;
   private card: InferCardHooks;
-  private activeId: string = '';
-  private activeEpoch: number = 0;
-  private seq: number = 0;
-  private answer: string = '';
-  /** 本请求是否已报过 generating（每请求重置一次，避免刷屏）。 */
-  private statusSent: boolean = false;
-  private promptText: string = '';
+  private requests: Map<string, HostRequest> = new Map();
+  private requestSerial: number = 0;
   private clusterProvider: (() => ClusterInfo | null) | null = null;
-  /** 可缺省的多模态通道；为 null 时带图请求 fail closed，绝不降级给纯文本引擎。 */
-  private vision: LlmTransport | null = null;
+  private deviceProvider: (() => string) | null = null;
 
   constructor(model: ChatBackend, sender: (message: WireMessage, epoch: number) => Promise<boolean>,
     card: InferCardHooks) {
@@ -83,14 +94,19 @@ export class InferenceHost implements RelayLocal {
     this.clusterProvider = provider;
   }
 
-  /** 由页面注入多模态通道；未部署 VL 权重时传 null。 */
-  setVisionTransport(transport: LlmTransport | null): void {
-    this.vision = transport;
-  }
+  setDeviceProvider(provider: () => string): void { this.deviceProvider = provider; }
+
+  setVisionTransport(transport: LlmTransport | null): void { this.vision = transport; }
 
   /** True from acceptance until the terminal infer.done / infer.error. */
   isActive(): boolean {
-    return this.activeId.length > 0;
+    return this.requests.size > 0;
+  }
+
+  activeCount(): number { return this.requests.size; }
+
+  hasRequest(requestId: string, epoch: number): boolean {
+    return this.requests.has(epoch.toString() + ':' + requestId);
   }
 
   handle(message: WireMessage, epoch: number): void {
@@ -102,18 +118,27 @@ export class InferenceHost implements RelayLocal {
       this.acceptRequest(message, epoch);
       return;
     }
-    if (message.type === 'infer.cancel' && message.requestId === this.activeId) {
-      this.model.cancel(this.activeId);
+    if (message.type === 'infer.cancel') {
+      const request = this.requests.get(epoch.toString() + ':' + (message.requestId || ''));
+      if (request !== undefined) { this.cancel(request); }
     }
   }
 
   /** The requester can no longer receive output: stop generating for it. */
   peerDropped(epoch: number): void {
-    if (this.activeId.length === 0 || this.activeEpoch !== epoch) {
-      return;
+    for (const request of Array.from(this.requests.values())) {
+      if (request.epoch !== epoch) continue;
+      hilog.warn(0, 'NearbyChat', 'infer peer dropped request=%{public}s epoch=%{public}d', request.requestId, epoch);
+      request.dropped = true;
+      this.cancel(request);
     }
-    hilog.warn(0, 'NearbyChat', 'infer peer dropped request=%{public}s epoch=%{public}d', this.activeId, epoch);
-    this.model.cancel(this.activeId);
+  }
+
+  private cancel(request: HostRequest): void {
+    if (this.requests.get(request.key) !== request || request.cancelled) return;
+    request.cancelled = true;
+    if (request.vision) { this.vision?.cancel(request.modelRequestId); }
+    else { this.model.cancel(request.modelRequestId); }
   }
 
   private send(message: WireMessage, epoch: number, onFailure?: () => void): void {
@@ -143,7 +168,8 @@ export class InferenceHost implements RelayLocal {
     const missing = this.model.readinessError();
     const cluster = this.clusterProvider === null ? null : this.clusterProvider();
     // The hub can serve through another device even when its own model is unavailable.
-    const ready = missing.length === 0 || (cluster !== null && cluster.total > 0);
+    const ready = missing.length === 0 || (this.vision !== null && this.vision.readinessError().length === 0) ||
+      (cluster !== null && cluster.total > 0);
     const profile: InferProfile = {
       modelId: 'qwen25-7b-instruct-q4',
       modelRevision: 'admission-open',
@@ -171,11 +197,17 @@ export class InferenceHost implements RelayLocal {
 
   private acceptRequest(message: WireMessage, epoch: number): void {
     const requestId = message.requestId || '';
+    if (this.hasRequest(requestId, epoch)) {
+      this.fail(requestId, epoch, 'DUPLICATE_REQUEST', '请求编号重复', false);
+      return;
+    }
     const messages = requestMessages(message);
     const prompt = messages[messages.length - 1].content;
-    const image = message.image !== undefined ? message.image : '';
+    const image = message.image || '';
     const vision = this.vision;
-    if (this.model.isBusy() || this.activeId.length > 0) {
+    // The VL engine is single-session and shares memory with the text engine.
+    if (Array.from(this.requests.values()).some((item: HostRequest): boolean => item.vision) ||
+      (image.length > 0 && this.model.hasPendingNativeJobs()) || QwenVlManager.getInstance().isBusy()) {
       this.fail(requestId, epoch, 'BUSY', '算力繁忙，请稍后重试', true);
       return;
     }
@@ -204,85 +236,121 @@ export class InferenceHost implements RelayLocal {
         return;
       }
     }
-    this.activeId = requestId;
-    this.activeEpoch = epoch;
-    this.seq = 0;
-    this.answer = '';
-    this.promptText = messages.map((item: ChatMessage): string => item.content).join('\n');
-    this.card.begin(requestId, epoch, prompt, message.label !== undefined ? message.label : '');
-    this.send({ type: 'infer.accepted', version: 2, requestId: requestId, state: 'preparing' }, epoch);
-    // 请求级阶段上报：受理后先报 loading，首个 delta 到达时报 generating。
-    // 目的是覆盖"加载权重 + prefill"那段静默（真机实测 GEWU 每步约 30s 才出首字）。
-    // 注：warm 的 VL 引擎并不需要加载，这里会短暂多报一次 loading；待会话复用（P4）落地后，
-    // 可由引擎的 warm 标志把它变成精确值。
-    this.statusSent = false;
+    const request = new HostRequest();
+    request.key = epoch.toString() + ':' + requestId;
+    request.requestId = requestId;
+    request.epoch = epoch;
+    request.modelRequestId = 'infer:' + (++this.requestSerial).toString();
+    request.promptText = messages.map((item: ChatMessage): string => item.content).join('\n');
+    request.vision = image.length > 0;
+    this.requests.set(request.key, request);
+    hilog.info(0, 'NearbyChat', 'infer begin request=%{public}s epoch=%{public}d native=%{public}s active=%{public}d',
+      requestId, epoch, request.modelRequestId, this.requests.size);
+    try {
+      this.card.begin(requestId, epoch, prompt, message.label !== undefined ? message.label : '');
+    } catch (_error) {
+      hilog.warn(0, 'NearbyChat', 'infer card begin failed request=%{public}s', requestId);
+    }
+    this.send({ type: 'infer.accepted', version: 2, requestId: requestId, state: 'preparing',
+      device: this.deviceProvider === null ? undefined : this.deviceProvider() }, epoch,
+      (): void => this.cancel(request));
     this.send({ type: 'infer.status', version: 2, requestId: requestId, state: 'loading' }, epoch);
-    let error: string;
-    if (image.length > 0 && vision !== null) {
-      error = vision.start(messages, (update: ChatUpdate) => {
-        this.onUpdate(requestId, update);
-      }, requestId, image);
-    } else {
-      error = this.model.start(messages, (update: ChatUpdate) => {
-        this.onUpdate(requestId, update);
-      }, requestId, {
-        maxTokens: outputBudget(message.maxOutputTokens),
-        waitSeconds: waitSeconds(message.deadlineBudgetMs)
-      });
+    let error = '';
+    try {
+      if (image.length > 0 && vision !== null) {
+        error = vision.start(messages, (update: ChatUpdate): void => this.onUpdate(request, update),
+          request.modelRequestId, image);
+      } else {
+        error = this.model.start(messages, (update: ChatUpdate): void => {
+          this.onUpdate(request, update);
+        }, request.modelRequestId, {
+          maxTokens: message.maxOutputTokens,
+          waitSeconds: waitSeconds(message.deadlineBudgetMs)
+        });
+      }
+    } catch (_error) {
+      error = '无法启动模型，请确认模型文件已部署。';
+    }
+    if (error.length === 0) {
+      try { this.card.phase(requestId, epoch, 'running'); } catch (_) { /* display only */ }
     }
     if (error.length > 0) {
-      this.activeId = '';
-      this.fail(requestId, epoch, 'MODEL_EXECUTION_FAILED', error, true);
+      this.finishError(request, 'MODEL_EXECUTION_FAILED', error, true);
     }
   }
 
-  private onUpdate(requestId: string, update: ChatUpdate): void {
-    if (requestId !== this.activeId) {
+  private onUpdate(request: HostRequest, update: ChatUpdate): void {
+    if (this.requests.get(request.key) !== request) {
       return;
+    }
+    if (update.metrics !== undefined) {
+      request.metrics = update.metrics;
+      try { this.card.metrics(request.requestId, request.epoch, update.metrics); } catch (_) { /* display only */ }
     }
     if (update.kind === 'delta') {
-      if (!this.statusSent) {
-        this.statusSent = true;
-        this.send({ type: 'infer.status', version: 2, requestId: requestId, state: 'generating' }, this.activeEpoch);
+      if (request.cancelled) return;
+      if (update.text.length === 0) return;
+      if (request.seq === 0) {
+        hilog.info(0, 'NearbyChat', 'infer output request=%{public}s epoch=%{public}d elapsedMs=%{public}d chars=%{public}d',
+          request.requestId, request.epoch, Date.now() - request.startedAt, update.text.length);
       }
-      const pieces = splitUtf8(update.text, 1024);
+      if (!request.statusSent) {
+        request.statusSent = true;
+        this.send({ type: 'infer.status', version: 2, requestId: request.requestId, state: 'generating' }, request.epoch);
+      }
+      const pieces = splitUtf8(sanitizeModelOutput(update.text, request.promptText), 1024);
       for (const piece of pieces) {
-        this.seq += 1;
-        this.answer += piece;
+        request.seq += 1;
+        request.answer += piece;
         // A lost delta makes the stream undeliverable; generating further is wasted work.
         this.send({
-          type: 'infer.delta', version: 2, requestId: requestId, seq: this.seq, text: piece
-        }, this.activeEpoch, (): void => {
-          if (this.activeId === requestId) {
-            this.model.cancel(requestId);
-          }
-        });
+          type: 'infer.delta', version: 2, requestId: request.requestId, seq: request.seq, text: piece,
+          metrics: request.seq === 1 ? request.metrics : undefined
+        }, request.epoch, (): void => this.cancel(request));
       }
-      this.card.delta(requestId, this.activeEpoch, repairUtf8FromSource(this.answer, this.promptText));
+      try {
+        this.card.delta(request.requestId, request.epoch, sanitizeModelOutput(request.answer, request.promptText), update.outputAt);
+      } catch (_error) {
+        hilog.warn(0, 'NearbyChat', 'infer card delta failed request=%{public}s', request.requestId);
+      }
       return;
     }
-    const epoch = this.activeEpoch;
-    this.activeId = '';
-    if (update.error || update.finishReason === 'cancelled' || this.answer.trim().length === 0 || this.seq < 1) {
-      const cancelled = update.finishReason === 'cancelled';
-      this.fail(requestId, epoch, cancelled ? 'CANCELLED' : 'MODEL_EXECUTION_FAILED',
+    if (update.error || request.cancelled || update.finishReason === 'cancelled' || request.answer.trim().length === 0 || request.seq < 1) {
+      const cancelled = request.cancelled || update.finishReason === 'cancelled';
+      this.finishError(request, cancelled ? 'CANCELLED' : 'MODEL_EXECUTION_FAILED',
         cancelled ? '已停止；已开始的外部操作未必可撤销' : (update.error || '模型加载、提交或清理失败'), !cancelled);
       return;
     }
     const reason = update.finishReason === 'length' ? 'length' : 'stop';
-    const bytes = utf8Bytes(this.answer);
+    const bytes = utf8Bytes(request.answer);
     hilog.info(0, 'NearbyChat', 'infer done request=%{public}s bytes=%{public}d reason=%{public}s',
-      requestId, bytes.length, reason);
-    this.card.end(requestId, epoch, repairUtf8FromSource(this.answer, this.promptText), false);
+      request.requestId, bytes.length, reason);
+    this.requests.delete(request.key);
     this.send({
-      type: 'infer.done', version: 2, requestId: requestId, lastSeq: this.seq,
-      outputUtf8Bytes: bytes.length, outputSha256: sha256Hex(bytes), finishReason: reason, source: 'mate70-local'
-    }, epoch);
+      type: 'infer.done', version: 2, requestId: request.requestId, lastSeq: request.seq,
+      outputUtf8Bytes: bytes.length, outputSha256: sha256Hex(bytes), finishReason: reason, source: 'mate70-local',
+      metrics: request.metrics
+    }, request.epoch);
+    this.endCard(request, false);
+  }
+
+  private finishError(request: HostRequest, code: string, text: string, retryable: boolean): void {
+    if (this.requests.get(request.key) !== request) return;
+    this.requests.delete(request.key);
+    if (!request.dropped) { this.fail(request.requestId, request.epoch, code, text, retryable); }
+    this.endCard(request, true);
+  }
+
+  private endCard(request: HostRequest, failed: boolean): void {
+    try {
+      this.card.end(request.requestId, request.epoch, sanitizeModelOutput(request.answer, request.promptText), failed);
+    } catch (_error) {
+      hilog.warn(0, 'NearbyChat', 'infer card end failed request=%{public}s', request.requestId);
+    }
   }
 
   private fail(requestId: string, epoch: number, code: string, text: string, retryable: boolean): void {
     hilog.warn(0, 'NearbyChat', 'infer error code=%{public}s request=%{public}s', code, requestId);
-    this.card.end(requestId, epoch, repairUtf8FromSource(this.answer, this.promptText), true);
     this.send({
       type: 'infer.error', version: 2, requestId: requestId, code: code, message: text, retryable: retryable
     }, epoch);

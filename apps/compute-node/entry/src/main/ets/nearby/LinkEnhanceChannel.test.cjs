@@ -16,6 +16,8 @@ const { transpile } = require('../../../../../../../tests/ets-harness.cjs');
 let clock = Date.now();
 let clockSeq = 0;
 const clockTimers = new Map();
+/** Interval ids whose callbacks have not cleared them; only these re-arm. */
+const liveIntervals = new Set();
 
 const flush = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -26,7 +28,9 @@ async function advance(ms) {
   const until = clock + ms;
   // The module arms its first timer only after the awaits it was parked on resume.
   await flush();
-  for (let round = 0; round < 50; round++) {
+  // Repeating intervals re-arm one tick per round, so the budget must cover a
+  // tick per interval-second inside the window (the per-peer fragment timers).
+  for (let round = 0; round < 2000; round++) {
     const due = Array.from(clockTimers.entries())
       .filter(([, timer]) => timer.at <= until)
       .sort((left, right) => left[1].at - right[1].at);
@@ -35,11 +39,25 @@ async function advance(ms) {
       if (clockTimers.delete(id)) {
         clock = timer.at;
         timer.fn();
+        // A repeating interval re-arms unless its own callback cleared it.
+        if (timer.every && liveIntervals.has(id)) {
+          clockTimers.set(id, { at: timer.at + timer.every, fn: timer.fn, every: timer.every });
+        }
       }
     }
     await flush();
   }
   clock = until;
+}
+
+/**
+ * Simulate a screen-off deep freeze: virtual time moves but NO callback runs,
+ * exactly like the system stopping the app's event loop. Deadlines shift with
+ * the clock so the first post-freeze firing observes the full gap in Date.now().
+ */
+function jump(ms) {
+  clock += ms;
+  for (const timer of clockTimers.values()) timer.at += ms;
 }
 
 /**
@@ -49,7 +67,7 @@ async function advance(ms) {
  */
 const prefs = new Map();
 
-function build(server, tag) {
+function build(server, tag, channelDir) {
   const logs = [];
   const bus = new Map();
   const connections = [];
@@ -71,7 +89,9 @@ function build(server, tag) {
     names: {},
     connectResult: { success: true, reason: 0 },
     /** When set, every startAdvertising call throws until the test clears it. */
-    advertiseRefused: false
+    advertiseRefused: false,
+    /** When set, the next createServer throws once (transient start failure). */
+    serverRefused: false
   };
   const manager = { getAvailableDeviceListSync: () => behavior.devices };
   const linkEnhance = {
@@ -101,12 +121,16 @@ function build(server, tag) {
       return handle;
     },
     createServer: (name) => {
+      if (behavior.serverRefused) {
+        behavior.serverRefused = false;
+        throw { code: 32390201 };
+      }
       const listeners = new Map();
       const handle = {
-        name, listeners, started: false,
+        name, listeners, started: false, stopped: false,
         on: (event, fn) => listeners.set(event, fn),
-        start: () => { handle.started = true; },
-        stop: () => {}, close: () => {}
+        start: () => { handle.started = true; handle.stopped = false; },
+        stop: () => { handle.stopped = true; }, close: () => {}
       };
       behavior.server = handle;
       return handle;
@@ -178,13 +202,14 @@ function build(server, tag) {
         clockTimers.set(id, { at: clock + (delay || 0), fn });
         return id;
       },
-      clearTimeout: id => clockTimers.delete(id),
+      clearTimeout: id => { clockTimers.delete(id); liveIntervals.delete(id); },
       setInterval: (fn, delay) => {
         const id = ++clockSeq;
-        clockTimers.set(id, { at: clock + (delay || 0), fn });
+        clockTimers.set(id, { at: clock + (delay || 0), fn, every: delay || 0 });
+        liveIntervals.add(id);
         return id;
       },
-      clearInterval: id => clockTimers.delete(id),
+      clearInterval: id => { clockTimers.delete(id); liveIntervals.delete(id); },
       require: name => {
         if (name === '@kit.ArkTS') return { util: modules.util };
         if (name === '@kit.DistributedServiceKit') return {
@@ -224,7 +249,7 @@ function build(server, tag) {
     COMPUTE_ADV_TYPE: 1, COMPUTE_ADV_KEY_BYTES: 4 };
   modules.roster = load('ClusterRoster', __dirname + '/../cluster');
   modules.protocol = load('ChatProtocol', __dirname + '/../protocol');
-  const channel = new (load('LinkEnhanceChannel').LinkEnhanceChannel)();
+  const channel = new (load('LinkEnhanceChannel', channelDir).LinkEnhanceChannel)();
   channel.initialize({ tag: tag || (server ? 'server' : 'client'), applicationInfo: { accessTokenId: 1 } });
   const decode = text => {
     const assembler = new modules.protocol.MessageAssembler();
@@ -256,6 +281,53 @@ function scan(t) {
 }
 
 (async () => {
+  // Run the real assembler AND the channel's 1s watchdog during a slow upload.
+  for (const [name, dir] of [['compute', undefined], ['chat', require('node:path').resolve(__dirname, '../../../../../../../apps/agent-client/entry/src/main/ets/nearby')]]) {
+    const t = build(name === 'compute', 'slow-upload-' + name, dir), listeners = new Map(), seen = [];
+    const link = { on(event, fn) { listeners.set(event, fn); }, sendData() {},
+      disconnect() { this.closed = true; }, close() { this.closed = true; }, getPeerDeviceId() { return 'slow-peer'; } };
+    const peer = t.channel.attach(link, 'slow-peer', true);
+    peer.role = 'compute'; t.channel.ready(peer);
+    t.channel.onMessage = message => seen.push(message);
+    t.channel.onInference = message => seen.push(message);
+    const payload = { type: 'infer.request', version: 2, requestId: 'slow', prompt: 'PRIVATE-' + 'x'.repeat(10800) };
+    const parts = t.modules.protocol.encodeMessage(payload, 'slow-upload');
+    for (const part of parts) {
+      listeners.get('dataReceived')(new Uint8Array(Buffer.from(part)).buffer);
+      await advance(900);
+      assert(!link.closed, 'continuous progress must survive the channel watchdog beyond 15s');
+    }
+    assert.equal(seen[0].prompt, payload.prompt);
+    const logs = t.logs.filter(log => String(log.args[2]).startsWith('le-frame-recv'));
+    assert.equal(logs.length, parts.length, 'every newly received fragment has metadata diagnostics');
+    assert(!JSON.stringify(t.logs).includes(payload.prompt), 'logs never contain inference payloads');
+    // A different incomplete message with no further progress still tears down cleanly.
+    const stalled = t.modules.protocol.encodeMessage(payload, 'stalled-upload');
+    listeners.get('dataReceived')(new Uint8Array(Buffer.from(stalled[0])).buffer);
+    await advance(16000);
+    assert(link.closed, 'stalled fragments remain bounded and are cleaned up');
+    assert(t.logs.some(log => String(log.args[2]).startsWith('le-frame-timeout')));
+    t.channel.disconnect();
+  }
+
+  for (const [name,dir] of [['compute',undefined],['chat',require('node:path').resolve(__dirname,'../../../../../../../apps/agent-client/entry/src/main/ets/nearby')]]) {
+    const t=build(name==='compute','background-'+name,dir),activity=[],frames=[];
+    t.channel.setActivityListener(active=>activity.push(active));
+    let closed=0;
+    const connect=id=>{
+      const link={on(){},sendData(data){frames.push(data);},disconnect(){closed++;},close(){closed++;},getPeerDeviceId(){return id;}};
+      const peer=t.channel.attach(link,id,true);t.channel.ready(peer);return peer;
+    };
+    const first=connect('one'),second=connect('two');
+    const operation=t.channel.operation();t.channel.suspend();
+    assert.equal(t.channel.isForeground(),false);assert.equal(t.channel.connectedCount(),2);
+    assert.equal(t.channel.operation(),operation);assert.equal(closed,0);assert.equal(activity.at(-1),true);
+    assert.equal(await t.channel.send({type:'infer.delta',version:2,requestId:'r',seq:1,text:'后台结果'},first.epoch),true);
+    assert(frames.length>0,'background results still use the live connection');
+    t.channel.drop(first,'one disconnected');assert.equal(activity.at(-1),true,'one remaining peer retains the lease');
+    t.channel.resume();assert.equal(t.channel.connectedCount(),1);assert.equal(t.channel.operation(),operation);
+    t.channel.disconnect();assert.equal(activity.at(-1),false);assert.equal(t.channel.connectedCount(),0);assert(closed>0);
+  }
   {
     const t = build(true, 'withdraw-stale-hub');
     await t.channel.prepare();
@@ -647,6 +719,451 @@ function scan(t) {
       'the follower advertises slot 2, never a duplicate slot 1');
   }
 
+  // --- 4d3. A fresh slot-0 pair elects from shared data instead of mutual deference.
+  // Both boxes freshly restarted advertise slot 0. The old guard fabricated a hub
+  // from dialled[0]: the dialler froze [peer, self] while the acceptor's shared
+  // ranking crowned the dialler — each deferred to the other and BOTH displayed
+  // 算力设备2 (field-observed split-brain; both then refused chats as non-hubs).
+  {
+    const t = build(true, 'fresh-pair-shared-election');
+    t.behavior.devices = [{ deviceId: 'link-1', deviceName: '算力设备1', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:31': '算力设备1' };
+    // Slot 0 with no identity key: the name tie-break decides this box dials.
+    t.behavior.scanData = [{ deviceId: 'aa:bb:cc:dd:ee:31', deviceName: '', rssi: -40,
+      data: new Uint8Array([5, 0xFF, 0x77, 0x6E, 1, 0]).buffer }];
+    await t.channel.prepare();
+    await scan(t);
+    const link = outgoing(t);
+    assert(link !== undefined, 'the larger name dials the fresh slot-0 peer');
+    // The peer is equally fresh: its hello_ack carries no slot and no hub claim.
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello_ack', peerRole: 'compute',
+      name: '算力设备1', deviceUid: 'fresh-uid-31' }, 'fresh-ack')[0]);
+    await flush();
+    const peer = t.channel.peers.find(p => p.role === 'compute' && !p.fromServer);
+    assert(peer !== undefined && peer.ready, 'the dialled peer link is ready');
+    assert.equal(peer.advertisedSlot, 0, 'no hub credential anywhere in the handshake');
+    t.channel.meshSettled = true;
+    // The acceptor sees the same owner-reported memories and would rank this box
+    // first; the dialler must reach the same order, not defer to a fabricated hub.
+    t.channel.setSelfMem(9000);
+    t.channel.setPeerMem(peer.epoch, 2000);
+    await advance(10000); // election timer fires inside this window
+    assert.equal(t.channel.selfComputeNumber(), 1,
+      'the shared ranking crowns the stronger box instead of deferring to the dialled peer');
+    assert.equal(t.channel.frozenComputeKeys[0],
+      t.channel.computeKey(t.channel.localUid(), t.channel.localName()),
+      'the winner freezes itself first, never the slot-0 dialled peer');
+    assert.equal(t.channel.peerInfos().find(p => p.role === 'compute').slot, 2,
+      'the peer takes the worker slot, so the pair shows 算力设备1/2, never 2/2');
+  }
+
+  // --- 4d4. A stuck mutual-deference pair recovers on reconnect.
+  // Both boxes froze the other as hub and themselves as slot 2 (the split-brain the
+  // old dialled[0] deference produced). On the next reconnect each hears the peer
+  // declare a worker slot while the local freeze crowns that same peer hub — a
+  // contradiction that must withdraw the stale freeze and re-run the shared
+  // election. Every previous escape was dead: failover needs the old hub invisible
+  // (it is online), the roster sync only accepts a hub (neither believes it is one).
+  {
+    const t = build(true, 'split-brain-recovery');
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    t.behavior.devices = [{ deviceId: 'link-1', deviceName: '算力设备1', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:21': '算力设备1' };
+    const selfKey = t.channel.computeKey(t.channel.localUid(), t.channel.localName());
+    // Split-brain half: the stale freeze crowns the peer hub, self lands on 2.
+    t.channel.frozenComputeKeys = ['uid:peer-uid-21', selfKey];
+    t.channel.applyComputeSlots();
+    assert.equal(t.channel.selfComputeNumber(), 2, 'the stale freeze shows 算力设备2');
+    // Reconnect: the peer's hello declares slot 2 — it defers to us, contradicting
+    // the freeze that crowns it.
+    const link = t.accept('aa:bb:cc:dd:ee:21');
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      name: '算力设备1', deviceUid: 'peer-uid-21', slot: 2 }, 'split-hello')[0]);
+    await flush();
+    assert.equal(t.channel.selfComputeNumber(), 0,
+      'the contradiction withdraws the stale freeze before anything is re-elected');
+    t.channel.meshSettled = true;
+    t.channel.electionReady = true;
+    t.channel.setSelfMem(9000);
+    t.channel.setPeerMem(t.channel.peers[0].epoch, 2000);
+    await flush();
+    assert.equal(t.channel.selfComputeNumber(), 1,
+      'the shared election recovers a single hub instead of staying 算力设备2');
+    assert.equal(t.channel.peerInfos().find(p => p.role === 'compute').slot, 2,
+      'the pair is renumbered 1/2');
+  }
+
+  // --- 4d5. The election ranks on handshake-declared memory, not live samples.
+  // Root cause #2 of the field split-brain: setSelfMem samples at the local poll
+  // phase, while the value the peer holds arrives in poll replies sampled at the
+  // PEER's phase. A cold-start engine load committing GBs between those two moments
+  // left each box ranking its own fresh (lower) memory against the peer's stale
+  // (higher) report — both deferred, both displayed 算力设备2 under the fixed guard
+  // code (field log 10:33: both elected self=2 at the 10 s timer). hello/hello_ack
+  // now declare memAvail once per handshake: both boxes rank the identical pair.
+  {
+    const t = build(true, 'handshake-mem-election');
+    t.behavior.devices = [{ deviceId: 'link-1', deviceName: '算力设备1', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:41': '算力设备1' };
+    t.behavior.scanData = [{ deviceId: 'aa:bb:cc:dd:ee:41', deviceName: '', rssi: -40,
+      data: new Uint8Array([5, 0xFF, 0x77, 0x6E, 1, 0]).buffer }];
+    await t.channel.prepare();
+    // A poll ran before the dial: this box knows its memory and must declare it.
+    t.channel.setSelfMem(9000);
+    await scan(t);
+    const link = outgoing(t);
+    assert(link !== undefined, 'the box dials the fresh slot-0 peer');
+    const hello = t.sent(link).find(m => m.type === 'hello');
+    assert(hello !== undefined && hello.memAvail === 9000,
+      'the dialler declares its memory in hello');
+    // The acceptor's ack declares its own memory; no deviceInfo ever flows.
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello_ack', peerRole: 'compute',
+      name: '算力设备1', deviceUid: 'fresh-uid-41', memAvail: 2000 }, 'hs-ack')[0]);
+    await flush();
+    t.channel.meshSettled = true;
+    // Cold-start engine load: the local sample collapses AFTER the declaration.
+    // A live-sample ranking would see (1500, 2000) and defer; the declared pair
+    // (9000, 2000) must decide.
+    t.channel.setSelfMem(1500);
+    await advance(10000); // election timer fires inside this window
+    assert.equal(t.channel.selfComputeNumber(), 1,
+      'handshake-declared memory decides, not the post-load local sample');
+    assert.equal(t.channel.peerInfos().find(p => p.role === 'compute').slot, 2,
+      'the peer takes the worker slot from the declared pair');
+  }
+
+  // --- 4d6. The declared memory is sampled once, on the FIRST compute handshake.
+  // Three-box formation: peers handshake with this box at different moments. If every
+  // handshake re-sampled selfMem, the value a peer holds for this box would depend on
+  // WHEN it connected (B sees the idle 5000, C would see a fluctuated 12000) and
+  // staggered views could transiently crown different hubs before the credential
+  // machinery reconciles them. The first declaration sticks: the second ack carries
+  // the same 5000, and the election ranks this box third even though its live sample
+  // is now the largest of the three.
+  {
+    const t = build(true, 'first-declared-memory-sticks');
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    t.behavior.devices = [
+      { deviceId: 'aa:bb:cc:dd:ee:51', deviceName: '算力设备5', deviceType: 'phone', networkId: 'net-1' },
+      { deviceId: 'aa:bb:cc:dd:ee:52', deviceName: '算力设备6', deviceType: 'phone', networkId: 'net-2' }
+    ];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:51': '算力设备5', 'aa:bb:cc:dd:ee:52': '算力设备6' };
+    t.channel.setSelfMem(5000);
+    const b = t.accept('aa:bb:cc:dd:ee:51');
+    b.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      name: '算力设备5', deviceUid: 'peer-uid-51', memAvail: 9500 }, 'hello-b')[0]);
+    await flush();
+    assert.equal(t.sent(b).find(m => m.type === 'hello_ack').memAvail, 5000,
+      'the first handshake declares the current sample');
+    // Local memory fluctuates upward between the two handshakes.
+    t.channel.setSelfMem(12000);
+    const c = t.accept('aa:bb:cc:dd:ee:52');
+    c.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      name: '算力设备6', deviceUid: 'peer-uid-52', memAvail: 8000 }, 'hello-c')[0]);
+    await flush();
+    assert.equal(t.sent(c).find(m => m.type === 'hello_ack').memAvail, 5000,
+      'the second handshake re-declares the FIRST sample, not the live 12000');
+    t.channel.meshSettled = true;
+    await advance(10000); // election timer fires inside this window
+    assert.equal(t.channel.selfComputeNumber(), 3,
+      'the declared 5000 ranks this box third despite the live 12000 sample');
+    assert.equal(t.channel.frozenComputeKeys[0],
+      t.channel.computeKey('peer-uid-51', '算力设备5'),
+      'the strongest declared memory takes the hub slot');
+    assert.equal(t.channel.peerInfos().find(p => p.deviceUid === 'peer-uid-51').slot, 1,
+      'this box sees the strongest peer as the single hub');
+  }
+
+  // --- 4d7. A ready compute link that goes silent is reaped, not held forever.
+  // Root cause of the two-hour three-box deadlock: the system can reap an idle
+  // linkEnhance connection without ever delivering a disconnect event. The dead
+  // peer object kept answering hasHitPeer() as "connected", so the mesh never
+  // re-dialled that box (field log 14:07: peers=1 with zero frames flowing).
+  // Compute links exchange deviceInfo every ~2s, so 45s of total silence is
+  // conclusive. Chat links are legitimately quiet and stay exempt.
+  {
+    const t = build(true, 'silent-compute-link-reaped');
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    t.behavior.devices = [{ deviceId: 'aa:bb:cc:dd:ee:61', deviceName: '算力设备6', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:61': '算力设备6' };
+    const link = t.accept('aa:bb:cc:dd:ee:61');
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      name: '算力设备6', deviceUid: 'peer-uid-61', memAvail: 9000 }, 'hello-6')[0]);
+    await flush();
+    assert(t.channel.peers[0].ready, 'the handshake completed');
+    // The system reaps the link silently: no frames, no disconnected event.
+    await advance(46000);
+    assert.equal(t.channel.peerInfos().length, 0,
+      'a ready compute peer silent for 45s is dropped, not held as a zombie');
+  }
+  {
+    const t = build(true, 'silent-chat-link-kept');
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    t.channel.frozenComputeKeys = [t.channel.computeKey(t.channel.localUid(), t.channel.localName())];
+    t.channel.applyComputeSlots();
+    t.behavior.devices = [{ deviceId: 'aa:bb:cc:dd:ee:62', deviceName: '聊天手机', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:62': '聊天手机' };
+    const link = t.accept('aa:bb:cc:dd:ee:62');
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'chat',
+      name: '聊天手机', deviceUid: 'chat-uid-62' }, 'chat-hello')[0]);
+    await flush();
+    assert.equal(t.channel.peerInfos()[0].role, 'chat', 'the chat link is ready');
+    await advance(60000);
+    assert.equal(t.channel.peerInfos().length, 1,
+      'a silent chat link is legitimate and must survive the compute silence reap');
+  }
+
+  // --- 4d8. A listener the system killed without a serverStopped event is rebuilt.
+  // The other half of the two-hour deadlock: the serverStopped event was lost while
+  // the app was frozen, so `server !== null` short-circuited every startServer and
+  // each incoming dial got 32390201 forever. The box never sees the failed dials,
+  // but it CAN see trusted compute advertisers whose key orders them to dial this
+  // box; five scan windows of that with zero compute links force a listener rebuild.
+  {
+    const t = build(true, 'corpse-server-rebuild');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    assert(first.started, 'the listener is up initially');
+    t.behavior.names = { 'aa:bb:cc:dd:ee:71': '算力设备7' };
+    t.behavior.devices = [{ deviceId: 'aa:bb:cc:dd:ee:71', deviceName: '算力设备7', deviceType: 'phone', networkId: 'net-1' }];
+    // Key ffffffff sorts above every local key, so the dial-direction rule makes
+    // the peer dial THIS box — and never succeed against the corpse listener.
+    t.behavior.scanData = [{ deviceId: 'aa:bb:cc:dd:ee:71', deviceName: '', rssi: -40,
+      data: new Uint8Array([9, 0xFF, 0x77, 0x6E, 1, 0, 0xFF, 0xFF, 0xFF, 0xFF]).buffer }];
+    for (let i = 0; i < 4; i++) await scan(t);
+    assert(t.behavior.server === first, 'four scans only accumulate strikes');
+    assert(!first.stopped, 'the listener is not torn down early');
+    await scan(t);
+    assert(t.behavior.server !== first, 'the fifth scan rebuilds the listener');
+    assert(first.stopped, 'the corpse is stopped on the way out');
+    assert(t.behavior.server.started, 'the replacement is listening');
+  }
+
+  // --- 4d9. A failed server start keeps the intent and retries.
+  // startServer used to clear serverWanted on failure, so one transient error
+  // during a resume left the box permanently unlistenable: every peer dial got
+  // 32390201 and nothing on this box ever noticed. The intent now survives and
+  // the restart backoff rebuilds the listener.
+  {
+    const t = build(true, 'server-start-retry');
+    t.behavior.serverRefused = true; // the first createServer throws once
+    await t.channel.prepare().catch(() => {});
+    assert.equal(t.behavior.server, undefined, 'the first start attempt failed');
+    await advance(800); // SERVER_RESTART_DELAYS[0]
+    assert(t.behavior.server !== undefined && t.behavior.server.started,
+      'the retry brings the listener back');
+  }
+
+  // --- 4d10. A deep freeze kills the system-side listener silently; the thaw
+  // detector rebuilds it even though everything local looks alive. This is the
+  // hub blind spot: considerServerRebuild demands zero compute links, but a hub's
+  // star is outbound and survives the freeze, so only the timer gap exposes the
+  // corpse (field: healthy star, chat client refused with 32390201 for 25 min).
+  {
+    const t = build(true, 'thaw-rebuilds-corpse-listener');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    assert(first.started, 'the listener is up initially');
+    await advance(2000); // thaw watch ticking, gaps stay 1s
+    assert(t.behavior.server === first, 'no rebuild while awake');
+    jump(60000); // screen-off deep freeze: nothing runs at all
+    await advance(2000); // the thaw: the first tick sees a 60s gap
+    assert(t.behavior.server !== first, 'the thaw rebuilds the listener');
+    assert(first.stopped, 'the corpse is stopped on the way out');
+    assert(t.behavior.server.started, 'the replacement is listening');
+  }
+
+  // --- 4d11. The same thaw clears links the system silently reaped during the
+  // freeze. Chat links never fall under the 45s compute reap, so a frozen chat
+  // session would otherwise sit as a zombie forever and block nothing while the
+  // user stares at a dead session.
+  {
+    const t = build(true, 'thaw-drops-frozen-chat-link');
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    t.channel.frozenComputeKeys = [t.channel.computeKey(t.channel.localUid(), t.channel.localName())];
+    t.channel.applyComputeSlots();
+    t.behavior.devices = [{ deviceId: 'aa:bb:cc:dd:ee:63', deviceName: '聊天手机', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:63': '聊天手机' };
+    const link = t.accept('aa:bb:cc:dd:ee:63');
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'chat',
+      name: '聊天手机', deviceUid: 'chat-uid-63' }, 'chat-hello')[0]);
+    await flush();
+    assert.equal(t.channel.peerInfos()[0].role, 'chat', 'the chat link is ready');
+    const first = t.behavior.server;
+    await advance(2000);
+    jump(60000);
+    await advance(2000);
+    assert.equal(t.channel.peerInfos().length, 0,
+      'a chat link silent across the whole freeze is dropped on thaw');
+    assert(t.behavior.server !== first && first.stopped,
+      'the thaw rebuilds the listener behind the dropped links');
+  }
+
+  // --- 4d12. Ordinary awake time must never trip the freeze detector.
+  {
+    const t = build(true, 'no-thaw-while-awake');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    await advance(30000);
+    assert(t.behavior.server === first && !first.stopped,
+      'steady 1s ticks are not mistaken for a freeze');
+  }
+
+  // --- 4d13. A thaw that lands while the app is behind the lock screen (frozen
+  // without suspend, so the listener object survived) parks the rebuild and
+  // resume() delivers it. Otherwise the corpse outlives the unlock: resume's
+  // startServer is short-circuited by server !== null (field-verified gap).
+  {
+    const t = build(true, 'thaw-rebuild-parked-until-resume');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    assert(first.started, 'the listener object is up');
+    t.channel.foreground = false; // locked screen: thawed, not foregrounded
+    await advance(1000);
+    jump(60000);
+    await advance(2000);
+    assert(t.behavior.server === first && !first.stopped,
+      'the rebuild waits while the app is behind the lock screen');
+    t.channel.foreground = true;
+    t.channel.resume();
+    await flush();
+    assert(t.behavior.server !== first, 'resume delivers the parked rebuild');
+    assert(first.stopped, 'the corpse is finally stopped');
+    assert(t.behavior.server.started, 'the replacement is listening');
+  }
+
+  // --- 4d14. A screen-off can kill the system-side listener WITHOUT freezing
+  // the app: links live, timers show no gap, the thaw detector is blind to it,
+  // and waking the screen does not revive it (field: refused with 32390201 for
+  // 25 min while everything local looked healthy). With no observable event,
+  // the only defense is a periodic forced rebuild of an unproven listener.
+  {
+    const t = build(true, 'periodic-listener-reassert');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    assert(first.started, 'the listener is up');
+    await advance(179000); // just under the reassert interval, no freeze at all
+    assert(t.behavior.server === first && !first.stopped, 'no churn before the interval');
+    await advance(3000); // cross LISTENER_REASSERT_MS with the app never frozen
+    assert(t.behavior.server !== first, 'an unproven listener is re-asserted without a freeze');
+    assert(first.stopped, 'the possibly-dead listener is stopped on the way out');
+    assert(t.behavior.server.started, 'the replacement is listening');
+  }
+
+  // --- 4d15. An accepted incoming link is positive proof the listener works;
+  // it suppresses the periodic rebuild instead of being churned by it.
+  {
+    const t = build(true, 'active-chat-suppresses-reassert');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    t.channel.subscribe(() => {}, () => {});
+    t.channel.frozenComputeKeys = [t.channel.computeKey(t.channel.localUid(), t.channel.localName())];
+    t.channel.applyComputeSlots();
+    t.behavior.devices = [{ deviceId: 'aa:bb:cc:dd:ee:64', deviceName: '聊天手机', deviceType: 'phone', networkId: 'net-1' }];
+    t.behavior.names = { 'aa:bb:cc:dd:ee:64': '聊天手机' };
+    const link = t.accept('aa:bb:cc:dd:ee:64');
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'chat',
+      name: '聊天手机', deviceUid: 'chat-uid-64' }, 'chat-hello')[0]);
+    await flush();
+    assert.equal(t.channel.peerInfos()[0].role, 'chat', 'the chat link is ready');
+    await advance(185000); // well past the reassert interval
+    assert(t.behavior.server === first && !first.stopped,
+      'an accepted chat link proves the listener; no rebuild churn');
+    assert.equal(t.channel.peerInfos().length, 1, 'the chat link is still up');
+  }
+
+  // --- 4d16. suspend() keeps the near-field alive now (background results must
+  // keep flowing; see the background-* case), so a screen-off listener kill
+  // arrives as serverStopped instead. Its self-heal restart is foreground-gated
+  // and never fires behind the lock screen (field: 408s freeze, listener stayed
+  // dead, chat client refused with 32390201 until manual restart). If the box
+  // then unfreezes still locked, the thaw itself must rebuild in background.
+  {
+    const t = build(true, 'thaw-rebuilds-system-killed-listener-in-background');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    assert(first.started, 'the listener is up initially');
+    t.channel.suspend(); // screen-off: backgrounded, listener and links stay
+    assert(t.channel.isForeground() === false, 'the app is behind the lock screen');
+    first.listeners.get('serverStopped')?.(0); // the system reclaims the listener
+    assert(t.channel.server === null, 'the listener is gone');
+    jump(60000); // deep freeze while locked
+    await advance(2000); // thaw: unfrozen, still not foregrounded
+    assert(t.behavior.server !== first && t.behavior.server.started,
+      'the thaw rebuilds the missing listener in background');
+  }
+
+  // --- 4d17. The same system-killed listener must also heal without any freeze
+  // at all: the lock screen keeps the app unfrozen but backgrounded for hours,
+  // and the gated restart never fires. The periodic reassert doubles as the
+  // bounded background retry cadence.
+  {
+    const t = build(true, 'reassert-rebuilds-system-killed-listener');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    t.channel.suspend();
+    first.listeners.get('serverStopped')?.(0);
+    await advance(179000); // almost the reassert interval, no freeze
+    assert(t.behavior.server === first,
+      'the killed listener is not rebuilt early');
+    await advance(3000); // cross LISTENER_REASSERT_MS still in background
+    assert(t.behavior.server !== first && t.behavior.server.started,
+      'the reassert rebuilds the missing listener in background');
+  }
+
+  // --- 4d18. A deep freeze may also kill the listener silently: no
+  // serverStopped, the server object lingers as a corpse, and startServer is
+  // short-circuited by server !== null. Behind the lock screen the rebuild
+  // pends instead; resume() must carry it out.
+  {
+    const t = build(true, 'thaw-corpse-pends-rebuild-until-resume');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    t.channel.suspend();
+    jump(60000); // freeze: no events at all
+    await advance(2000); // thaw, still behind the lock screen
+    assert(t.behavior.server === first, 'the corpse is not rebuilt in background');
+    assert(t.channel.thawPendingRebuild === true, 'the rebuild is pended for resume');
+    t.channel.resume();
+    await advance(2500); // let resume()'s prepare chain settle
+    assert(t.behavior.server !== first && t.behavior.server.started,
+      'resume rebuilds the corpse listener');
+  }
+
+  // --- 4d19. A stall long enough to trip the thaw detector must not tear down
+  // a listener that still carries live incoming traffic: an accepted link is
+  // the iron proof of listener health, and rebuilding would kill it.
+  {
+    const t = build(true, 'thaw-spares-live-incoming-link');
+    await t.channel.prepare();
+    const first = t.behavior.server;
+    const linkListeners = new Map();
+    const link = {
+      on: (name, fn) => linkListeners.set(name, fn), sendData() {}, disconnect() {}, close() {},
+      getPeerDeviceId() { return 'chat-1'; },
+      deliver: text => linkListeners.get('dataReceived')?.(new Uint8Array(Buffer.from(text, 'utf8')).buffer)
+    };
+    const peer = t.channel.attach(link, 'chat-1', true);
+    t.channel.ready(peer);
+    t.channel.suspend(); // backgrounded, the link stays live
+    jump(60000); // a main-thread stall long enough to look like a freeze
+    link.deliver(t.modules.protocol.encodeMessage(
+      { type: 'infer.delta', version: 2, requestId: 'r', seq: 1, text: '帧' }, 'r')[0]);
+    await flush();
+    await advance(2000); // thaw tick
+    assert(t.behavior.server === first, 'a live incoming link proves the listener');
+    assert(t.channel.thawPendingRebuild === false, 'no rebuild is pended behind a live link');
+    t.channel.resume();
+    await advance(2500);
+    assert(t.behavior.server === first, 'resume keeps the healthy listener');
+    assert.equal(t.channel.connectedCount(), 1, 'the incoming link survives');
+  }
+
   // --- 4e. A stopped hub is replaced only after repeated absence checks -------
   {
     const t = build(true, 'verified-hub-failover');
@@ -746,6 +1263,91 @@ function scan(t) {
     assert.equal(t.sent(rejoined).find(m => m.type === 'hello_ack').slot, 1);
     assert.equal(t.channel.peerInfos().find(p => p.deviceUid === 'phone-2').slot, 2,
       'reconnection and stale worker rosters never reassign another live phone');
+  }
+
+  // --- 4f. The takeover's OTHER half: the downstream worker. The promoted successor
+  // advertises slot 1 and the worker dials it, but the worker's stale freeze still
+  // crowns the vanished hub. The frozen fast path rewrote the successor to slot 2
+  // and pruneWorkerLinks tore the link — an endless dial/drop loop where the two
+  // survivors never meshed (field: M18 took over, M14 reconnect-and-refused every
+  // 8s with 算力节点只与算力设备1保持组网). A claiming peer that outranks me in my
+  // own freeze, with every superior provably absent, is a legitimate succession.
+  {
+    const t = build(true, 'successor-adoption-heals-mesh');
+    t.behavior.localName = 'WorkerC';
+    t.behavior.devices = [
+      { deviceId: 'old-hub', deviceName: 'Hub', deviceType: 'phone', networkId: 'hub-net' },
+      { deviceId: 'succ-mac', deviceName: 'Succ', deviceType: 'phone', networkId: 'succ-net' }
+    ];
+    t.behavior.names = { 'old-hub': 'Hub', 'succ-mac': 'Succ' };
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    const hub = t.accept('old-hub');
+    hub.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      deviceUid: 'old-hub', name: 'Hub', slot: 1 }, 'old-hello')[0]);
+    await flush();
+    const hubEpoch = t.channel.peerInfos()[0].epoch;
+    t.channel.applyRemoteRoster(hubEpoch, [
+      { deviceUid: 'old-hub', name: 'Hub', role: 'compute', slot: 1 },
+      { deviceUid: 'succ-uid', name: 'Succ', role: 'compute', slot: 2 },
+      { deviceUid: t.channel.localUid(), name: 'WorkerC', role: 'compute', slot: 3 }
+    ]);
+    assert.equal(t.channel.selfComputeNumber(), 3, 'ranked third behind the hub and the successor');
+    hub.drop(-1);
+    await flush();
+    // The successor takes over elsewhere and now advertises slot 1; this worker dials it.
+    t.behavior.scanData = [{ deviceId: 'succ-mac', deviceName: 'Succ', rssi: -40,
+      data: new Uint8Array([9, 0xFF, 0x77, 0x6E, 1, 1, 1, 2, 3, 4]).buffer }];
+    await scan(t);
+    const link = outgoing(t);
+    assert(link !== undefined && !link.closed, 'the worker dials the successor hub');
+    // Its handshake declares slot 1. The stale freeze must not rewrite the new hub
+    // to slot 2 and tear the link into the endless dial loop.
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello_ack', peerRole: 'compute',
+      deviceUid: 'succ-uid', name: 'Succ', slot: 1 }, 'succ-ack')[0]);
+    await flush();
+    const computes = t.channel.peerInfos().filter(p => p.role === 'compute');
+    assert.equal(computes.length, 1, 'the successor link survives the handshake');
+    assert.equal(t.channel.selfComputeNumber(), 2, 'the worker adopts the successor as 算力设备1');
+    assert.equal(new Uint8Array(t.advertise.manufactureData[0].manufactureValue)[1], 2,
+      'the worker re-publishes its own slot under the adopted rank');
+  }
+
+  // --- 4f2. Same succession from the other dial direction: the promoted hub dials
+  // the worker, whose frozen fast path must adopt instead of pruning the link.
+  {
+    const t = build(true, 'successor-dials-worker-adoption');
+    t.behavior.localName = 'WorkerD';
+    t.behavior.devices = [
+      { deviceId: 'old-hub2', deviceName: 'Hub2', deviceType: 'phone', networkId: 'hub-net' },
+      { deviceId: 'succ2-in', deviceName: 'Succ2', deviceType: 'phone', networkId: 'succ-net' }
+    ];
+    t.behavior.names = { 'old-hub2': 'Hub2', 'succ2-in': 'Succ2' };
+    await t.channel.prepare();
+    t.channel.subscribe(() => {}, () => {});
+    const hub = t.accept('old-hub2');
+    hub.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      deviceUid: 'old-hub2', name: 'Hub2', slot: 1 }, 'old-hello2')[0]);
+    await flush();
+    const hubEpoch = t.channel.peerInfos()[0].epoch;
+    t.channel.applyRemoteRoster(hubEpoch, [
+      { deviceUid: 'old-hub2', name: 'Hub2', role: 'compute', slot: 1 },
+      { deviceUid: 'succ2-uid', name: 'Succ2', role: 'compute', slot: 2 },
+      { deviceUid: t.channel.localUid(), name: 'WorkerD', role: 'compute', slot: 3 }
+    ]);
+    hub.drop(-1);
+    await flush();
+    // The new hub dials this worker; its hello declares the takeover.
+    const link = t.accept('succ2-in');
+    link.deliver(t.modules.protocol.encodeMessage({ type: 'hello', peerRole: 'compute',
+      deviceUid: 'succ2-uid', name: 'Succ2', slot: 1 }, 'succ-hello2')[0]);
+    await flush();
+    const computes = t.channel.peerInfos().filter(p => p.role === 'compute');
+    assert.equal(computes.length, 1, 'the incoming successor link survives');
+    assert.equal(t.channel.selfComputeNumber(), 2, 'the worker adopts the dialling successor');
+    const ack = t.sent(link).find(m => m.type === 'hello_ack');
+    assert(ack !== undefined && ack.slot === 2,
+      'the worker answers with its adopted slot, closing the loop');
   }
 
   // --- 5. The retired acm collaborate entry point refuses -------------------------

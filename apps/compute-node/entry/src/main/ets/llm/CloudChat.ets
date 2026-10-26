@@ -110,6 +110,7 @@ export class CloudChat implements ChatBackend {
 
   isBusy(): boolean { return this.jobs.length > 0; }
   activeCount(): number { return this.jobs.length; }
+  hasPendingNativeJobs(): boolean { return this.jobs.length > 0; }
 
   readinessError(): string {
     if (this.closed) return '模型服务已关闭。';

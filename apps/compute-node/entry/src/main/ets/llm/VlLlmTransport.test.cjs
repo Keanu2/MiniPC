@@ -17,6 +17,7 @@ let called = null;
 let engineStarts = 0;
 let engineReady = '';
 let engineOk = true;
+let streaming = true;
 const engineStub = {
   getInstance: () => ({
     readinessError: () => engineReady,
@@ -39,6 +40,7 @@ const context = { exports: {}, ArrayBuffer, Uint8Array, Date: { now: () => 123 }
     };
     if (name === '@kit.PerformanceAnalysisKit') return { hilog: { info() {}, error() {}, warn() {} } };
     if (name === './LocalChat') return {};
+    if (name === './OutputSettings') return {outputSettings:()=>({streaming})};
     if (name === './LlmTransport') return {};
     if (name === './QwenVlManager') return { QwenVlManager: engineStub };
     return {};
@@ -185,3 +187,18 @@ assert.equal(cleanVlPrompt('User task:\n这个 Control: 是啥\n\n\nControl: Cur
 }
 
 console.log('PASS: VlLlmTransport image forms, prompt peeling (incl. ReAct scaffolding), readiness gate, event mapping');
+{
+  streaming=false;const t=new VlLlmTransport('/cache','/files'),updates=[];
+  t.start([{role:'user',content:'image'}],u=>updates.push(u),'nonstream','QUJD');
+  streaming=true; // Settings change applies only to the next request.
+  called.cb({delta:'first'});called.cb({delta:' second'});assert.equal(updates.length,0);
+  called.cb({done:'first second',finishReason:'stop'});
+  assert.deepEqual(updates.map(u=>u.kind),['delta','done']);assert.equal(updates[0].text,'first second');
+  assert.equal(updates[0].metrics.streaming,false);assert.equal(updates[1].metrics.streaming,false);
+  const next=[];t.start([{role:'user',content:'next'}],u=>next.push(u),'stream','QUJD');
+  called.cb({delta:'live'});assert.equal(next[0].text,'live');assert.equal(next[0].metrics.streaming,true);
+  streaming=false;const failed=[];t.start([{role:'user',content:'bad'}],u=>failed.push(u),'bad','QUJD');
+  called.cb({done:'failure',error:'failure'});assert.deepEqual(failed.map(u=>u.kind),['done']);
+  streaming=true;
+}
+console.log('PASS: VL output preference buffers complete responses without changing an active request');

@@ -1,5 +1,20 @@
 // 补字候选中的否定字一律拒绝：把"可以"补成"不可以"这类语义反转比保留乱码更糟。
 const NEGATIVE_PREFIXES: string[] = ['不', '没', '无', '非', '未', '别', '勿', '莫', '反', '难'];
+/**
+ * 模型输出的出口清理。GEWU 引擎会在内部把跨块的多字节字符替换成 U+FFFD
+ * （真机实测：答案首个汉字被替换成 1-3 个 U+FFFD，原始字节在引擎侧已丢失，
+ * 无法真正还原；QoS Gewu API 无输出模式可调）。
+ * 1) 先按源文本启发式修复 repairUtf8FromSource——只补回有把握的字符
+ *    （多字锚点，或答案后文与提示词双证据一致的单字锚，且不在否定黑名单）；
+ * 2) 修不回来的残留 U+FFFD 直接剔除——显示层宁可缺一个字，也不出乱码，
+ *    更不出错字。
+ * 幂等：对干净文本是恒等变换，多层调用安全。
+ */
+export function sanitizeModelOutput(output: string, source: string): string {
+  const repaired = repairUtf8FromSource(output, source);
+  if (repaired.indexOf('\uFFFD') < 0) return repaired;
+  return repaired.replace(/\uFFFD/g, '');
+}
 
 export function repairUtf8FromSource(output: string, source: string): string {
   if (output.indexOf('\uFFFD') < 0 || source.length === 0) {

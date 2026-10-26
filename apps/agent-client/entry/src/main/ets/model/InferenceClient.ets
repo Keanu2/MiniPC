@@ -1,6 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
-import { ChatMessage, ClusterInfo, InferProfile, WireMessage } from '../protocol/ChatProtocol';
+import { ChatMessage, ClusterInfo, InferProfile, TaskSnapshot, validTaskSnapshot, WireMessage } from '../protocol/ChatProtocol';
 import { sha256Hex, utf8Bytes } from './InferenceWire';
 import { repairUtf8FromSource } from './Utf8Repair';
 
@@ -39,7 +39,11 @@ export interface InferHooks {
   owner?: string;
   /** Caption shown on the compute device's task card (≤64 chars). */
   label?: string;
+  taskId?: string;
+  subtaskId?: string;
 }
+
+interface TaskDelivery { snapshot: TaskSnapshot; epoch: number; attempts: number; }
 
 /** Developer/user split of one ReAct prompt (loop-react-split-v1). */
 export interface InferSplit {
@@ -69,6 +73,7 @@ class StreamState {
   timer: number = -1;
   /** Refused before acceptance; a retry timer owns the request until it is re-sent. */
   waiting: boolean = false;
+  queuedSince: number = 0;
   retryTimer: number = -1;
 }
 
@@ -100,6 +105,46 @@ class InferenceClient {
   private loadListener: (() => void) | null = null;
   private status: string = '正在检查模型能力';
   private broken: boolean = false;
+  private taskEpochs: Map<string, number> = new Map();
+  private taskQueue: Map<string, TaskDelivery> = new Map();
+  private deliveringTasks: boolean = false;
+  private taskDeliveryGeneration: number = 0;
+
+  /** Bounded, coalesced display snapshots; never block or retry inference work. */
+  publishTask(snapshot: TaskSnapshot): void {
+    if (!validTaskSnapshot(snapshot) || !this.isReady() || this.profileEpoch < 0) return;
+    let epoch = this.taskEpochs.get(snapshot.id);
+    if (epoch === undefined) {
+      epoch = this.profileEpoch;
+      if (this.taskEpochs.size >= 64) this.taskEpochs.delete(Array.from(this.taskEpochs.keys())[0]);
+      this.taskEpochs.set(snapshot.id, epoch);
+    }
+    if (epoch !== this.profileEpoch) return;
+    this.taskQueue.set(snapshot.id, { snapshot: snapshot, epoch: epoch, attempts: 0 });
+    this.deliverTasks();
+  }
+
+  private async deliverTasks(): Promise<void> {
+    if (this.deliveringTasks) return;
+    this.deliveringTasks = true;
+    const generation = this.taskDeliveryGeneration;
+    try {
+      while (this.taskQueue.size > 0 && generation === this.taskDeliveryGeneration) {
+        const id = Array.from(this.taskQueue.keys())[0];
+        const delivery = this.taskQueue.get(id);
+        this.taskQueue.delete(id);
+        if (delivery === undefined || delivery.epoch !== this.profileEpoch) continue;
+        let sent = false;
+        try {
+          sent = await nearbyChannel.send({ type: 'infer.task', version: 2, requestId: id, task: delivery.snapshot }, delivery.epoch);
+        } catch (_error) { /* A display failure cannot fail a model request. */ }
+        if (!sent && generation === this.taskDeliveryGeneration && delivery.attempts === 0 && delivery.epoch === this.profileEpoch && !this.taskQueue.has(id)) {
+          delivery.attempts++;
+          this.taskQueue.set(id, delivery);
+        }
+      }
+    } finally { if (generation === this.taskDeliveryGeneration) this.deliveringTasks = false; }
+  }
 
   /** Notified after the inference link state changed (for status chrome only). */
   setLinkListener(listener: (() => void) | null): void {
@@ -164,6 +209,10 @@ class InferenceClient {
   }
 
   reset(): void {
+    this.taskQueue.clear();
+    this.taskDeliveryGeneration++;
+    this.deliveringTasks = false;
+    // Keep bounded epoch tombstones: a late cancelled run must not publish onto a new link.
     this.finishNegotiate(LINK_LOST);
     this.profile = null;
     this.profileEpoch = -1;
@@ -326,6 +375,7 @@ class InferenceClient {
       this.fail(state, '算力端版本不支持');
       return false;
     }
+    if (state.waiting) this.publishWaiting(state, false);
     if (state.requestId.length > 0) {
       this.calls.delete(state.requestId);
     }
@@ -350,6 +400,10 @@ class InferenceClient {
     };
     if (state.hooks.label !== undefined && state.hooks.label.length > 0) {
       request.label = state.hooks.label.substring(0, 64);
+    }
+    if (state.hooks.taskId !== undefined && state.hooks.subtaskId !== undefined) {
+      request.taskId = state.hooks.taskId;
+      request.subtaskId = state.hooks.subtaskId;
     }
     if (state.messages !== undefined) {
       request.messages = state.messages;
@@ -586,12 +640,24 @@ class InferenceClient {
   private wait(state: StreamState): void {
     clearTimeout(state.timer);
     state.waiting = true;
+    if (state.queuedSince === 0) state.queuedSince = Date.now();
     this.calls.delete(state.requestId);
     clearTimeout(state.retryTimer);
     state.retryTimer = setTimeout(() => {
       this.resend(state);
     }, RETRY_INTERVAL_MS);
     this.waitingCalls.push(state);
+    this.publishWaiting(state, true);
+  }
+
+  /** Small optional display notice; old compute builds safely ignore it. */
+  private publishWaiting(state: StreamState, queued: boolean): void {
+    if (state.requestId.length === 0 || state.epoch < 0) return;
+    try {
+      nearbyChannel.send({ type: 'infer.status', version: 2, requestId: state.requestId,
+        source: 'queue-display', state: queued ? 'queued' : 'cleared',
+        text: String(Math.max(0, Date.now() - state.queuedSince)) }, state.epoch).catch((): void => {});
+    } catch (_) { /* Display delivery never changes retry/cancellation behavior. */ }
   }
 
   private retryWaiting(): void {
@@ -612,6 +678,7 @@ class InferenceClient {
     this.waitingCalls.splice(index, 1);
     clearTimeout(state.retryTimer);
     if (Date.now() - state.firstStarted >= BUSY_WAIT_MS) {
+      this.publishWaiting(state, false);
       state.waiting = false;
       state.reject?.(new Error(BUSY_TEXT));
       return;
@@ -625,7 +692,11 @@ class InferenceClient {
     }
     this.calls.delete(state.requestId);
     clearTimeout(state.timer);
-    hilog.info(0, 'NearbyChat', 'infer complete bytes=%{public}d', utf8Bytes(text).length);
+    const sent = state.messages !== undefined ?
+      'system=' + utf8Bytes(state.messages[0].content).length.toString() + ' user=' + utf8Bytes(state.messages[1].content).length.toString() :
+      'prompt=' + utf8Bytes(state.prompt).length.toString();
+    hilog.info(0, 'NearbyChat', 'infer complete bytes=%{public}d %{public}s elapsedMs=%{public}d',
+      utf8Bytes(text).length, sent, Date.now() - state.firstStarted);
     state.resolve?.(text);
   }
 
@@ -638,6 +709,7 @@ class InferenceClient {
     if (!live && !state.waiting) {
       return;
     }
+    if (state.waiting) this.publishWaiting(state, false);
     this.calls.delete(state.requestId);
     state.waiting = false;
     clearTimeout(state.timer);

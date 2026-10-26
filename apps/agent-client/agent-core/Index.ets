@@ -11,7 +11,7 @@ export {
   createLoopToolRegistry
 } from './src/main/ets/agent/ToolRegistry';
 export { ReActAgentRunner, AgentListener, AgentRunContext, PARTIAL_FINAL_STATUS } from './src/main/ets/agent/ReActAgentRunner';
-export { ParallelTaskRunner, ParallelDeps, ParallelObserver, SubtaskView, SubtaskPhase, SubtaskModelHooks, ClusterSize } from './src/main/ets/agent/parallel/ParallelTaskRunner';
+export { ParallelTaskRunner, ParallelDeps, ParallelObserver, ParallelTaskSnapshot, SubtaskView, SubtaskPhase, SubtaskModelHooks, ClusterSize } from './src/main/ets/agent/parallel/ParallelTaskRunner';
 export { Subtask, shouldTrySplit, splitTask, parseSubtasks } from './src/main/ets/agent/parallel/SubtaskSplitter';
 export { SubtaskOutcome, concatOutcomes, mergeOutcomes } from './src/main/ets/agent/parallel/SubtaskMerger';
 export { SplitPrompt, splitReActPrompt } from './src/main/ets/agent/ReActCore';

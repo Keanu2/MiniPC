@@ -5,7 +5,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { connection as btConnection, ble } from '@kit.ConnectivityKit';
 import { util } from '@kit.ArkTS';
-import { encodeMessage, MessageAssembler, WireMessage, DeviceInfoEntry } from '../protocol/ChatProtocol';
+import { encodeMessage, MessageAssembler, FragmentReceipt, WireMessage, DeviceInfoEntry } from '../protocol/ChatProtocol';
 import { COMPUTE_ADV_KEY_BYTES, COMPUTE_ADV_TYPE, COMPUTE_MANUFACTURE_ID, IS_SERVER } from './NearbyConfig';
 import { RankMember, freezeComputeRank, freezeNameRank, rankNames, slotOf } from '../cluster/ClusterRoster';
 
@@ -13,6 +13,14 @@ const BUNDLE = 'com.jiuwen.registrychatui';
 const SERVICE = 'nearby-compute';
 const CONNECT_TRY_MS = 8000;
 const SERVER_RESTART_DELAYS: number[] = [800, 2500, 7000, 15000];
+/** 解冻判定阈值。解冻看护每秒一跳，正常间隔恒为 1s；息屏深度冻结会停摆
+ * 应用全部定时器，解冻后首跳间隔必然 ≥ 此值。主线程被计算卡住 >15s 也会
+ * 误判，但误判代价只是清死链+重建监听（无入向连接时近乎零成本）。 */
+const THAW_GAP_MS = 15000;
+/** 监听自检周期。息屏还可能只杀系统侧监听而不冻结应用（真机实测：出向
+ * 链路照常、定时器无间隔、解冻看护失明、亮屏也不自愈），这种死法没有任
+ * 何本地事件，只能周期性强制重建兜底。新建监听或任一入向接入都会刷新计时。 */
+const LISTENER_REASSERT_MS = 180000;
 const ADVERTISE_RETRY_DELAYS: number[] = [1000, 3000, 8000, 20000, 30000];
 const ADV_STATE_WAIT_MS: number = 2000;
 const HUB_ELECTION_MS = 10000;
@@ -176,6 +184,21 @@ class Peer {
   peerId: string;
   slot: number = 0;
   computeSlot: number = 0;
+  /** 对端 hello/hello_ack 里自报的槽位。applyComputeSlots 会用本机冻结把
+   * computeSlot 覆写成自己的认知，此字段保留对端原始声明，供矛盾检测使用。 */
+  declaredSlot: number = 0;
+  /** 拨号时对端 BLE 广播里声明的槽位（1 = 已选出的 hub）。同为对端证据、不受
+   * 本机冻结影响；hello_ack 可能早于对端选出而未带槽位，此时它是唯一凭据。 */
+  advertisedSlot: number = 0;
+  /** 对端 hello/hello_ack 里声明的内存（握手时的单次采样）。排名用它而不是
+   * deviceInfo 持续上报值：握手值由对端采样一次、原文送达双方，两台拿到的
+   * 成员对逐字节相同；deviceInfo 上报与本机自采样存在相位差，冷启动引擎加载
+   * 正落在两拍之间时两边会互看对方内存更大（真机实测的双算力设备2）。 */
+  helloMem: number = -1;
+  /** 最近一次收到对端帧的时刻。系统息屏回收链路可能不派发断开事件，僵尸
+   * peer 会一直回答 hasHitPeer「已连接」挡住重拨（真机实测三台组网静默
+   * 死锁），fragmentTimer 按静默时长兜底清理。 */
+  lastFrameAt: number = 0;
   connection: linkEnhance.Connection;
   deviceUid: string = '';
   fromServer: boolean;
@@ -232,6 +255,13 @@ export class LinkEnhanceChannel {
   private rankingSlots: boolean = false;
   private advertiseTimer: number = -1;
   private selfMem: number = -1;
+  /** 本机随首次 compute 握手（hello / hello_ack）声明的内存，此后不再重采。
+   * 排名自用此值而非 selfMem 的最新采样：对端拿到的正是这个声明值，用它排名
+   * 才能保证双方视图一致（见 Peer.helloMem）。固定首声明是给 3 台以上网格的：
+   * 每条链路握手时刻不同，重采会让各对端持有不同版本的值（组网窗口内可能
+   * 瞬态双加冕）；固定后所有对端与本机自用永远是同一个数，N 台成员对同样
+   * 逐字节一致。应用重启后重新声明。 */
+  private selfHelloMem: number = -1;
   private frozenComputeKeys: string[] = [];
   private hubLostAt: number = 0;
   private hubMissingScans: number = 0;
@@ -279,50 +309,53 @@ export class LinkEnhanceChannel {
   private serverWanted: boolean = false;
   private serverRetryTimer: number = -1;
   private serverRetryAttempt: number = 0;
+  /** 连续多少轮 mesh 扫描满足「应被拨号却零接入」（尸体服务端判据）。 */
+  private serverRebuildStrikes: number = 0;
+  /** 解冻看护定时器 id；-1 = 未启动。 */
+  private thawTimer: number = -1;
+  /** 解冻看护上一跳时刻。冻结期间定时器停摆，解冻后首跳与此值的差即冻结时长。 */
+  private awakeLastTick: number = 0;
+  /** 上次「监听被证明健康」的时刻：新建监听或任一入向接入。超过
+   * LISTENER_REASSERT_MS 无证明即强制重建（息屏只杀监听的死法无事件可观察）。 */
+  private listenerAssertAt: number = 0;
+  /** 解冻时应用还在锁屏后（foreground=false）暂缓的重建，resume() 回前台补做。
+   * 不补做的话尸体 server 会活过解锁：resume→startServer 被 server!==null 短路。 */
+  private thawPendingRebuild: boolean = false;
   private epoch: number = 0;
   private lifecycle: number = 0;
   private foreground: boolean = true;
   private permissionPending: Promise<void> | null = null;
   private onMessage: ((message: WireMessage, epoch: number) => void) | null = null;
   private onConnection: ((connected: boolean, epoch: number) => void) | null = null;
+  private onActivity: ((connected: boolean) => void) | null = null;
   private status: string = IS_SERVER ? '可本机对话 · 请启用近场连接' : '请连接模型手机';
 
   initialize(context: common.UIAbilityContext): void { this.context = context; }
   operation(): number { return this.lifecycle; }
-  /**
-   * 回前台：恢复近场。
-   *
-   * suspend() 调的 disconnect() 会 server.stop()+close()、把 server=null、
-   * serverWanted=false，并且**不安排重启**（只有 serverStopped 那条路径带
-   * preserveServerIntent=true 才自愈）。原先这里只置 foreground 标志，
-   * 于是应用「退过一次后台再回前台」后本机服务端永久缺失 ——
-   * 对端连接恒得 32390201「Peer server is not started」（真机实测），
-   * 聊天端同时也不再扫描，表现为双方彻底连不上。
-   *
-   * prepare() → authorize() 里 `if (IS_SERVER) startServer()`；startServer() 自带
-   * `server !== null` 短路，所以重复调用是安全的。
-   */
   resume(): void {
     this.foreground = true;
-    this.prepare().catch((error: Error): void => {
+    this.prepare().then((): void => {
+      // 解冻发生在锁屏后时，onThaw 把重建挂起到这里：startServer 的
+      // server!==null 短路救不了尸体，必须走强制重建。
+      if (!this.thawPendingRebuild) return;
+      this.thawPendingRebuild = false;
+      if (this.serverWanted && this.server !== null) this.forceServerRebuild('thaw-resume');
+    }).catch((error: Error): void => {
       hilog.error(0, 'NearbyChat', 'near-field restore failed: %{public}s', error.message);
+      // prepare 中途失败会把服务端留在 null 而意图仍在（suspend 用
+      // disconnect(true) 保留）。按退避重试重建，避免对端拨本机恒得
+      // 32390201 而本机毫无感知。
+      this.scheduleServerRestart();
     });
   }
-  /**
-   * 退后台：断开近场，但**保留已冻结的排位**。
-   *
-   * 必须用 `disconnect(true)`（`preserveServerIntent`）而不是缺省 `disconnect()`：
-   * 后者会 `frozenComputeKeys = []`、`selfComputeSlot = 0`、`serverWanted = false`
-   * 且不安排重启 —— 于是回前台重建出来的服务端以 **slot 0** 广播，而选举规则是
-   * 「没有声明 hub 就都排在最后」，两台便会双双落成「算力设备2」✗（真机实测）。
-   * `disconnect(true)` 会保存并恢复排位与 leadership，正是 `serverStopped` 路径在用的语义。
-   *
-   * 随后取消后台重启：BLE 操作在后台可能受限，统一交给 `resume()` 触发。
-   */
-  suspend(): void {
-    this.foreground = false;
-    this.disconnect(true);
-    this.cancelServerRestart();
+  suspend(): void { this.foreground = false; this.cancelScan(); }
+  setActivityListener(listener: ((connected: boolean) => void) | null): void {
+    this.onActivity = listener;
+    listener?.(this.isConnected());
+  }
+  private notifyConnection(connected: boolean, epoch: number): void {
+    this.onActivity?.(connected);
+    this.onConnection?.(connected, epoch);
   }
   isForeground(): boolean { return this.foreground; }
   private checkOperation(operation: number): void {
@@ -560,6 +593,8 @@ export class LinkEnhanceChannel {
     try {
       const server = linkEnhance.createServer(SERVICE);
       server.on('connectionAccepted', (incoming: linkEnhance.Connection) => {
+        // 入向接入成功 = 监听健康的铁证，刷新自检计时。
+        this.listenerAssertAt = Date.now();
         const peerId = incoming.getPeerDeviceId() || ('accept-' + String(this.epoch + 1));
         hilog.info(0, 'NearbyChat', 'le-accept peer=%{public}s count=%{public}d', peerId, this.peers.length + 1);
         const existing = this.peers.find((item: Peer) => this.idsMatch(item.peerId, peerId));
@@ -593,15 +628,22 @@ export class LinkEnhanceChannel {
       }, HUB_ELECTION_MS);
       this.cancelServerRestart();
       this.serverRetryAttempt = 0;
+      this.startThawWatch();
+      this.listenerAssertAt = Date.now();
       let localName = '';
       try { localName = btConnection.getLocalName(); } catch (_) {}
       hilog.info(0, 'NearbyChat', 'le-server start name=%{public}s local=%{public}s slot=%{public}d',
         SERVICE, localName, this.selfComputeSlot);
       this.update('可本机对话 · 等待聊天手机连接');
     } catch (error) {
-      this.serverWanted = false;
+      // 启动失败不清除服务意图：息屏回前台时可能一次性失败（无线瞬时忙），
+      // 清掉 serverWanted 会让本机服务端永久缺失，对端拨本机恒得 32390201
+      // 「Peer server is not started」（真机实测）。保留意图按退避重试；
+      // 用户主动停用走 disconnect()，不受此影响。
+      this.serverWanted = true;
       const code = (error as BusinessError).code;
       hilog.error(0, 'NearbyChat', 'le-server start failed code=%{public}s', String(code));
+      this.scheduleServerRestart();
       throw new Error('无法启动增强连接（' + String(code) + '）。');
     }
   }
@@ -962,7 +1004,7 @@ export class LinkEnhanceChannel {
         // hub themselves. The hub can therefore suspend discovery while chats
         // are attached without preventing workers from joining or recovering.
         if (hit.slot === 1 && this.selfComputeSlot !== 1) {
-          await this.tryConnect('compute', mac);
+          await this.tryConnect('compute', mac, hit.slot);
           continue;
         }
         if (this.selfComputeSlot === 1 && hit.slot === 0) continue;
@@ -971,7 +1013,7 @@ export class LinkEnhanceChannel {
         // same scan, producing two sessions for one physical compute box.
         if (hit.key.length > 0 && localKey.length > 0 && localKey <= hit.key) continue;
         if (hit.key.length === 0 && localName.length > 0 && hitName.length > 0 && localName <= hitName) continue;
-        await this.tryConnect('compute', mac);
+        await this.tryConnect('compute', mac, hit.slot);
       }
     } finally {
       // A scan cancelled by stop/re-enable belongs to the old lifecycle. It must
@@ -982,6 +1024,7 @@ export class LinkEnhanceChannel {
         if (operation === this.lifecycle && this.foreground) {
           this.meshSettled = true;
           this.refreshComputeSlots();
+          this.considerServerRebuild();
         }
       }
     }
@@ -1030,6 +1073,67 @@ export class LinkEnhanceChannel {
     hilog.warn(0, 'NearbyChat', 'le-hub failover self=%{public}s', self);
     this.applyComputeSlots();
     this.update('已接管为算力设备1，等待聊天设备重连…');
+  }
+
+  /**
+   * 接班人判定。hub 离线后 considerHubFailover 会把幸存者里排位最高的工作机
+   * 加冕成新 hub（它开始广播 slot=1），但下级工作机的冻结排位还留着旧 hub：
+   * refreshComputeSlots 的冻结快路径把新 hub 按旧排位覆写成 slot ≥ 2，
+   * pruneWorkerLinks 随即撕链——「算力节点只与算力设备1保持组网」无限重拨
+   * 循环，两台永远组不上网（真机实测：M18 接管后 M14 每 8 秒连上又被拒）。
+   * 对端持有 hub 凭据（握手自报槽位 1，或拨号广播声明 1）、凭据人确实在本机
+   * 冻结排位里且排位高于本机、且排位比它高的成员全体缺席（不在线也不在
+   * 广播，与 failover 的幸存者判据同源）时，这是一次合法接班，本机应认它。
+   */
+  private successorClaimant(): Peer | undefined {
+    if (this.frozenComputeKeys.length === 0) return undefined;
+    const selfKey = this.computeKey(this.localUid(), this.localName());
+    const myIndex = this.frozenComputeKeys.indexOf(selfKey);
+    if (myIndex < 1) return undefined;
+    for (const peer of this.peers) {
+      if (peer.role !== 'compute' || (!peer.opened && !peer.ready)) continue;
+      if (peer.declaredSlot !== 1 && peer.advertisedSlot !== 1) continue;
+      const key = this.computeKey(peer.deviceUid || peer.peerId, peer.helloName);
+      if (key.length === 0 || key === selfKey) continue;
+      const index = this.frozenComputeKeys.indexOf(key);
+      // 只认冻结排位里的上位工作机：旧 hub 自己回连走正常路径（index 0），
+      // 未入册的陌生声明不接管既有秩序，排位低于本机的声明是对方的错误选举。
+      if (index < 1 || index >= myIndex) continue;
+      let superiorAlive = false;
+      for (let i = 0; i < index; i++) {
+        const above = this.frozenComputeKeys[i];
+        if (this.peers.some((other: Peer) => other.ready && other.role === 'compute' &&
+          this.computeKey(other.deviceUid || other.peerId, other.helloName) === above)) {
+          superiorAlive = true;
+          break;
+        }
+        if (above.indexOf('uid:') === 0 && this.lastHits.some((hit: BleHit) => hit.compute &&
+          hit.key === advKeyOf(above.substring(4)))) {
+          superiorAlive = true;
+          break;
+        }
+      }
+      if (superiorAlive) continue;
+      return peer;
+    }
+    return undefined;
+  }
+
+  /** 承认接班：砍掉缺席的上位者，凭据人升为设备1，其余按原序保留。 */
+  private adoptSuccessorHub(claimant: Peer): void {
+    const claimantKey = this.computeKey(claimant.deviceUid || claimant.peerId, claimant.helloName);
+    const index = this.frozenComputeKeys.indexOf(claimantKey);
+    if (index < 1) return;
+    const selfKey = this.computeKey(this.localUid(), this.localName());
+    const rank = this.frozenComputeKeys.slice(index);
+    if (rank.indexOf(selfKey) < 0) rank.push(selfKey);
+    this.frozenComputeKeys = rank;
+    this.leadershipPinned = true;
+    this.hubLostAt = 0;
+    this.hubMissingScans = 0;
+    hilog.warn(0, 'NearbyChat', 'le-hub adopt=%{public}s rank=%{public}d', claimantKey, index);
+    this.applyComputeSlots();
+    this.pruneWorkerLinks();
   }
 
   private hitName(hit: BleHit): string {
@@ -1202,7 +1306,124 @@ export class LinkEnhanceChannel {
     }, delay);
   }
 
-  private tryConnect(kind: string, deviceId: string): Promise<boolean> {
+  /**
+   * 尸体服务端检测：息屏冻结期间 serverStopped 事件可能丢失，server 对象
+   * 还在而系统侧监听已死——对端拨本机恒得 32390201，本机却毫无感知（真机
+   * 实测：三台组网静默死锁两小时）。判据全部本地可见：本机声明要监听、零
+   * ready compute 链路、且存在 key 更大的可信算力广播（按拨号方向规则对端
+   * 必然拨本机）。连续 5 轮扫描如此仍无人接入，即强制重建监听。
+   */
+  private considerServerRebuild(): void {
+    const healthy = this.peers.some((peer: Peer) => peer.ready && peer.role === 'compute');
+    const localKey = advKeyOf(this.localUid());
+    const expected = this.serverWanted && this.foreground && this.server !== null && !healthy &&
+      localKey.length > 0 && this.trustedAdvertiserMacs().some((mac: string) => {
+      const hit = this.lastHits.find((item: BleHit) => item.mac === mac);
+      if (hit === undefined || this.hasHitPeer(hit)) return false;
+      return hit.key.length > 0 && hit.key !== localKey && localKey < hit.key;
+    });
+    if (!expected) {
+      this.serverRebuildStrikes = 0;
+      return;
+    }
+    this.serverRebuildStrikes++;
+    if (this.serverRebuildStrikes < 5) return;
+    this.serverRebuildStrikes = 0;
+    this.forceServerRebuild('zero-incoming');
+  }
+
+  /**
+   * 强制重建监听：丢弃可能已成尸体的 server 对象（系统侧已死但事件丢失），
+   * 重新 createServer+start。不触碰 this.peers——出向链路是独立的客户端连接。
+   */
+  private forceServerRebuild(reason: string): void {
+    const dead = this.server;
+    if (dead === null) return;
+    this.server = null;
+    try { dead.stop(); } catch (_) {}
+    try { dead.close(); } catch (_) {}
+    hilog.warn(0, 'NearbyChat', 'le-server rebuild(%{public}s)：丢弃旧监听重建', reason);
+    try { this.startServer(); } catch (_) {}
+  }
+
+  /**
+   * 解冻看护。息屏深度冻结会静默杀死系统侧 linkEnhance 服务端并回收链路，
+   * 且不派发 serverStopped/断开事件——server 对象还在而监听已死，聊天手机
+   * 拨本机恒得 32390201，而本机出向链路照常工作，considerServerRebuild 的
+   * 「零健康链路」判据永远不满足（真机实测：hub 星型健康、聊天手机被拒
+   * 25 分钟）。冻结期间定时器全部停摆，解冻后首跳必然出现 ≥THAW_GAP_MS
+   * 的间隔，以此判定解冻：清掉跨冻结窗口无帧的死链，并强制重建监听。
+   */
+  private startThawWatch(): void {
+    if (this.thawTimer !== -1) return;
+    this.awakeLastTick = Date.now();
+    this.thawTimer = setInterval(() => {
+      const now = Date.now();
+      const previous = this.awakeLastTick;
+      this.awakeLastTick = now;
+      if (now - previous >= THAW_GAP_MS) this.onThaw(previous);
+      if (now - this.listenerAssertAt >= LISTENER_REASSERT_MS) this.onListenerReassert();
+    }, 1000);
+  }
+
+  private stopThawWatch(): void {
+    if (this.thawTimer === -1) return;
+    clearInterval(this.thawTimer);
+    this.thawTimer = -1;
+  }
+
+  /** boundary = 冻结前最后一跳时刻；此后没来过一帧的 peer 按死链清理。 */
+  private onThaw(boundary: number): void {
+    const gapSec = Math.round((Date.now() - boundary) / 1000);
+    hilog.warn(0, 'NearbyChat', 'le-thaw 检测到息屏解冻 gap=%{public}ds，清理静默链路', gapSec);
+    // 与「系统静默回收链路」无法区分，跨越整个冻结窗口无帧的一律按死链清掉
+    // （compute 链路另有 45s 无帧兜底；chat 链路长静默，只能靠这里）。
+    const stale = this.peers.filter((peer: Peer) => peer.lastFrameAt <= boundary);
+    for (const peer of stale) this.drop(peer, '息屏唤醒，已清理无响应的近场连接。');
+    // 监听缺失（server===null）：来自 serverStopped 自愈路径——它安排的退避
+    // 重试有前台门槛，而退避重试与 resume() 都被锁屏挡在后台（真机实测：
+    // 408s 冻结解冻后无人接入，nova 拨入恒 32390201）。这里直接补建；后台
+    // 若失败，180s 自检还会再试。
+    if (!IS_SERVER || !this.serverWanted) return;
+    if (this.server === null) {
+      hilog.warn(0, 'NearbyChat', 'le-thaw 监听缺失，后台补建');
+      try { this.startServer(); } catch (_) {}
+      return;
+    }
+    // 监听已成尸体、startServer 被 server!==null 短路的死局：锁屏未回
+    // 前台时先挂起，等 resume() 补做——否则尸体活过解锁。仍有跨过冻结
+    // 窗口收帧的入向链路就先不动：接入成功是监听健康的铁证，重建反而
+    // 会拆掉活链（退后台保连接语义，见 background-* 用例）。
+    if (!this.foreground) {
+      if (this.peers.some((peer: Peer) => peer.fromServer)) return;
+      this.thawPendingRebuild = true;
+      hilog.warn(0, 'NearbyChat', 'le-thaw 应用未在前台，重建挂起等待回前台');
+      return;
+    }
+    this.forceServerRebuild('thaw-' + String(gapSec) + 's');
+  }
+
+  /**
+   * 周期性监听自检。两种死法：
+   * 一、只杀系统侧监听、不冻结应用——出向链路照常、定时器无间隔、解冻
+   * 看护失明、亮屏也不自愈（真机实测：拨入恒 32390201 长达 25 分钟）。
+   * 二、serverStopped 自愈路径安排的重启有前台门槛，锁屏后台永远等不到
+   * resume()（真机实测：解冻 408s 后仍无监听）。都没有本地事件可观察，
+   * 只能定时重建。已挂入向连接时跳过——接入成功本身是监听健康的铁证，
+   * 且避免打扰会话。
+   */
+  private onListenerReassert(): void {
+    this.listenerAssertAt = Date.now();
+    if (!IS_SERVER || !this.serverWanted) return;
+    if (this.server === null) {
+      try { this.startServer(); } catch (_) {}
+      return;
+    }
+    if (this.peers.some((peer: Peer) => peer.fromServer)) return;
+    this.forceServerRebuild('reassert');
+  }
+
+  private tryConnect(kind: string, deviceId: string, advertisedSlot: number = 0): Promise<boolean> {
     const operation = this.lifecycle;
     return new Promise<boolean>((resolve) => {
       let settled = false;
@@ -1235,7 +1456,7 @@ export class LinkEnhanceChannel {
             kind, String(result.success), result.reason, deviceId);
           if (!result.success) { finish(false); return; }
           if (handle === null) { finish(false); return; }
-          this.attach(handle, result.deviceId || deviceId, false);
+          this.attach(handle, result.deviceId || deviceId, false, advertisedSlot);
           finish(true);
         });
         handle.connect();
@@ -1388,34 +1609,67 @@ export class LinkEnhanceChannel {
       // global numbering from that partial view or provisionally claim slot 2.
       if (!establishedHub && (this.frozenComputeKeys.length > 0 ||
         this.peers.some((peer: Peer) => peer.role === 'compute' && peer.computeSlot === 1))) {
-        this.applyComputeSlots();
-        this.pruneWorkerLinks();
-        return;
+        // 冻结快路径之前先认合法接班：否则旧排位把已接管的新 hub 覆写成
+        // slot ≥ 2，pruneWorkerLinks 撕链进入无限重拨（见 successorClaimant）。
+        const successor = this.successorClaimant();
+        if (successor !== undefined) {
+          this.adoptSuccessorHub(successor);
+          return;
+        }
+        if (!this.hubClaimContradicted()) {
+          this.applyComputeSlots();
+          this.pruneWorkerLinks();
+          return;
+        }
+        // 冻结排位认定的 hub 自己声明是工作机（declaredSlot ≥ 2）：互让分裂脑
+        // ——双方各认对方为设备1、双双自显示算力设备2（真机实测）。此时既有
+        // 逃生通道全部失效：failover 要求旧 hub 在扫描中不可见（对方明明在线）、
+        // 名册同步只收 hub 上报（没有 hub）、冻结与握手守卫又挡住重选。冻结不可
+        // 信，清空回到未定档状态，落到下方共享选举：双方看到同一矛盾各自清空，
+        // 用各机自报 memAvail + 稳定 key 排出同一顺序，一轮收敛。
+        this.frozenComputeKeys = [];
+        this.selfComputeSlot = 0;
+        this.hubLostAt = 0;
+        this.hubMissingScans = 0;
+        // computeSlot 里的旧值是本机冻结的回声（把对方覆写成 1），不还原成对端
+        // 自报值会毒化下面的握手等待与拨号判断。
+        for (const peer of this.peers) {
+          if (peer.role === 'compute') peer.computeSlot = peer.declaredSlot;
+        }
       }
       // Once elected, the hub allocates membership even when discovery is
       // suspended for chat/inference or meshSettled was cleared by a peer drop.
       if (!establishedHub && (!this.meshSettled || !this.electionReady)) return;
-      // No local re-election while an established compute handshake exists. The
-      // two boxes sample memAvail at different moments and a VL hub reads lower
-      // than an idle text box, so both could crown themselves slot 1 and the
-      // hub-side prune tears the healthy link down (E69D0195 after ~10s, i.e.
-      // the election timer). The dialled peer's role/slot is authoritative: a
-      // worker that dialled a hub must join it, not re-elect against it. The
-      // accepting hub keeps its own election (it may legitimately be the hub).
+      // 拨号握手在途（已拨出、hello_ack 未回）时先不动选举，等对端自报槽位到达：
+      // 已编号的 hub 会让上面的冻结守卫走名册路径，把本机编进队伍；未编号的对端
+      // 则由下方共享选举收敛。既不造假 hub，也不在对端槽位未知时抢先本地加冕。
       if (!establishedHub && this.peers.some((peer: Peer) =>
-        peer.role === 'compute' && !peer.fromServer &&
-        (peer.ready || peer.opened) && (peer.computeSlot === 1 || peer.ready || peer.hello)))
+        peer.role === 'compute' && !peer.fromServer && peer.opened && !peer.ready))
+        return;
+      // 拨号对端持有 hub 凭据（自报槽位 1，或拨号时 BLE 广播声明 slot 1——
+      // hello_ack 可能在对端选出前发出而不带槽位，广播是当时的唯一凭据）：
+      // 拨出方加入它，不与既定 hub 对抗重选（E69D0195：双方各自采样内存会同时
+      // 加冕、prune 撕链）。凭据只认 1：slot 0 的新起对端没有 hub 凭据，落入
+      // 下方共享选举——老代码拿 dialled[0] 兜底造 hub，正是互让分裂脑的根源。
+      if (!establishedHub && this.peers.some((peer: Peer) =>
+        peer.role === 'compute' && !peer.fromServer && (peer.ready || peer.opened) &&
+        (peer.computeSlot === 1 || peer.advertisedSlot === 1)))
         return this.applyJoinedPeerView();
       const members: RankMember[] = [];
       const self = new RankMember();
       self.key = this.computeKey(this.localUid(), this.localName());
-      self.memAvail = this.selfMem;
+      // 排名只用握手声明值（hello/hello_ack 里的 memAvail）：双方各采样一次、
+      // 原文互达，成员对逐字节相同，排序必然一致。deviceInfo 持续上报与本机
+      // 自采样有相位差，冷启动引擎加载落在两拍之间时，两边各自"本地最新值"
+      // 都比对端上次上报值低 → 互看对方更强 → 双双算力设备2（真机实测）。
+      // 老对端握手不带值时回退到上报值。
+      self.memAvail = this.selfHelloMem >= 0 ? this.selfHelloMem : this.selfMem;
       members.push(self);
       for (const peer of this.peers) {
         if (peer.role !== 'compute') continue;
         const item = new RankMember();
         item.key = this.computeKey(peer.deviceUid || peer.peerId, peer.helloName || this.peerName(peer.peerId));
-        item.memAvail = peer.memAvail;
+        item.memAvail = peer.helloMem >= 0 ? peer.helloMem : peer.memAvail;
         members.push(item);
       }
       if (this.frozenComputeKeys.length === 0) {
@@ -1444,27 +1698,41 @@ export class LinkEnhanceChannel {
   }
 
   /**
-   * A compute peer that already exchanged hello with us knows the star topology
-   * better than our local memory snapshot. Freeze its declared hub first and
-   * ourselves after it, so the two boxes never elect each other as two hubs
-   * from independently sampled memAvail. Only the dialling side (client of the
-   * link) adopts the peer-first view: the accepting server must never demote
-   * itself, it stays the hub candidate until a remote roster/claim says
-   * otherwise. Without a declared hub we stay last; the hub's next roster sync
-   * assigns the authoritative rank.
+   * 冻结排位把某个对端定为 hub（frozenComputeKeys[0]），而该对端自报的槽位
+   * ≥ 2（它自认工作机）——互让分裂脑的特征矛盾：双方各认对方为设备1，双双
+   * 显示算力设备2。自报 0（刚重启、尚未定档）不算矛盾：它会在自己的选举里
+   * 定档并广播，本机等待即可。必须读 declaredSlot：computeSlot 会被
+   * applyComputeSlots 按本机冻结覆写成 1，读到的是自己的回声。
+   */
+  private hubClaimContradicted(): boolean {
+    if (this.frozenComputeKeys.length === 0) return false;
+    const hubKey = this.frozenComputeKeys[0];
+    if (hubKey === this.computeKey(this.localUid(), this.localName())) return false;
+    for (const peer of this.peers) {
+      if (peer.role !== 'compute' || peer.declaredSlot < 2) continue;
+      if (this.computeKey(peer.deviceUid || peer.peerId, peer.helloName) === hubKey) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 拨出方加入已确认的 hub：把对端冻结在前、自己垫后，两台不会从各自采样的
+   * memAvail 同时加冕成两个 hub（E69D0195）。hub 凭据只有两种：对端
+   * hello/hello_ack 自报槽位 1，或拨号时 BLE 广播声明 slot 1。没有任何凭据时
+   * 绝不拿 dialled[0] 兜底造 hub——对端同样新起（slot 0）时，它会按共享排序
+   * 选出拨出方，双方互相谦让、双双冻结成算力设备2（真机实测的互让分裂脑）。
+   * 此处保持现视图返回，交回共享选举用各机自报 memAvail + 稳定 key 收敛。
    */
   private applyJoinedPeerView(): void {
     const selfKey = this.computeKey(this.localUid(), this.localName());
     const dialled = this.peers.filter((peer: Peer) =>
       peer.role === 'compute' && !peer.fromServer && (peer.ready || peer.opened));
-    if (dialled.length === 0) {
-      // Accepting side: keep the current view so an established hub does not
-      // re-elect itself against a just-joined worker.
+    const hubPeer = dialled.find((peer: Peer) => peer.computeSlot === 1 || peer.advertisedSlot === 1);
+    if (hubPeer === undefined) {
       this.applyComputeSlots();
       this.pruneWorkerLinks();
       return;
     }
-    const hubPeer = dialled.find((peer: Peer) => peer.computeSlot === 1) || dialled[0];
     const hubKey = this.computeKey(hubPeer.deviceUid || hubPeer.peerId, hubPeer.helloName);
     if (hubKey.length === 0 || hubKey === selfKey) {
       this.applyComputeSlots();
@@ -1473,6 +1741,7 @@ export class LinkEnhanceChannel {
     }
     const keys: string[] = [hubKey];
     for (const peer of dialled) {
+      if (peer === hubPeer) continue;
       const key = this.computeKey(peer.deviceUid || peer.peerId, peer.helloName);
       if (key.length === 0 || key === hubKey || key === selfKey || keys.indexOf(key) >= 0) continue;
       keys.push(key);
@@ -1532,9 +1801,15 @@ export class LinkEnhanceChannel {
     });
   }
 
-  private attach(incoming: linkEnhance.Connection, peerId: string, fromServer: boolean): Peer {
+  private attach(incoming: linkEnhance.Connection, peerId: string, fromServer: boolean,
+    advertisedSlot: number = 0): Peer {
     const peer = new Peer(++this.epoch, peerId, incoming, fromServer);
+    peer.advertisedSlot = advertisedSlot;
     this.peers.push(peer);
+    peer.assembler.setFragmentObserver((part: FragmentReceipt): void => {
+      hilog.info(0, 'NearbyChat', 'le-frame-recv epoch=%{public}d id=%{public}s index=%{public}d count=%{public}d received=%{public}d bytes=%{public}d elapsedMs=%{public}d gapMs=%{public}d',
+        peer.epoch, part.id, part.index, part.count, part.received, part.bytes, part.elapsedMs, part.gapMs);
+    });
     incoming.on('disconnected', (reason: number) => {
       hilog.info(0, 'NearbyChat',
         'le-disconnect epoch=%{public}d role=%{public}s activeJobs=%{public}d peer=%{public}s reason=%{public}d',
@@ -1543,19 +1818,36 @@ export class LinkEnhanceChannel {
     });
     incoming.on('dataReceived', (data: ArrayBuffer) => {
       if (!this.holds(peer)) return;
+      peer.lastFrameAt = Date.now();
       try {
         const text = fromBuffer(data);
         const message = peer.assembler.receive(text);
         if (message !== null) this.receive(peer, message);
       } catch (error) {
-        hilog.warn(0, 'NearbyChat', 'le-recv invalid epoch=%{public}d', peer.epoch);
+        const detail = (error as Error).message || '';
+        const safe = detail.indexOf('Incomplete chat fragments timed out id=') === 0 ? detail :
+          (['Fragment exceeds limit', 'Malformed chat fragment', 'Invalid fragment payload',
+            'Conflicting fragment count', 'Conflicting duplicate fragment', 'Too many incomplete chat messages',
+            'Chat message exceeds 64 KiB', 'Missing chat fragment', 'Invalid chat message'].includes(detail) ? detail : 'decode failed');
+        hilog.warn(0, 'NearbyChat', 'le-recv invalid epoch=%{public}d reason=%{public}s', peer.epoch, safe);
         this.drop(peer, '收到无效消息，连接已结束。');
       }
     });
     peer.timer = setTimeout(() => this.drop(peer, '连接超时，请确认两端应用在前台后重试。'), 20000);
     peer.fragmentTimer = setInterval(() => {
       try { peer.assembler.checkExpiry(); }
-      catch (_) { this.drop(peer, '消息传输中断，请重新连接。'); }
+      catch (error) {
+        hilog.warn(0, 'NearbyChat', 'le-frame-timeout epoch=%{public}d reason=%{public}s', peer.epoch, (error as Error).message);
+        this.drop(peer, '消息传输中断，请重新连接。');
+      }
+      // 息屏静默回收兜底：系统回收链路可能不派发断开事件（真机实测，三台
+      // 组网卡死两小时的直接原因之一）。compute 链路每 ~2s 有 deviceInfo
+      // 往来，ready 后 45s 无任何帧即可判定链路已死，清掉才能重拨；chat
+      // 链路本就长静默，不适用此判据。
+      if (peer.ready && peer.role === 'compute' && peer.lastFrameAt > 0 &&
+        Date.now() - peer.lastFrameAt > 45000) {
+        this.drop(peer, '算力链路长时间无响应，已自动清理。');
+      }
     }, 1000);
     hilog.info(0, 'NearbyChat', 'le-attach epoch=%{public}d peer=%{public}s server=%{public}s',
       peer.epoch, peerId, String(fromServer));
@@ -1596,9 +1888,13 @@ export class LinkEnhanceChannel {
     if (!this.holds(peer) || peer.opened) return;
     peer.opened = true;
     if (!fromServer) {
+      // 首声明固定：只在从未声明过时采样。之后每条链路的 hello 都带同一个
+      // 数，对端们持有的本机值不会因握手先后而分版本（3 台以上必需）。
+      if (IS_SERVER && this.selfHelloMem < 0) this.selfHelloMem = this.selfMem;
       this.write(peer, {
         type: 'hello', peerRole: IS_SERVER ? 'compute' : 'chat', name: this.localName(), deviceUid: this.localUid(),
-        slot: this.selfComputeSlot > 0 ? this.selfComputeSlot : undefined
+        slot: this.selfComputeSlot > 0 ? this.selfComputeSlot : undefined,
+        memAvail: this.selfHelloMem >= 0 ? this.selfHelloMem : undefined
       });
     }
   }
@@ -1625,7 +1921,15 @@ export class LinkEnhanceChannel {
         peer.hello = true;
         peer.role = role;
         if (peer.role === 'compute') {
-          if (message.slot !== undefined) peer.computeSlot = message.slot;
+          // 首次握手定下声明值，此后不再重采：acknowledge() 同步紧随其后，
+          // hello_ack 带的就是这个数；后续任何对端的握手也带同一个数，所有
+          // 对端持有的本机值与本机自用值永远是同一个数（N 台成员对一致）。
+          if (this.selfHelloMem < 0) this.selfHelloMem = this.selfMem;
+          if (message.slot !== undefined) {
+            peer.computeSlot = message.slot;
+            peer.declaredSlot = message.slot;
+          }
+          if (typeof message.memAvail === 'number' && message.memAvail >= 0) peer.helloMem = message.memAvail;
           this.refreshComputeSlots();
         } else {
           this.refreshChatSlots();
@@ -1634,7 +1938,13 @@ export class LinkEnhanceChannel {
       } else if (message.type === 'hello_ack' && peer.opened) {
         if (!this.claimIdentity(peer, message.deviceUid || '', 'compute')) return;
         peer.role = 'compute';
-        if (IS_SERVER && message.slot !== undefined) peer.computeSlot = message.slot;
+        if (IS_SERVER && message.slot !== undefined) {
+          peer.computeSlot = message.slot;
+          peer.declaredSlot = message.slot;
+        }
+        if (IS_SERVER && typeof message.memAvail === 'number' && message.memAvail >= 0) {
+          peer.helloMem = message.memAvail;
+        }
         if (typeof message.name === 'string') peer.helloName = message.name;
         if (!IS_SERVER && typeof message.slot === 'number' && message.slot >= 1) this.selfSlot = Math.floor(message.slot);
         this.refreshComputeSlots();
@@ -1677,7 +1987,12 @@ export class LinkEnhanceChannel {
       inferenceVersions: [2]
     };
     if (peer.role === 'chat' && peer.slot >= 1) ack.slot = peer.slot;
-    if (peer.role === 'compute' && this.selfComputeSlot >= 1) ack.slot = this.selfComputeSlot;
+    if (peer.role === 'compute') {
+      if (this.selfComputeSlot >= 1) ack.slot = this.selfComputeSlot;
+      // 首次 compute 握手声明的内存：每条链路的 ack 都带同一个数，双方排名
+      // 共用；不随 selfMem 波动（见 selfHelloMem 字段注释）。
+      if (this.selfHelloMem >= 0) ack.memAvail = this.selfHelloMem;
+    }
     this.write(peer, ack);
     this.ready(peer);
   }
@@ -1698,7 +2013,7 @@ export class LinkEnhanceChannel {
     this.refreshStatus();
     hilog.info(0, 'NearbyChat', 'le-ready epoch=%{public}d peer=%{public}s peers=%{public}d',
       peer.epoch, peer.peerId, this.connectedCount());
-    this.onConnection?.(true, peer.epoch);
+    this.notifyConnection(true, peer.epoch);
   }
 
   async send(message: WireMessage, expectedEpoch?: number): Promise<boolean> {
@@ -1716,15 +2031,23 @@ export class LinkEnhanceChannel {
       return Promise.resolve(false);
     }
     let frames: string[];
-    try { frames = encodeMessage(message, String(peer.epoch) + '-' + String(++peer.sequence)); }
+    const fragmentId = String(peer.epoch) + '-' + String(++peer.sequence);
+    try { frames = encodeMessage(message, fragmentId); }
     catch (_) { this.drop(peer, '消息格式或长度超出限制。'); return Promise.resolve(false); }
     hilog.info(0, 'NearbyChat', 'le-send type=%{public}s epoch=%{public}d peer=%{public}s frames=%{public}d',
       message.type, peer.epoch, peer.peerId, frames.length);
     ++peer.pending;
+    const enqueuedAt = Date.now();
     peer.writes = peer.writes.then(async (): Promise<boolean> => {
+      const startedAt = Date.now();
+      hilog.info(0, 'NearbyChat', 'le-write-start type=%{public}s request=%{public}s epoch=%{public}d id=%{public}s count=%{public}d queueMs=%{public}d',
+        message.type, message.requestId || '', peer.epoch, fragmentId, frames.length, startedAt - enqueuedAt);
       try {
-        for (const frame of frames) {
-          if (!await this.sendFrame(peer, frame)) return false;
+        for (let index = 0; index < frames.length; index++) {
+          if (!await this.sendFrame(peer, frames[index])) return false;
+          // sendData returning means submitted to the SDK, not delivered to the peer.
+          hilog.info(0, 'NearbyChat', 'le-frame-submit epoch=%{public}d id=%{public}s index=%{public}d count=%{public}d bytes=%{public}d elapsedMs=%{public}d',
+            peer.epoch, fragmentId, index, frames.length, toBuffer(frames[index]).byteLength, Date.now() - startedAt);
         }
         return this.holds(peer);
       } finally { --peer.pending; }
@@ -1766,7 +2089,7 @@ export class LinkEnhanceChannel {
 
   private update(status: string): void {
     this.status = status;
-    this.onConnection?.(this.isConnected(), this.epoch);
+    this.notifyConnection(this.isConnected(), this.epoch);
   }
 
   private drop(peer: Peer, status: string): void {
@@ -1801,7 +2124,7 @@ export class LinkEnhanceChannel {
     }
     // Publish only after renumbering survivors; otherwise the immediate snapshot
     // contains gaps and is rejected by every worker.
-    this.onConnection?.(this.isConnected(), peer.epoch);
+    this.notifyConnection(this.isConnected(), peer.epoch);
   }
 
   disconnect(preserveServerIntent: boolean = false): void {
@@ -1811,7 +2134,13 @@ export class LinkEnhanceChannel {
     this.cancelServerRestart();
     this.cancelAdvertiseRetry();
     this.advertiseRetryAttempt = 0;
-    if (!recoverServer) this.serverWanted = false;
+    // 保留意图的路径（suspend/serverStopped 自愈）继续看护，等下次 startServer
+    // 复用；用户彻底停用才真正停下。
+    if (!recoverServer) {
+      this.serverWanted = false;
+      this.stopThawWatch();
+      this.thawPendingRebuild = false;
+    }
     ++this.lifecycle;
     ++this.meshRun;
     this.meshBusy = false;

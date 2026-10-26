@@ -1,0 +1,119 @@
+--- a/qwen2vl_sdk.cpp
++++ b/qwen2vl_sdk.cpp
+@@ -273,7 +273,8 @@
+             goto out;
+         }
+ 
+-        qwen2vl::Image image(iw, ih, ic, image_data);
++        // stbi_load(..., 3) always returns RGB, even for grayscale/RGBA input.
++        qwen2vl::Image image(iw, ih, 3, image_data);
+         qwen2vl::ImageTokens image_tokens;
+         qwen2vl::VLInputChunks chunks;
+         qwen2vl::preprocess_vision_input(
+@@ -309,9 +310,18 @@
+         // 其余 token 用 skip_special_tokens=true 解码，防其他特殊 token 泄漏进结果。
+         auto end_txt = chunks.entries.back().txt;
+         std::vector<llm::Token> tokens = impl->tokenizer->tokenize(end_txt, true);
+-        while (session->eval(tokens.data(), tokens.size()) == llm::ErrorCode::OK) {
++        while (true) {
+             if (impl->cancel.load()) {
+                 result = QWEN2VL_ERR_CANCELLED;
++                break;
++            }
++            const auto eval_rc = session->eval(tokens.data(), tokens.size());
++            if (impl->cancel.load()) {
++                result = QWEN2VL_ERR_CANCELLED;
++                break;
++            }
++            if (eval_rc != llm::ErrorCode::OK) {
++                result = SetError(impl, QWEN2VL_ERR_RUNTIME, "generation eval failed");
+                 break;
+             }
+             auto token = impl->sampler->set_logits(session->logits())->sample();
+@@ -326,7 +336,8 @@
+             }
+             tokens = {token};
+         }
+-        result = QWEN2VL_OK;
++        // Preserve cancellation/eval errors; OK is the initial result and
++        // remains unchanged only when generation reaches the stop token.
+     } catch (const std::exception& ex) {
+         result = SetError(impl, QWEN2VL_ERR_RUNTIME, std::string("chat exception: ") + ex.what());
+     }
+@@ -362,13 +373,14 @@
+     }
+     auto* impl = reinterpret_cast<EngineImpl*>(e);
+     // Wait for any running chat to finish, then tear down.
+-    std::lock_guard<std::mutex> chat_lock(impl->chat_mutex);
+     {
++        std::lock_guard<std::mutex> chat_lock(impl->chat_mutex);
+         std::lock_guard<std::mutex> lock(impl->mutex);
+         impl->cancel.store(true);
+         impl->model.reset();
+         impl->tokenizer.reset();
+         impl->sampler.reset();
+-    }
++    } // Both guards must unlock before EngineImpl (including its mutexes) dies.
++    // The caller must prevent new API calls once destruction begins.
+     delete impl;
+ }
+--- a/qwen2vl_sdk_npu.cpp
++++ b/qwen2vl_sdk_npu.cpp
+@@ -273,7 +273,8 @@
+             goto out;
+         }
+ 
+-        qwen2vl::Image image(iw, ih, ic, image_data);
++        // stbi_load(..., 3) always returns RGB, even for grayscale/RGBA input.
++        qwen2vl::Image image(iw, ih, 3, image_data);
+         qwen2vl::ImageTokens image_tokens;
+         qwen2vl::VLInputChunks chunks;
+         qwen2vl::preprocess_vision_input(
+@@ -309,9 +310,18 @@
+         // 其余 token 用 skip_special_tokens=true 解码，防其他特殊 token 泄漏进结果。
+         auto end_txt = chunks.entries.back().txt;
+         std::vector<llm::Token> tokens = impl->tokenizer->tokenize(end_txt, true);
+-        while (session->eval(tokens.data(), tokens.size()) == llm::ErrorCode::OK) {
++        while (true) {
+             if (impl->cancel.load()) {
+                 result = QWEN2VL_ERR_CANCELLED;
++                break;
++            }
++            const auto eval_rc = session->eval(tokens.data(), tokens.size());
++            if (impl->cancel.load()) {
++                result = QWEN2VL_ERR_CANCELLED;
++                break;
++            }
++            if (eval_rc != llm::ErrorCode::OK) {
++                result = SetError(impl, QWEN2VL_ERR_RUNTIME, "generation eval failed");
+                 break;
+             }
+             auto token = impl->sampler->set_logits(session->logits())->sample();
+@@ -326,7 +336,8 @@
+             }
+             tokens = {token};
+         }
+-        result = QWEN2VL_OK;
++        // Preserve cancellation/eval errors; OK is the initial result and
++        // remains unchanged only when generation reaches the stop token.
+     } catch (const std::exception& ex) {
+         result = SetError(impl, QWEN2VL_ERR_RUNTIME, std::string("chat exception: ") + ex.what());
+     }
+@@ -362,14 +373,15 @@
+     }
+     auto* impl = reinterpret_cast<EngineImpl*>(e);
+     // Wait for any running chat to finish, then tear down.
+-    std::lock_guard<std::mutex> chat_lock(impl->chat_mutex);
+     {
++        std::lock_guard<std::mutex> chat_lock(impl->chat_mutex);
+         std::lock_guard<std::mutex> lock(impl->mutex);
+         impl->cancel.store(true);
+         impl->model.reset();
+         impl->tokenizer.reset();
+         impl->sampler.reset();
+-    }
++    } // Both guards must unlock before EngineImpl (including its mutexes) dies.
++    // The caller must prevent new API calls once destruction begins.
+     delete impl;
+ }
+ 

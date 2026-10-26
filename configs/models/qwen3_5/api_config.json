@@ -1,0 +1,33 @@
+{
+  "name": "qwen3_5",
+  "type": "qwen3_5",
+  "format": "gewu",
+  "tokenizer": {
+    "model_path": "tokenizer.json"
+  },
+  "params_path": "params",
+  "hparams": {
+    "n_vocab": 248320,
+    "n_embed": 4096,
+    "n_head": 16,
+    "head_dim": 256,
+    "n_kv_head": 4,
+    "n_layer": 32,
+    "layers_per_group": 4,
+    "linear_layers_per_group": 3,
+    "n_ffn": 12288,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 32,
+    "linear_conv_kernel_dim": 4,
+    "chunk_size": 64,
+    "max_position_embeddings": 262144,
+    "partial_rotary_factor": 0.25,
+    "rms_norm_eps": 0.000001,
+    "rope_freq_base": 10000000.0,
+    "rope_freq_scale": 1.0,
+    "mrope_section": [11, 11, 10, 0],
+    "tie_word_embeddings": false
+  }
+}

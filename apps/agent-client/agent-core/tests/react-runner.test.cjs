@@ -205,6 +205,13 @@ test('numeric claims checked against matching call only', () => {
 test('full and compact prompts always retain User task and full contract', async () => {
   for (const compact of [false,true]) { const r=await run('任务甲 😀 Unicode',['Final: 好'],{}, {compact}); assert.match(r.prompts[0],/User task:\n任务甲 😀 Unicode/); assert.match(r.prompts[0],/IMMUTABLE_CONTRACT/); }
 });
+test('every round tells the model that writing needs no tool and side-effect tools need an explicit request', async () => {
+  const r=await run('请写一篇不超过200字的科幻微小说',['Final: 故事'],{});
+  assert.match(r.prompts[0],/Writing, rewriting, summarizing, translating and explaining need no tool: reply with Final directly\./);
+  assert.match(r.prompts[0],/only when the user explicitly asks for that action/);
+  const tool=await run('计算1加1',[action('calculator',{expression:'1+1'}),'Final: 2'],{calculator:'2'});
+  assert.match(tool.prompts[1],/Writing, rewriting, summarizing/,'the evidence round keeps the same contract');
+});
 test('budget keeps UTF8 task contracts and entire latest parallel turn', () => {
   const base='TOOLS合同😀\nUser task:\n北京天气🌤️\n';
   const latest='Execution: parallel\nAction: weather_search[{"query":"北京"}]\nAction: air_quality[{"query":"北京"}]\nObservation: 北京😀\nObservation: 空气🌤️';
@@ -493,6 +500,20 @@ test('completed utility reads terminate repeated plans with real values', async 
   const r=await run(task,[actions,'Final: 北京天气14.5°C，126和5000',actions],{calculator:'计算结果：126',unit_convert:'5 km = 5000 m'});
   assert.equal(r.calls.length,2); assert.equal(r.prompts.length,3); assert.match(r.final,/126/); assert.match(r.final,/5000/);assert.doesNotMatch(r.final,/天气|14\.5|失败|未完成/);
 });
+test('leading 根据 is not part of the weather city', () => {
+  const entries = core.buildTaskLedger('根据明天北京的天气情况，建议穿几件衣服').filter(e => e.tool === 'weather_search');
+  assert.deepEqual(entries.map(e => e.scope.entity), ['北京']);
+  core.bindResult(entries,{name:'weather_search',input:'{"query":"北京天气","context":"明天"}'},'success','北京明天11.6°C');
+  assert.equal(entries[0].status,'success');
+});
+test('repeated successful read with an unbound requirement stops instead of looping', async () => {
+  const repeat='Execution: serial\nAction: weather_search[{"query":"Beijing"}]';
+  const r=await run('北京天气',[repeat],{weather_search:'天气结果\n北京：阴，11.6°C 到 24.4°C'});
+  assert.equal(r.calls.length,1); assert.ok(r.prompts.length<=3,String(r.prompts.length));
+  assert.match(r.final,/11\.6°C/); assert.match(r.prompts[2],/already completed successfully/); assert.doesNotMatch(r.prompts[2],/NOT executed/);
+  const answered=await run('北京天气',[repeat,repeat,'Final: 北京阴，11.6°C 到 24.4°C，建议穿两件。'],{weather_search:'天气结果\n北京：阴，11.6°C 到 24.4°C'});
+  assert.equal(answered.calls.length,1); assert.equal(answered.final,'北京阴，11.6°C 到 24.4°C，建议穿两件。');
+});
 test('current task reminder is mandatory within the actual byte budget', () => {
   const tail='Control: 当前任务 😀 '+ '新'.repeat(20);
   const prompt=core.fitPrompt('TOOLS\nUser task: 新任务',['old'.repeat(300)],['Action: calculator[{}]\nObservation: 4'],280,s=>Buffer.byteLength(s),tail);
@@ -505,8 +526,10 @@ test('standalone live request excludes stale history while referenced follow-up 
   assert.ok(weather.prompts.every(p=>!p.includes('先前结果42')));
   assert.ok(weather.contexts.every(context=>context===undefined));
   const follow=await run('使用calculator把上面的数字乘3',['Action: calculator[{"expression":"42*3"}]','Final: 42乘3等于126'],{calculator:'计算结果：126'},{conversation});
-  assert.ok(follow.prompts.every(p=>p.includes('先前结果42')));assert.match(follow.final,/126/);
-  assert.ok(follow.contexts.every(context=>context===conversation));
+  assert.match(follow.prompts[0],/先前结果42/);assert.match(follow.final,/126/);
+  assert.ok(follow.prompts.slice(1).every(p=>!p.includes('先前结果42')),'current evidence replaces stale assistant facts during synthesis');
+  assert.equal(follow.contexts[0],conversation);
+  assert.ok(follow.contexts.slice(1).every(context=>context===undefined));
 });
 test('model interruption after successful tools preserves real results and unresolved items', async () => {
   const r=await run(deviceTask,[deviceActions[0],new Error('链路中断')],deviceOutputs);

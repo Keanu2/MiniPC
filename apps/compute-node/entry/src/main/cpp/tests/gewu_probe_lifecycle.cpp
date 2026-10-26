@@ -51,6 +51,16 @@ int main() {
     auto start = [&] { return Begin(root.string(), "{}", (root / "events.jsonl").string()); };
     for (int i = 0; i < 20; ++i) { assert(start()); WaitDone(); }
     assert(creates == 20 && submits == 20 && destroys == 20);
+    {
+      std::lock_guard<std::mutex> lock(State().mutex);
+      int timedResponses=0;
+      for (const auto& event : State().events) {
+        if (event.find("\"event\":\"response\"") == std::string::npos) continue;
+        assert(event.find("\"elapsedMs\":") != std::string::npos);
+        ++timedResponses;
+      }
+      assert(timedResponses==20);
+    }
     auto oldContext = savedContext;
     mode = 3; holdCreate = true; inCreate = false;
     assert(start()); assert(start()); assert(start());
@@ -94,6 +104,49 @@ int main() {
     assert(start()); WaitDone();
     assert(creates == createsBefore + 1 && submits == submitsBefore + 1);
     assert(aborts == abortsBefore + 1 && destroys == destroysBefore + 1);
+    // Keyed requests keep one native session; unkeyed requests are unchanged.
+    {
+        mode = 0; probeWaitSeconds = 45;
+        const auto events = (root / "events.jsonl").string();
+        const int c0 = creates.load(), s0 = submits.load(), d0 = destroys.load();
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k1")); WaitDone();
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k1")); WaitDone();
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k1")); WaitDone();
+        assert(creates == c0 + 1 && submits == s0 + 3 && destroys == d0); // one session, three requests
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k2")); WaitDone();
+        assert(creates == c0 + 2 && destroys == d0); // another key gets its own session
+        CloseSession("k1");
+        assert(destroys == d0 + 1);
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k1")); WaitDone();
+        assert(creates == c0 + 3); // closed key starts fresh
+        // A stalled keyed request destroys its session instead of caching it.
+        mode = 4; probeWaitSeconds = 1;
+        const int d1 = destroys.load();
+        assert(Begin(root.string(), "{}", events, 1, "k1")); WaitDone();
+        assert(destroys == d1 + 1);
+        mode = 0; probeWaitSeconds = 45;
+        const int c1 = creates.load();
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k1")); WaitDone();
+        assert(creates == c1 + 1); // the stalled session was not reused
+        // Submit failure never leaves a cached session behind.
+        mode = 2;
+        const int d2 = destroys.load();
+        assert(Begin(root.string(), "{}", events, 0, "k3")); WaitDone();
+        assert(destroys == d2 + 1);
+        mode = 0;
+        const int c2 = creates.load();
+        assert(Begin(root.string(), "{\"stream\":false}", events, 0, "k3")); WaitDone();
+        assert(creates == c2 + 1);
+        // The cache holds at most four idle sessions; the oldest is evicted.
+        const int d3 = destroys.load();
+        for (const char* key : {"a1", "a2", "a3", "a4", "a5", "a6"}) {
+            assert(Begin(root.string(), "{\"stream\":false}", events, 0, key)); WaitDone();
+        }
+        assert(destroys > d3);
+        { std::lock_guard<std::mutex> lock(g_cachedMutex); assert(g_cached.size() <= 4); }
+        for (const char* key : {"k1", "k2", "k3", "a1", "a2", "a3", "a4", "a5", "a6"}) CloseSession(key);
+        { std::lock_guard<std::mutex> lock(g_cachedMutex); assert(g_cached.empty()); }
+    }
     {
         std::lock_guard<std::mutex> lock(State().mutex);
         State().log.close();
