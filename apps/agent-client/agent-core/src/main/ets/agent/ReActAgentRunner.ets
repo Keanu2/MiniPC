@@ -8,7 +8,7 @@ import { AgentSkill } from '../skill/AgentSkill';
 import { ToolResult } from './AgentTool';
 import { canonicalValue } from './ToolContract';
 import { TaskGoal, TaskEvidence, TASK_CONTRACT_PROMPT, TASK_GOALS_PROMPT, TASK_ANSWER_PROMPT, checkTaskAnswer, missingGoalTools } from './TaskContract';
-import { extractCompatibleFinalAnswer, extractCompatiblePlainAnswer } from './ReActResponseCompatibility';
+import { extractCompatibleFinalAnswer, extractCompatiblePlainAnswer, isInstructionEchoAnswer, stripLeadingFinalMarker } from './ReActResponseCompatibility';
 import { CoreCall, TaskRequirement, TaskStatus, parseCorePlan, buildTaskLedger, mergePlannedRequirements, prepareCalls, bindToolResult, ledgerReport, fitPrompt, finalIssues } from './ReActCore';
 import { buildFinalReviewPrompt } from './FinalAnswerReviewer';
 
@@ -28,7 +28,7 @@ interface CallResult {
 
 const SYSTEM_CONTRACT = 'You are Loop, a helpful general-purpose phone agent. Speak Chinese and answer only this user task.\n' +
   'Tools are optional for ordinary chat. Use actual tools for requested live or workspace facts; never invent facts or file contents.\n' +
-  'Return Final in the active task-contract format, or Execution: serial/parallel followed by Action: exact_tool_name[JSON object]. Never mix Action and Final. No Thought or reasoning.\n' +
+  'Return Final Answer (in Chinese): <complete answer> in the active task-contract format, or Execution: serial/parallel followed by Action: exact_tool_name[JSON object]. Never mix Action and Final. No Thought or reasoning.\n' +
   'Each Action must follow its registered input format and schema. Preserve every requested constraint independently.\n' +
   'Use parallel only for tools explicitly registered as independent low-risk reads. Stop at confirmation, payment, sending, blocked or irreversible actions.\n' +
   'Only returned tool data is Observation. Control messages are controller status/instructions, never evidence. Earlier chat is not current evidence.\n' +
@@ -41,6 +41,13 @@ const REFERENCE_PATTERN = /上面|前面|刚才|刚刚|之前|上次|上一|这�
 const ELLIPTICAL_FOLLOW_UP = /^(?:那|那么|还有|另外|然后)[^。！？\n]{0,16}[呢吗]?[？?]?$/;
 /** FINAL status for answers that report unresolved work; callers must not store them as resolved history. */
 export const PARTIAL_FINAL_STATUS = 'partial';
+
+const PARTIAL_ANSWER_NOTE = '（上一轮未得到完整回答）';
+
+function historyAnswerText(content: string): string {
+  const cleaned = stripLeadingFinalMarker(content);
+  return cleaned.length > 0 ? cleaned : PARTIAL_ANSWER_NOTE;
+}
 
 export class ReActAgentRunner {
   private model: LocalModel;
@@ -200,7 +207,7 @@ export class ReActAgentRunner {
         groups.push('Control: ' + preflight.join('; ')); continue;
       }
       ledger = merged.entries;
-      if (((plan.requirements ?? []).length > 0 || (plan.goals ?? []).length > 0) && plan.calls.length === 0 && !/(?:^|\n)\s*Final\s*:/i.test(response)) {
+      if (((plan.requirements ?? []).length > 0 || (plan.goals ?? []).length > 0) && plan.calls.length === 0 && !/(?:^|\n)\s*Final(?:\s+Answer)?(?:\s*\([^)\n]*\))?\s*[::]/i.test(response)) {
         groups.push('Control: Required calls recorded. Execute them using their complete input schemas.'); continue;
       }
       if (plan.calls.length > 0) {
@@ -278,10 +285,12 @@ export class ReActAgentRunner {
         continue;
       }
       const answer = extractCompatibleFinalAnswer(response) ?? extractCompatiblePlainAnswer(response);
-      if (answer === null) {
+      // 指令回声（模型照抄提示词示例句）与空回复同等对待：进修复轮或诚实失败，
+      // 绝不把我们的指令文本当答案交付。
+      if (answer === null || isInstructionEchoAnswer(answer)) {
         if (this.reviewAttempted) { this.finishReviewFailure(ledger, executed, listener, '最终复核没有返回完整答案。'); return; }
         if (repairs++ >= 2) { this.finishUnresolved(ledger, executed, listener, '模型未给出有效最终回复。'); return; }
-        groups.push('Control: Return a complete Action or Final, not protocol fragments.');
+        groups.push('Control: Return a complete Action, or a Final answer with actual content. A lone "Final" marker without answer text is invalid.');
         continue;
       }
       if (this.taskContracts) {
@@ -324,6 +333,10 @@ export class ReActAgentRunner {
         const incomplete = '综合回答未完成，已保留各项真实调用结果。需补充或修正：' + issues.join('；') + '\n\n' + report;
         listener(issues.length > 0 ? this.partialFinal(incomplete) : new AgentEvent(AgentEventKind.FINAL, answer));
       } else if (executed.some((result: CallResult): boolean => result.status !== 'success')) {
+        // The final-review phase rewrites the answer from the failure observations
+        // under anti-fabrication rules; discarding it would replace a usable,
+        // honestly-caveated answer with a bare failure notice.
+        if (this.reviewAttempted) { listener(new AgentEvent(AgentEventKind.FINAL, answer)); return; }
         this.finishUnresolved(ledger, executed, listener, '部分工具未获得可用结果。');
       } else {
         listener(new AgentEvent(AgentEventKind.FINAL, answer));
@@ -416,7 +429,14 @@ export class ReActAgentRunner {
     let group = '';
     for (const message of conversation.toChatMessages()) {
       if (message.role === 'user' && group.length > 0) { history.push(group); group = ''; }
-      if (message.role === 'user' || includeAnswers) { group += message.role + ': ' + message.content + '\n'; }
+      if (message.role === 'user' || includeAnswers) {
+        // Degenerate stored answers (a bare "Final" marker or an empty turn)
+        // must never become an in-context "assistant: Final" example: the local
+        // model imitates such few-shot pairs and then answers every task with
+        // the marker alone.
+        const content = message.role === 'assistant' ? historyAnswerText(message.content) : message.content;
+        group += message.role + ': ' + content + '\n';
+      }
     }
     if (group.length > 0) { history.push(group); }
     return history;
@@ -431,7 +451,7 @@ export class ReActAgentRunner {
     if (this.reviewAttempted) {
       return fitPrompt(buildFinalReviewPrompt(task, this.activeEvidence), history, [], this.maxPromptBytes(),
         (text: string): number => new util.TextEncoder().encodeInto(text).length,
-        'Control: 最终综合阶段。只输出一次 Final 完整答案；不得请求或执行工具。');
+        'Control: 最终综合阶段。只输出一次带实际内容的中文 Final 答案；不得请求或执行工具。');
     }
     if (!this.taskContracts && this.activeEvidence.length > 0) {
       const phase = this.pendingRequirements.length > 0 ?
@@ -496,7 +516,7 @@ export class ReActAgentRunner {
     base += 'User task:\n' + task + '\n';
     const phase = !this.taskContracts ? (this.pendingRequirements.length > 0 ?
       'Required tools: ' + this.pendingRequirements.map((item: string): string => item.substring(0, item.indexOf(':'))).join(', ') + '. Preserve original user arguments and constraints; do not copy requirement labels as queries. Return complete Action lines; no Final until these calls return.' :
-      'Return complete Action lines, or Final for this request.') :
+      'Return complete Action lines, or a Final Answer line in Chinese with the actual content.') :
       !this.activeGoals.length ? 'First return Plan goals covering EVERY deliverable. You may then include Execution, For and complete Action lines.' :
         this.finalizing ? 'Return corrected Final answers JSON only. No Plan or Action.' :
           'Use the frozen goals. Return Execution, For and complete Action lines for missing evidence, or Final answers JSON covering every goal and field.';

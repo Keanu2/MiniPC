@@ -1,3 +1,6 @@
+// 补字候选中的否定字一律拒绝：把"可以"补成"不可以"这类语义反转比保留乱码更糟。
+const NEGATIVE_PREFIXES: string[] = ['不', '没', '无', '非', '未', '别', '勿', '莫', '反', '难'];
+
 export function repairUtf8FromSource(output: string, source: string): string {
   if (output.indexOf('\uFFFD') < 0 || source.length === 0) {
     return output;
@@ -25,6 +28,18 @@ export function repairUtf8FromSource(output: string, source: string): string {
         if (previous.length > 0) {
           replacement = previous;
           break;
+        }
+      }
+      // GEWU 的 flush 边界常切在 ASCII 标记后的首个中文字上（如 "Final: □□□圳去日本"
+      // 丢"深"），答案措辞改写后整段锚点不在提示词里。单字补回必须双重一致：答案后文
+      // 与提示词各自独立给出同一个前字（答案重现"深圳"、问题里也有"深圳"→补"深"）。
+      // 只有一方一致时保留乱码——补错字比留乱码更糟。
+      if (replacement.length === 0 && run <= 3 && following.length > 0 && following[0].charCodeAt(0) > 127) {
+        const single = following[0];
+        const fromAnswer = sharedPrevious(chars.slice(end + 1).join(''), single);
+        const fromPrompt = sharedPrevious(source, single);
+        if (fromAnswer.length > 0 && fromAnswer === fromPrompt && NEGATIVE_PREFIXES.indexOf(fromAnswer) < 0) {
+          replacement = fromAnswer;
         }
       }
     }

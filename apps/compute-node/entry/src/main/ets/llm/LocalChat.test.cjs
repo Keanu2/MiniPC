@@ -37,14 +37,14 @@ assert.equal(chat.readinessError(), '模型文件缺失或无法读取。');
 registryDirs = [TEXT_DIR];
 assert.equal(chat.readinessError(), '');
 assert.equal(starts, 0, 'readiness must never start GEWU');
-// 纯文本请求：目录与请求体保持原样（stream 固定 false，max_tokens 走 options）
+// 纯文本请求：目录与请求体保持原样（stream 固定 true，max_tokens 走 options）
 assert.equal(chat.start([{ role: 'user', content: 'hi' }], () => {}, 'a'), '');
 assert.equal(starts, 1);
 assert.equal(lastModelPath, '/files/models/' + TEXT_DIR);
 assert.deepEqual(JSON.parse(lastRequest), {
   type: 'qwen2',
   messages: [{ role: 'user', content: 'hi' }],
-  stream: false, max_tokens: 2048
+  stream: true, max_tokens: 2048
 });
 assert.equal(chat.activeCount(), 1);
 assert.equal(chat.readinessError(), '', 'one in-flight job must not block another device prepare');
@@ -73,7 +73,7 @@ assert.deepEqual(multimodal.messages[2].content, [
   { type: 'image_url', image_url: 'data:image/jpeg;base64,QUJD' },
   { type: 'text', text: '这张图里有什么' }
 ], 'the last user message becomes image-then-text parts');
-assert.equal(multimodal.stream, false, 'the merged request keeps the non-streaming GEWU contract');
+assert.equal(multimodal.stream, true, 'the merged request keeps the streaming GEWU contract');
 // 本地没有多模态模型时带图 fail closed
 visionReady = false;
 const beforeVision = starts;

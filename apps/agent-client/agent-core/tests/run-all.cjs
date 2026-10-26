@@ -2,9 +2,9 @@
  * Platform declarations are stubbed here; a separate SDK build is still required. */
 const {spawnSync}=require('node:child_process');
 const path=require('node:path');
-const suites=['react-runner.test.cjs','parallel-runner.test.cjs','support-models.test.cjs','integration-contract.test.cjs',
+const suites=['react-runner.test.cjs','react-compatibility.test.cjs','parallel-runner.test.cjs','support-models.test.cjs','integration-contract.test.cjs',
  'integration-lifecycle.test.cjs','index-lifecycle.test.cjs','inference-budget.test.cjs',
- 'tool-contracts.test.cjs','react-core.typecheck.cjs','support-models.typecheck.cjs','integration-contract.typecheck.cjs'];
+ 'tool-contracts.test.cjs','utf8-repair.test.cjs','react-core.typecheck.cjs','support-models.typecheck.cjs','integration-contract.typecheck.cjs'];
 const selected=process.argv.includes('--portable') ? suites.filter(suite=>suite!=='support-models.typecheck.cjs') : suites;
 if(selected.length!==suites.length)console.log('Portable mode excludes the check requiring HarmonyOS SDK declarations.');
 let failed=0;

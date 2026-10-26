@@ -61,8 +61,10 @@ export class LocalChat implements ChatBackend {
    * 带图请求把最后一条 user 消息编码为多模态分片（图片在前、文本在后，对齐
    * Qwen-VL 惯例）；请求类型跟随所选模型 api_config 的声明。
    *
-   * stream 固定为 false：流式回调会把跨块的字符切成 U+FFFD，一次完整响应才能
-   * 让这些字节留在同一个块里被正确解码。
+   * stream 固定为 true：stream:false 的单次完整回调实测会把首个多字节字符按
+   * 字节替换成 U+FFFD（引擎内部组装的有损首块边界，字节不可恢复）；流式的
+   * 跨块拆分由 native 层 utf8Pending 携带（gewu_probe.cpp RepairResponse），
+   * 可完整重组。副产品：首字从全文完成提前到首个回调。
    */
   private buildRequest(messages: ChatMessage[], image: string, type: string, maxTokens: number): ChatRequest {
     const out: RequestMessage[] = [];
@@ -78,7 +80,7 @@ export class LocalChat implements ChatBackend {
         out.push({ role: message.role, content: message.content });
       }
     }
-    return { type: type, messages: out, stream: false, max_tokens: maxTokens };
+    return { type: type, messages: out, stream: true, max_tokens: maxTokens };
   }
 
   start(messages: ChatMessage[], callback: (update: ChatUpdate) => void, requestId: string = '',

@@ -170,7 +170,7 @@ export class OpenAiCompatibleModel implements LocalModel {
   }
 
   private systemPrompt(): string {
-    let content = 'You are Loop, a concise ReAct agent on HarmonyOS. Do not output Thought, reasoning, or analysis. Reply directly with either Final: answer, or Execution: serial | parallel followed by one or more Action: tool[input] lines. Use parallel only for independent tools. Use only listed tools and follow the tool-routing rules in the prompt exactly.';
+    let content = 'You are Loop, a concise ReAct agent on HarmonyOS. Do not output Thought, reasoning, or analysis. Reply directly with either Final Answer (in Chinese): answer, or Execution: serial | parallel followed by one or more Action: tool[input] lines. Use parallel only for independent tools. Use only listed tools and follow the tool-routing rules in the prompt exactly.';
     const skills = buildSkillsSection(this.skillSnapshot);
     if (skills.length > 0) {
       content += `\n\n${skills}`;
