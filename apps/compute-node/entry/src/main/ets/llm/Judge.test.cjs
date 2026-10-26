@@ -134,6 +134,10 @@ const msg=(role,content)=>({role,content});
   // maxTokens 可配置（judge.maxTokens 装配钳制后传入）。
   await new JudgeClient('k','http://h','m',30,4096).scoreAsync({systemPrompt:'s',userPrompt:'u'});
   assert.equal(JSON.parse(captured.options.extraData).max_tokens,4096);
+  // disableThinking 开关：缺省不带；true → enable_thinking:false（qwen3 系防思考吃预算）。
+  assert.equal(JSON.parse(captured.options.extraData).enable_thinking,undefined);
+  await new JudgeClient('k','http://h','m',30,2048,true).scoreAsync({systemPrompt:'s',userPrompt:'u'});
+  assert.equal(JSON.parse(captured.options.extraData).enable_thinking,false);
   // 非 2xx / 网络故障 → reject（宿主记 judgeFailed，绝不降级 0 分）。
   httpState.nextResponse={responseCode:500,result:'boom'};
   await assert.rejects(()=>client.scoreAsync({systemPrompt:'s',userPrompt:'u'}));

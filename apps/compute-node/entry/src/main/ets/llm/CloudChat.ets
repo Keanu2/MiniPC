@@ -17,6 +17,8 @@ interface CloudConfigJson {
   baseUrl?: string;
   model?: string;
   timeoutSeconds?: number;
+  /** qwen3 系思考会吃满输出预算（同 GLM 思考失控），true = 请求体带 enable_thinking:false。 */
+  disableThinking?: boolean;
 }
 
 interface ChatCompletionRequest {
@@ -24,6 +26,7 @@ interface ChatCompletionRequest {
   messages: ChatMessage[];
   stream: boolean;
   max_tokens: number;
+  enable_thinking?: boolean;
 }
 
 interface CompletionChoice {
@@ -60,14 +63,16 @@ export class CloudChat implements ChatBackend {
   /** 配置里的模型名，展示用。 */
   readonly modelName: string;
   private readonly timeoutMs: number;
+  private readonly disableThinking: boolean;
   private closed: boolean = false;
   private jobs: CloudJob[] = [];
 
-  private constructor(apiKey: string, baseUrl: string, model: string, timeoutMs: number) {
+  private constructor(apiKey: string, baseUrl: string, model: string, timeoutMs: number, disableThinking: boolean) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
     this.modelName = model;
     this.timeoutMs = timeoutMs;
+    this.disableThinking = disableThinking;
   }
 
   /** 配置文件存在且字段齐全时返回实例（backend 缺省视为 cloud）；文件缺失、解析失败、字段不齐或显式 local 均返回 null（走本地）。 */
@@ -100,7 +105,7 @@ export class CloudChat implements ChatBackend {
     if (typeof json.timeoutSeconds === 'number' && Number.isFinite(json.timeoutSeconds)) {
       seconds = Math.min(MAX_TIMEOUT_SECONDS, Math.max(MIN_TIMEOUT_SECONDS, Math.floor(json.timeoutSeconds)));
     }
-    return new CloudChat(apiKey, baseUrl, model, seconds * 1000);
+    return new CloudChat(apiKey, baseUrl, model, seconds * 1000, json.disableThinking === true);
   }
 
   isBusy(): boolean { return this.jobs.length > 0; }
@@ -128,9 +133,24 @@ export class CloudChat implements ChatBackend {
     this.jobs.push(job);
     const session = http.createHttp();
     job.session = session;
+    // 近场协议的系统提示用 developer 角色（GEWU 原生语义，本地路径不变）；
+    // OpenAI 兼容端点只认 system/assistant/user/tool/function——旧 vLLM 端点宽松、
+    // DashScope 系严格（HTTP 400），出云前归一化。
+    const outbound: ChatMessage[] = [];
+    for (const message of messages) {
+      if (message.role === 'developer') {
+        const mapped: ChatMessage = { role: 'system', content: message.content };
+        outbound.push(mapped);
+      } else {
+        outbound.push(message);
+      }
+    }
     const body: ChatCompletionRequest = {
-      model: this.modelName, messages: messages, stream: false, max_tokens: maxTokens
+      model: this.modelName, messages: outbound, stream: false, max_tokens: maxTokens
     };
+    if (this.disableThinking) {
+      body.enable_thinking = false;
+    }
     session.request(this.endpoint(), {
       method: http.RequestMethod.POST,
       header: {
@@ -178,13 +198,14 @@ export class CloudChat implements ChatBackend {
     } else if (choice !== undefined && typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0) {
       finishReason = choice.finish_reason;
     }
-    // 推理模型思考占满 max_tokens 预算时 content 为空、finish_reason=length：
-    // 按上游 Outcome.OVERFLOW 细分上报，RouterChat 据此排除该模型并降级重试。
-    if (content.length === 0 && finishReason === 'length') {
+    // finish_reason=length 表示输出被 max_tokens 截断：思考占满预算时 content 为空，
+    // 思考+正文超预算时留下残缺正文。两者都按上游 Outcome.OVERFLOW 细分上报，
+    // RouterChat 据此排除该模型并降级重试，不把截断残句当答案交付或写入历史。
+    if (finishReason === 'length') {
       this.finish(job, {
         kind: 'done',
         text: '',
-        error: '云端模型输出预算耗尽（思考占满上限），请简化问题或稍后重试。',
+        error: '云端模型输出预算耗尽（生成被截断），请简化问题或稍后重试。',
         finishReason: 'error',
         failureKind: 'overflow'
       });

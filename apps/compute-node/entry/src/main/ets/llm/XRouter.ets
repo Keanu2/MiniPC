@@ -124,6 +124,8 @@ interface XRouterConfigJson {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  /** qwen3 系思考吃预算，true = 云请求体带 enable_thinking:false（分类器/裁判/主路径共用）。 */
+  disableThinking?: boolean;
   xRouter?: XRouterConfigSection;
 }
 
@@ -183,6 +185,7 @@ export interface JudgeServiceConfig {
   model: string;
   timeoutSeconds: number;
   maxTokens: number;
+  disableThinking: boolean;
 }
 
 /** 服务装配配置（loadServiceConfig 产物）：judge 与 store 任一激活即非 null。 */
@@ -348,7 +351,9 @@ export class XRouter implements RouteStrategy {
     let prompt = '';
     try {
       prompt = XRouter.buildClassifierPrompt(context.messages, this.params.previewChars);
-    } catch (_) {
+    } catch (error) {
+      hilog.warn(0, 'NearbyChat', 'x-router classifier prompt build failed error=%{public}s',
+        error instanceof Error ? error.message : 'unknown');
       return Promise.resolve(this.safeHeuristic(context, SOURCE_HEURISTIC_FALLBACK));
     }
     return this.params.backend.classifyAsync(prompt)
@@ -361,7 +366,11 @@ export class XRouter implements RouteStrategy {
         }
         return { tier: tier, source: SOURCE_LLM };
       })
-      .catch((_error: Error): ClassifyResult => this.safeHeuristic(context, SOURCE_HEURISTIC_FALLBACK));
+      .catch((error: Error): ClassifyResult => {
+        hilog.warn(0, 'NearbyChat', 'x-router classifier call failed error=%{public}s',
+          error.message ?? 'unknown');
+        return this.safeHeuristic(context, SOURCE_HEURISTIC_FALLBACK);
+      });
   }
 
   private safeHeuristic(context: RouteContext, source: string): ClassifyResult {
@@ -561,7 +570,7 @@ export class XRouter implements RouteStrategy {
         if (typeof classifier.maxTokens === 'number' && Number.isFinite(classifier.maxTokens)) {
           maxTokens = Math.min(4096, Math.max(16, Math.floor(classifier.maxTokens)));
         }
-        backend = new CloudClassifier(apiKey, baseUrl, model, timeoutSeconds, maxTokens);
+        backend = new CloudClassifier(apiKey, baseUrl, model, timeoutSeconds, maxTokens, json.disableThinking === true);
       }
     }
     // bandit 段（上游 params.bandit）：缺省或 enabled:false → null；表存在且
@@ -693,7 +702,8 @@ export class XRouter implements RouteStrategy {
           baseUrl: baseUrl,
           model: model,
           timeoutSeconds: timeoutSeconds,
-          maxTokens: maxTokens
+          maxTokens: maxTokens,
+          disableThinking: json.disableThinking === true
         };
         judge = built;
       }

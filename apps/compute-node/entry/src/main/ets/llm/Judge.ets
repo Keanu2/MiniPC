@@ -129,6 +129,7 @@ interface JudgeCompletionRequest {
   stream: boolean;
   max_tokens: number;
   temperature: number;
+  enable_thinking?: boolean;
 }
 
 interface JudgeChoice {
@@ -146,13 +147,16 @@ export class JudgeClient implements JudgeTransport {
   private readonly model: string;
   private readonly timeoutMs: number;
   private readonly maxTokens: number;
+  private readonly disableThinking: boolean;
 
-  constructor(apiKey: string, baseUrl: string, model: string, timeoutSeconds: number, maxTokens: number = 2048) {
+  constructor(apiKey: string, baseUrl: string, model: string, timeoutSeconds: number, maxTokens: number = 2048,
+    disableThinking: boolean = false) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
     this.model = model;
     this.timeoutMs = timeoutSeconds * 1000;
     this.maxTokens = maxTokens;
+    this.disableThinking = disableThinking;
   }
 
   private endpoint(): string {
@@ -173,6 +177,9 @@ export class JudgeClient implements JudgeTransport {
       max_tokens: this.maxTokens,
       temperature: 0
     };
+    if (this.disableThinking) {
+      body.enable_thinking = false;
+    }
     return session.request(this.endpoint(), {
       method: http.RequestMethod.POST,
       header: {

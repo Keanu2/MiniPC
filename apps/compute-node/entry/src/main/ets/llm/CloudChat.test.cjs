@@ -39,6 +39,7 @@ const tick=()=>new Promise(r=>setTimeout(r,0));
 const CFG='/files/cloud_config.json';
 const VALID='{"backend":"cloud","apiKey":"k","baseUrl":"http://10.0.0.1:8080","model":"GLM-5.3","timeoutSeconds":30}';
 const msg=[{role:'user',content:'你好'}];
+const splitMsg=[{role:'developer',content:'sys rules'},{role:'user',content:'你好'}];
 const run=async(cloud,messages,options)=>{
   const updates=[];
   const refused=cloud.start(messages,u=>updates.push(u),'req-1',options||{});
@@ -92,9 +93,41 @@ const respond=(choices)=>{httpState.nextResponse={responseCode:200,
   body=JSON.parse(captured.options.extraData);
   assert.equal(body.max_tokens,8192);
 
+  // developer 角色归一化：近场协议系统提示出云前映射为 system（DashScope 系端点
+  // 严格校验角色，developer 会 400）；user 轮原样保留。
+  respond([{message:{role:'assistant',content:'x'},finish_reason:'stop'}]);
+  await run(cloud,splitMsg,{});
+  body=JSON.parse(captured.options.extraData);
+  assert.equal(body.messages.length,2);
+  assert.equal(body.messages[0].role,'system');
+  assert.equal(body.messages[0].content,'sys rules');
+  assert.equal(body.messages[1].role,'user');
+
+  // disableThinking 开关：缺省不带 enable_thinking；配置 true → 请求体带 enable_thinking:false
+  // （qwen3 系思考吃满输出预算，同 GLM 思考失控）。
+  assert.equal(body.enable_thinking,undefined);
+  files[CFG]=VALID.replace(/\}$/,',"disableThinking":true}');
+  const noThink=CloudChat.create('/files');
+  assert.ok(noThink!==null);
+  respond([{message:{role:'assistant',content:'x'},finish_reason:'stop'}]);
+  await run(noThink,msg,{});
+  assert.equal(JSON.parse(captured.options.extraData).enable_thinking,false);
+  files[CFG]=VALID;
+
   // 推理模型思考耗尽预算：content 空 + finish_reason=length → OVERFLOW 细分
   // + 诚实文案，无 delta（上游 Outcome.OVERFLOW，RouterChat 据此排除降级）。
   respond([{message:{role:'assistant',content:''},finish_reason:'length'}]);
+  r=await run(cloud,msg,{});
+  assert.equal(r.updates.length,1);
+  assert.equal(r.updates[0].kind,'done');
+  assert.equal(r.updates[0].text,'');
+  assert.ok(r.updates[0].error.includes('预算耗尽'));
+  assert.equal(r.updates[0].failureKind,'overflow');
+  assert.equal(r.updates[0].finishReason,'error');
+
+  // 思考+正文超预算：finish_reason=length 且 content 非空（残缺正文）→ 同样
+  // OVERFLOW 上报。截断残句不当答案交付，也不写入历史毒化后续提示。
+  respond([{message:{role:'assistant',content:'Final'},finish_reason:'length'}]);
   r=await run(cloud,msg,{});
   assert.equal(r.updates.length,1);
   assert.equal(r.updates[0].kind,'done');

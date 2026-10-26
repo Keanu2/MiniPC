@@ -305,7 +305,7 @@ export class RouterChat implements ChatBackend {
     let judge: JudgeTransport | null = null;
     if (config.judge !== null) {
       judge = new JudgeClient(config.judge.apiKey, config.judge.baseUrl, config.judge.model,
-        config.judge.timeoutSeconds, config.judge.maxTokens);
+        config.judge.timeoutSeconds, config.judge.maxTokens, config.judge.disableThinking);
     }
     const service: RouterService = {
       store: new BanditStore(storeParams),

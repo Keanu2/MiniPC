@@ -373,6 +373,13 @@ const params=(level,extra)=>Object.assign(
   await tuned.classifyAsync('x');
   body=JSON.parse(captured.options.extraData);
   assert.equal(body.max_tokens,256);
+  // disableThinking 开关：缺省不带 enable_thinking；true → enable_thinking:false（qwen3 系防思考吃预算）。
+  assert.equal(body.enable_thinking,undefined);
+  const noThink=new CloudClassifier('sk-test','http://10.0.0.1:8080','GLM-5.3',30,2048,true);
+  httpState.nextResponse={responseCode:200,
+    result:JSON.stringify({choices:[{message:{role:'assistant',content:'SIMPLE'}}]})};
+  await noThink.classifyAsync('x');
+  assert.equal(JSON.parse(captured.options.extraData).enable_thinking,false);
   httpState.nextResponse={responseCode:500,result:'boom'};
   await assert.rejects(()=>classifier.classifyAsync('x'));
   httpState.nextResponse=null;
