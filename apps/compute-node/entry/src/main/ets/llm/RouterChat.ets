@@ -106,6 +106,9 @@ export class RouterChat implements ChatBackend {
 
   hasPendingNativeJobs(): boolean { return this.local.hasPendingNativeJobs(); }
 
+  /** 缓存的 GEWU 原生会话在端侧；模型切换前统一关闭。 */
+  resetIdleSessions(): void { this.local.resetIdleSessions(); }
+
   start(messages: ChatMessage[], callback: (update: ChatUpdate) => void, requestId: string = '',
     options: ChatStartOptions = {}): string {
     if (this.closed) return '模型服务已关闭。';

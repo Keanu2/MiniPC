@@ -49,6 +49,8 @@ export interface ChatBackend {
   close(): void;
   /** GEWU 本地清理窗口：答案已交付但原生侧仍持有模型内存（VL 权重加载前须等待）。 */
   hasPendingNativeJobs(): boolean;
+  /** 模型切换前关闭空闲的缓存原生会话（含 GEWU 会话复用缓存）。 */
+  resetIdleSessions(): void;
 }
 const MAX_TOKENS = 2048;
 interface NativeEvent { event: string; id?: string; payload: string; elapsedMs?: number; }

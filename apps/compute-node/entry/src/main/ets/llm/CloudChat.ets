@@ -112,6 +112,9 @@ export class CloudChat implements ChatBackend {
   activeCount(): number { return this.jobs.length; }
   hasPendingNativeJobs(): boolean { return this.jobs.length > 0; }
 
+  /** 无原生会话缓存可清（无状态 HTTP）；仅为满足 ChatBackend 的切换协议。 */
+  resetIdleSessions(): void {}
+
   readinessError(): string {
     if (this.closed) return '模型服务已关闭。';
     return '';
