@@ -314,6 +314,15 @@
         <p class="model-hint">保存后，推理任务旁的数字立即更新，之后完成的任务按所选计价继续累加。重置只清零这三项。</p>
         <p id="usageMessage" class="model-hint" role="status" aria-live="polite"></p>
       </section>
+      <h3 class="settings-label">路由算法 · 本机</h3>
+      <section class="model-settings">
+        <div class="model-fields">
+          <label class="model-field" for="routeAlgorithm">聊天请求路由<select id="routeAlgorithm"></select></label>
+          <button id="applyRouteAlgorithm" class="model-apply" type="button" disabled>保存路由算法</button>
+        </div>
+        <p class="model-hint">仅算力设备1（调度枢纽）的聊天通路生效。保存后对新请求生效，进行中的请求保持原路由。</p>
+        <p id="routeMessage" class="model-hint" role="status" aria-live="polite"></p>
+      </section>
     </section>
     <div class="stats" id="stats"></div>
     <aside class="device-panel" id="devicePanel" aria-label="附近设备">
@@ -384,8 +393,12 @@
     const saveUsageButton=document.getElementById('saveUsage');
     const resetUsageButton=document.getElementById('resetUsage');
     const usageMessageView=document.getElementById('usageMessage');
+    const routeAlgorithmView=document.getElementById('routeAlgorithm');
+    const applyRouteAlgorithmButton=document.getElementById('applyRouteAlgorithm');
+    const routeMessageView=document.getElementById('routeMessage');
     let outputDraft=false;
     let usageDraft=false;
+    let routeDraft=false, routeOptionsSignature='';
     let modelState=null, modelStateSignature='', modelDraft=false, modelPollAt=0;
     function refreshModels(){
       if(!settingsView||settingsView.hidden||typeof window.chatBridge.models!=='function')return;
@@ -435,6 +448,15 @@
       if(outputModeView){
         if(!outputDraft)outputModeView.value=state.streaming===false?'complete':'stream';
         applyOutputModeButton.disabled=!outputDraft;
+      }
+      if(routeAlgorithmView){
+        const signature=JSON.stringify(state.routeOptions||[]);
+        if(signature!==routeOptionsSignature){
+          routeOptionsSignature=signature;
+          routeAlgorithmView.innerHTML=(state.routeOptions||[]).map(choice=>'<option value="'+esc(choice.name)+'">'+esc(choice.label)+'</option>').join('');
+        }
+        if(!routeDraft)routeAlgorithmView.value=state.routeAlgorithm||'least_load';
+        applyRouteAlgorithmButton.disabled=!routeDraft;
       }
       const signature=JSON.stringify([state.selected,state.options]);
       if(signature!==modelStateSignature){
@@ -503,6 +525,19 @@
         if(usageMessageView)usageMessageView.textContent='已清零累计显示，计价方式保持不变。';
         refreshUsage();
       }catch(error){if(usageMessageView)usageMessageView.textContent='累计未重置，请重试。';}
+    });
+    if(routeAlgorithmView)routeAlgorithmView.addEventListener('change',()=>{
+      routeDraft=!!modelState&&routeAlgorithmView.value!==(modelState.routeAlgorithm||'least_load');
+      applyRouteAlgorithmButton.disabled=!routeDraft;
+      routeMessageView.textContent=routeDraft?'点击"保存路由算法"后生效。':'';
+    });
+    if(applyRouteAlgorithmButton)applyRouteAlgorithmButton.addEventListener('click',()=>{
+      if(!routeDraft)return;
+      try{
+        const error=window.chatBridge.setRouterAlgorithm(routeAlgorithmView.value);
+        routeMessageView.textContent=error||'已保存，将用于后续聊天请求。';
+        if(!error){modelState.routeAlgorithm=routeAlgorithmView.value;routeDraft=false;applyRouteAlgorithmButton.disabled=true;}
+      }catch(error){routeMessageView.textContent='路由算法未保存，请重试。';}
     });
     const filtersView=document.getElementById('filters');
     const taskCountView=document.getElementById('taskCount');

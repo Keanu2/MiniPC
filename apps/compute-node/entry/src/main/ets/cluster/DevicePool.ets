@@ -15,7 +15,7 @@ export class PoolNode {
   memAvail: number = -1;
   /**
    * 该节点模型可提供的能力（如 ['text','vision']）。
-   * 未声明按纯文本处理 —— 与 ComputeRouter.ScheduleNode 的约定保持一致。
+   * 未声明按纯文本处理 —— 与 router/RouterTypes 的 ScheduleNode 约定保持一致。
    */
   capabilities: string[] = ['text'];
   /** 部署模型声明的最高强度档位 1-2（1 弱、2 强）；老对端/未声明 → 2 强档（同 ScheduleNode）。 */
@@ -96,7 +96,7 @@ export function meetsCapabilities(node: PoolNode, needs: string[]): boolean {
   return true;
 }
 
-/** 档位归一：1 原样，其余（2 与旧构建上报的 3）→ 2 强档。与 ComputeRouter.tierOf
+/** 档位归一：1 原样，其余（2 与旧构建上报的 3）→ 2 强档。与 router/LeastLoadRouter.tierOf
  * 同款成对重复（两模块都必须保持零 import，裸 vm 可加载）。 */
 function tierOf(value: number): number {
   return value === 1 ? 1 : 2;
@@ -123,7 +123,7 @@ function compareTier(node: PoolNode, best: PoolNode, taskTier: number): number {
  *   2. 带图请求被转给纯文本节点；
  *   3. hub 自己被选中后**本地服务**一个它根本不具备能力的请求
  *      （图片落到纯文本 hub → 回「VL 模型未部署」）。
- * nearby-chat 通路本来就有同义门槛（`ComputeRouter.meetsNeeds`），这里把 infer 侧补齐。
+ * nearby-chat 通路本来就有同义门槛（router/LeastLoadRouter 的 `meetsNeeds`），这里把 infer 侧补齐。
  *
  * taskTier ≥ 1 时在空闲能力合格节点里按档位贴近选（贴近平手 → 就高 → 内存 → 本机）；
  * 有空闲的低档节点就降档接客，只有全部合格节点都忙才返回 null（BUSY 语义不变，

@@ -6,11 +6,19 @@ export interface ModelSettingsView {
   selected: string;
   options: ModelChoiceView[];
   locked: boolean;
+  /** Hub chat-path routing algorithm in force ('auto' | 'split' | 'pin1' | 'pin2'). */
+  routeAlgorithm: string;
+  routeOptions: RouteChoiceView[];
 }
 
 export interface ModelChoiceView {
   name: string;
   vision: boolean;
+}
+
+export interface RouteChoiceView {
+  name: string;
+  label: string;
 }
 
 export interface PageEvent {

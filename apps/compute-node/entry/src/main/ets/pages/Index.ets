@@ -12,7 +12,10 @@ import { DeviceSpeed } from '../cluster/DeviceSpeed';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
 import { WireMessage, ChatMessage, ClusterInfo, DeviceInfoEntry, InferenceMetrics } from '../protocol/ChatProtocol';
 import { IS_SERVER } from '../nearby/NearbyConfig';
-import { ComputeRouter, DispatchEntry, ScheduleNode, originKeyOf, pickNode, pickRoute } from '../cluster/ComputeRouter';
+import { ComputeRouter, DispatchEntry, originKeyOf } from '../cluster/ComputeRouter';
+import { RouteAlgorithm, RouteContext, ScheduleNode } from '../cluster/router/RouterTypes';
+import { RouterChoice, createRouter, knownRouterNames, routerChoices } from '../cluster/router/RouterRegistry';
+import { routerSettings, saveRouterSettings } from '../cluster/router/RouterSettings';
 import { classifyFromMessages } from '../cluster/TaskRules';
 import { LocalLlmTransport } from '../llm/LlmTransport';
 import { VlLlmTransport } from '../llm/VlLlmTransport';
@@ -30,7 +33,7 @@ import {
 } from '../cluster/DeviceInfo';
 import { chatLabel, computeLabel, hidePhoneName, needsLabel, publicLabel, workerTail } from '../cluster/DeviceLabels';
 import { ChatBridge } from '../ui/ChatBridge';
-import { ActiveJob, DeviceView, JobView, ModelChoiceView, ModelSettingsView, PageEvent } from '../ui/DashboardTypes';
+import { ActiveJob, DeviceView, JobView, ModelChoiceView, ModelSettingsView, PageEvent, RouteChoiceView } from '../ui/DashboardTypes';
 import { TaskBoard, TaskGroupView } from '../ui/TaskBoard';
 import { TaskDisplayRelay } from '../ui/TaskDisplayRelay';
 import { inferenceSummary } from '../ui/InferencePresentation';
@@ -98,7 +101,8 @@ struct Index {
     (): string => IS_SERVER && this.filesDir.length > 0 ? JSON.stringify(this.modelSettings()) : 'null',
     (mode: string): string => this.setOutputMode(mode),
     (): string => usageSettingsJson(this.usage),
-    (payload: string): string => this.saveUsageSettings(payload));
+    (payload: string): string => this.saveUsageSettings(payload),
+    (name: string): string => this.setRouterAlgorithm(name));
   private channel = nearbyChannel;
   private connecting: boolean = false;
   private preparation: Promise<void> | null = null;
@@ -141,10 +145,10 @@ struct Index {
   private usage: UsageLedger = emptyUsage();
   private router: ComputeRouter = new ComputeRouter();
   private deviceSpeed: DeviceSpeed = new DeviceSpeed();
-  /** auto | split | pin1 | pin2. Only the hub's scheduleRequest consults this. */
-  private routeMode: string = 'auto';
-  /** Chat epoch -> 1 (this hub) or 2 (the other compute) while mode is split. */
-  private splitTarget: Map<number, number> = new Map();
+  /** 路由算法名（router/ 注册表值域，当前仅 least_load）；只有 hub 的 scheduleRequest 咨询它。 */
+  private routeMode: string = 'least_load';
+  /** Algorithm instance behind routeMode; rebuilt on switch and on startup from the persisted choice. */
+  private routeRouter: RouteAlgorithm = createRouter(this.routeMode);
   private peerStats: Map<number, DeviceInfoEntry> = new Map();
   private infoTimer: number = -1;
   private rosterDeliveries: Map<number, RosterDelivery> = new Map();
@@ -158,6 +162,9 @@ struct Index {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       this.filesDir = context.getApplicationContext().filesDir;
       this.usage = loadUsage(this.filesDir);
+      // Dirty/legacy values are normalized to 'least_load' inside routerSettings().
+      this.routeMode = routerSettings(this.filesDir).algorithm;
+      this.routeRouter = createRouter(this.routeMode);
       this.model = new LocalChat(this.filesDir);
       const card = new InferCardHooks();
       card.phase = (id: string, epoch: number, phase: string): void => this.updateJobPhase(id, epoch, phase);
@@ -450,8 +457,11 @@ struct Index {
     const options = readyModelDirs(this.filesDir).map((dir: string): ModelChoiceView => {
       return { name: dir, vision: isVlLayout(this.filesDir + '/models/' + dir) };
     });
+    const routeOptions = routerChoices().map((choice: RouterChoice): RouteChoiceView => {
+      return { name: choice.name, label: choice.label };
+    });
     return { selected: selection.model, options: options, streaming: outputSettings(this.filesDir).streaming,
-      locked: this.modelSettingsLocked() };
+      locked: this.modelSettingsLocked(), routeAlgorithm: this.routeMode, routeOptions: routeOptions };
   }
 
   private selectModel(model: string): string {
@@ -487,6 +497,19 @@ struct Index {
     const error = applyUsageSettings(this.usage, payload);
     if (error.length > 0) return error;
     saveUsage(this.filesDir, this.usage);
+    this.emitDashboard();
+    return '';
+  }
+
+  private setRouterAlgorithm(name: string): string {
+    if (!IS_SERVER || this.filesDir.length === 0) return '模型服务尚未初始化。';
+    if (knownRouterNames().indexOf(name) < 0) return '请选择有效的路由算法。';
+    // New requests route through the new algorithm; in-flight ones keep their dispatch.
+    const error = saveRouterSettings(this.filesDir, { algorithm: name });
+    if (error.length > 0) return error;
+    this.routeMode = name;
+    this.routeRouter = createRouter(name);
+    hilog.info(0, 'NearbyChat', 'ROUTE-ALGO mode=%{public}s', name);
     this.emitDashboard();
     return '';
   }
@@ -737,18 +760,21 @@ struct Index {
   }
 
   /**
-   * G5：本地能力不足（原规则），或（仅 auto 模式）任务档位高于本机且调度器真会
-   * 选别的节点。用 pickNode 真实结果判定，避免"进了调度器又选回本机"造成的
-   * 聊天轨道/任务卡错位。pin/split 模式档位盲（实验纯净性）。
+   * G5：本地能力不足（原规则），或任务档位高于本机且调度器真会
+   * 选别的节点。用路由算法真实结果判定，避免"进了调度器又选回本机"造成的
+   * 聊天轨道/任务卡错位。
    * 仅 hub 有调度权：worker 档位不足时本机直答——档位是质量偏好，绝不变成本机
    * 被拒绝的理由（否则 scheduleRequest 会回"请连接算力设备1"）。
    */
   private shouldScheduleSelf(needs: string[], taskTier: number): boolean {
     if (!this.selfMeetsNeeds(needs)) return true;
     if (this.channel.selfComputeNumber() !== 1) return false;
-    if (this.routeMode !== 'auto' && this.routeMode.length > 0) return false;
     if (taskTier <= this.selfTierOf()) return false;
-    const pick = pickNode(this.scheduleNodes(), needs, taskTier);
+    const ctx = new RouteContext();
+    ctx.nodes = this.scheduleNodes();
+    ctx.needs = needs;
+    ctx.taskTier = taskTier;
+    const pick = this.routeRouter.route(ctx);
     return pick !== null && !pick.isSelf;
   }
 
@@ -780,8 +806,6 @@ struct Index {
     if (raw.length > 1100) return '这条消息太长，请缩短后再发送。';
     const question = raw.length > 0 ? raw : '请描述这张图片。';
     if (IS_SERVER) {
-      const routed = this.applyRouteCommand(question);
-      if (routed !== null) return routed;
       const bench = this.startBench(question);
       if (bench !== null) return bench;
       if (this.localBusy()) return '模型正在回答上一条问题，请稍后再发。';
@@ -889,41 +913,17 @@ struct Index {
     return null;
   }
 
-  private applyRouteCommand(question: string): string | null {
-    let mode = '';
-    let label = '';
-    if (question === '__route_auto__') { mode = 'auto'; label = '自动'; }
-    else if (question === '__route_split__') { mode = 'split'; label = '拆到两台'; }
-    else if (question === '__route_pin1__') { mode = 'pin1'; label = '都在算力1'; }
-    else if (question === '__route_pin2__') { mode = 'pin2'; label = '都在算力2'; }
-    else return null;
-    this.routeMode = mode;
-    this.splitTarget.clear();
-    hilog.info(0, 'NearbyChat', 'EXP-MODE mode=%{public}s', mode);
-    this.emit({ kind: 'done', text: '实验路由：' + label, error: false });
-    return '';
-  }
-
-  private chooseNode(nodes: ScheduleNode[], originEpoch: number, needs: string[] = [],
+  private chooseNode(nodes: ScheduleNode[], needs: string[] = [],
     taskTier: number = 0): ScheduleNode | null {
-    if (this.routeMode !== 'split') return pickRoute(nodes, this.routeMode, true, needs, taskTier);
-    const prior = this.splitTarget.get(originEpoch);
-    let preferSelf = true;
-    if (prior === 2) preferSelf = false;
-    else if (prior !== 1) {
-      let peerTaken = false;
-      this.splitTarget.forEach((target: number) => {
-        if (target === 2) peerTaken = true;
-      });
-      preferSelf = !peerTaken;
-    }
-    const node = pickRoute(nodes, 'split', preferSelf, needs);
-    if (node !== null && prior !== 1 && prior !== 2) this.splitTarget.set(originEpoch, node.isSelf ? 1 : 2);
-    return node;
+    const ctx = new RouteContext();
+    ctx.nodes = nodes;
+    ctx.needs = needs;
+    ctx.taskTier = taskTier;
+    return this.routeRouter.route(ctx);
   }
 
   private logRoute(job: ActiveJob): void {
-    if (job.routeMode.length === 0 || job.routeMode === 'auto') return;
+    if (job.routeMode.length === 0 || job.routeMode === 'least_load') return;
     hilog.info(0, 'NearbyChat',
       'EXP-ROUTE mode=%{public}s origin=%{public}s worker=%{public}s hop=%{public}d tier=%{public}d id=%{public}s',
       job.routeMode, job.origin, job.source, job.workerEpoch === 0 ? 0 : 1,
@@ -931,7 +931,7 @@ struct Index {
   }
 
   private logExperiment(job: ActiveJob): void {
-    if (job.routeMode.length === 0 || job.routeMode === 'auto') return;
+    if (job.routeMode.length === 0 || job.routeMode === 'least_load') return;
     const ttft = job.firstAt > job.startedAt ? job.firstAt - job.startedAt : -1;
     const total = job.endedAt > job.startedAt ? job.endedAt - job.startedAt : -1;
     let mem = -1;
@@ -1306,7 +1306,7 @@ struct Index {
     const nodes = this.scheduleNodes();
     // 档位与执行端同规则重算：消息逐字转发，两侧分类结果一致（tier 不上线协议）。
     const profile = classifyFromMessages(messages, image.length > 0);
-    const node = this.chooseNode(nodes, originEpoch, needs, profile.tier);
+    const node = this.chooseNode(nodes, needs, profile.tier);
     // nodeTier < tier 即降档；node=none 即能力不合格（fail closed）。
     hilog.info(0, 'NearbyChat',
       'ROUTE id=%{public}s tier=%{public}d reason=%{public}s needs=%{public}s mode=%{public}s node=%{public}s nodeTier=%{public}d',
@@ -1314,8 +1314,6 @@ struct Index {
       node === null ? 'none' : (node.isSelf ? '本机' : node.name),
       node === null ? 0 : node.modelTier);
     if (node === null) {
-      if (this.routeMode === 'pin1') return '实验路由找不到算力设备1。';
-      if (this.routeMode === 'pin2') return '实验路由找不到算力设备2。';
       // 有带模型的设备却选不出，只能是能力不满足：绝不降级发给不具备能力的设备。
       if (nodes.length > 0) return '集群中没有支持' + (needs.length > 0 ? needsLabel(needs) : '文字推理') + '的设备。';
       return '集群中无已部署模型的可用设备。';
@@ -1790,7 +1788,7 @@ struct Index {
       Web({ src: $rawfile('peer-chat.html'), controller: this.controller })
         .javaScriptAccess(true)
         .domStorageAccess(false)
-        .javaScriptProxy({ object: this.bridge, name: 'chatBridge', methodList: ['send', 'stop', 'connect', 'prepare', 'pickImage', 'clear', 'clearImage', 'selectModel', 'models', 'setOutputMode', 'usageSettings', 'saveUsageSettings'], controller: this.controller })
+        .javaScriptProxy({ object: this.bridge, name: 'chatBridge', methodList: ['send', 'stop', 'connect', 'prepare', 'pickImage', 'clear', 'clearImage', 'selectModel', 'models', 'setOutputMode', 'usageSettings', 'saveUsageSettings', 'setRouterAlgorithm'], controller: this.controller })
         .onPageEnd(() => {
           this.pageReady = true;
           this.channel.subscribe(
