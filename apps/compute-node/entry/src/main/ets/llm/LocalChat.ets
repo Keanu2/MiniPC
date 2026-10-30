@@ -22,16 +22,36 @@ import { outputSettings } from './OutputSettings';
 
 export interface ChatMessage { role: string; content: string; }
 export interface ChatUpdate {
-  kind: 'delta' | 'done'; text: string; error?: string; finishReason?: string; metrics?: InferenceMetrics;
+  kind: 'delta' | 'done';
+  text: string;
+  error?: string;
+  finishReason?: string;
+  metrics?: InferenceMetrics;
   /** Local-only time reconstructed from native monotonic duration; never put on the wire. */
   outputAt?: number;
+  /** 上游 Outcome 细分：后端失败时标注 'overflow'（撞输出上限）/'unavailable'，缺省按 unavailable 处理。 */
+  failureKind?: string;
 }
 /** 多模态消息分片：图片（image_url 为 data URL）或文本。 */
 interface MessagePart { type: string; text?: string; image_url?: string }
 /** 推理请求的消息：纯文本 content 为字符串；带图时最后一条 user 消息为分片数组。 */
 interface RequestMessage { role: string; content: string | MessagePart[] }
 interface ChatRequest { type: string; messages: RequestMessage[]; stream: boolean; max_tokens: number; }
-export interface ChatStartOptions { maxTokens?: number; waitSeconds?: number; image?: string; stream?: boolean; }
+export interface ChatStartOptions { maxTokens?: number; waitSeconds?: number; image?: string; stream?: boolean; model?: string; }
+/** 推理后端公共面：InferenceHost 等上层只依赖本接口，不感知本地 GEWU 还是云端 API。 */
+export interface ChatBackend {
+  isBusy(): boolean;
+  activeCount(): number;
+  readinessError(): string;
+  start(messages: ChatMessage[], callback: (update: ChatUpdate) => void,
+    requestId: string, options: ChatStartOptions): string;
+  cancel(requestId?: string): void;
+  close(): void;
+  /** GEWU 本地清理窗口：答案已交付但原生侧仍持有模型内存（VL 权重加载前须等待）。 */
+  hasPendingNativeJobs(): boolean;
+  /** 模型切换前关闭空闲的缓存原生会话（含 GEWU 会话复用缓存）。 */
+  resetIdleSessions(): void;
+}
 const MAX_TOKENS = 2048;
 interface NativeEvent { event: string; id?: string; payload: string; elapsedMs?: number; }
 interface NativeUsage {
@@ -141,7 +161,7 @@ interface Job {
   plan: SessionPlan | undefined;
 }
 
-export class LocalChat {
+export class LocalChat implements ChatBackend {
   private filesDir: string;
   private timer: number = -1;
   private closed: boolean = false;
@@ -179,8 +199,11 @@ export class LocalChat {
    * 带图请求把最后一条 user 消息编码为多模态分片（图片在前、文本在后，对齐
    * Qwen-VL 惯例）；请求类型跟随所选模型 api_config 的声明。
    *
-   * 默认流式；非流式调用可显式关闭。UTF-8 跨块字节由原生桥接保留，历史引擎
-   * 已丢失的替换字符继续由出口清洗兜底。是否结束取决于请求模式和结束标记。
+   * stream 默认 true（选项与 OutputSettings 均可显式关闭）。真机实测 stream:false
+   * 的单次完整回调会把首个多字节字符按字节替换成 U+FFFD——引擎内部组装的有损
+   * 首块边界，字节不可恢复；流式的跨块拆分由 native 层 utf8Pending 携带
+   * （gewu_probe.cpp RepairResponse），可完整重组，首字也从全文完成提前到首个
+   * 回调。历史引擎已丢失的替换字符由出口清洗兜底。是否结束取决于请求模式和结束标记。
    */
   private buildRequest(messages: ChatMessage[], image: string, type: string, maxTokens: number, stream: boolean): ChatRequest {
     const out: RequestMessage[] = [];

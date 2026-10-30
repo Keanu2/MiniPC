@@ -83,7 +83,7 @@ export function buildLoopSystemPrompt(snapshot: SkillSnapshot | null): string {
 }
 
 export function buildReActFormatRules(): string {
-  return ' Reply directly with either Final: answer, or Execution: serial or parallel followed by Action: line(s). Never output Thought, reasoning, or analysis.\n'
+  return ' Reply directly with either Final Answer (in Chinese): answer, or Execution: serial or parallel followed by Action: line(s). Never output Thought, reasoning, or analysis.\n'
     + '- Single tool: Execution: serial then Action: tool_name[input]\n'
     + '- Parallel tools: Execution: parallel then multiple independent Action: lines\n'
     + '- Ordered tools with known inputs: Execution: serial then multiple Action: lines\n'

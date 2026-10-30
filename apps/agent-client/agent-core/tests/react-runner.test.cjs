@@ -94,7 +94,7 @@ async function run(task, responses, outputs = {}, options = {}) {
   let i = 0;
   const model = { complete: async (prompt,context) => { prompts.push(prompt); contexts.push(context); const response=responses[Math.min(i++,responses.length-1)]; if(response instanceof Error) throw response; return response; }, cancel: () => options.onCancel?.() };
   // Legacy response fixtures exercise the explicit compatibility mode.
-  const runner = new ReActAgentRunner(model, tools, options.steps || 12, options.snapshot, false, false, options.compact || false, options.budget || (() => 32768), false);
+  const runner = new ReActAgentRunner(model, tools, options.steps || 12, options.snapshot, false, false, options.compact || false, options.budget || (() => 32768), false, options.finalReview || false);
   options.onRunner?.(runner);
   await runner.run(task, e => { events.push(e); options.onEvent?.(e,runner); }, options.conversation);
   return { calls, prompts, events, contexts, final: events.filter(e => e.kind === 'final').map(e => e.text).join('\n') };
@@ -549,6 +549,69 @@ test('empty time-window evidence requires an honest alternative across routes an
   assert.ok(core.finalIssues(entries,'明天'+clock+from+'到'+to+'车次为'+code+'，07:55出发。').length);
   assert.deepEqual(core.finalIssues(entries,'明天'+from+'到'+to+'在'+clock+'没有出发车次，最接近的是'+code+'，07:55出发。'),[]);
  }
+});
+test('marker-only Final is repaired and leading bare markers never reach the answer', async () => {
+  const r = await run('你好', ['Final', 'Final: 你好！很高兴见到你。']);
+  assert.equal(r.final, '你好！很高兴见到你。');
+  assert.match(r.prompts[1], /lone "Final" marker/);
+  const bare = await run('你好', ['Final\n你好！很高兴见到你。']);
+  assert.equal(bare.final, '你好！很高兴见到你。');
+  assert.ok(bare.prompts.every(p => !/(^|\n)assistant: Final(\n|$)/.test(p)));
+});
+test('degenerate stored answers never become assistant: Final few-shot examples', async () => {
+  const conversation = { isEmpty: () => false, toChatMessages: () => [
+    { role: 'user', content: '帮我做攻略' },
+    { role: 'assistant', content: 'Final\n日本10天9晚攻略正文' },
+    { role: 'user', content: '你好' },
+    { role: 'assistant', content: 'Final' }] };
+  const r = await run('介绍你自己', ['Final: 我是Loop。'], {}, { conversation });
+  assert.ok(r.prompts.every(p => !p.includes('assistant: Final\n')));
+  assert.ok(r.prompts.every(p => !/(^|\n)assistant: Final(\n|$)/.test(p)));
+  assert.ok(r.prompts.some(p => p.includes('assistant: 日本10天9晚攻略正文')));
+  assert.ok(r.prompts.some(p => p.includes('assistant: （上一轮未得到完整回答）')));
+  assert.match(r.final, /Loop/);
+});
+test('failure-aware review answer survives unavailable tools; without review the honest notice stays', async () => {
+  const responses = ['Action: map_search[{"query":"深圳 日本"}]', 'Final: 深圳到日本需要乘飞机。', 'Final: 深圳去日本需要先乘飞机到达日本的入境城市，建议查询最新航班。'];
+  const reviewed = await run('深圳怎么去日本', responses, { map_search: '地图结果\n还没有配置高德 Key。' }, { finalReview: true });
+  assert.match(reviewed.final, /飞机/);
+  assert.ok(!reviewed.final.includes('部分工具未获得可用结果'));
+  const bare = await run('深圳怎么去日本', responses.slice(0, 2), { map_search: '地图结果\n还没有配置高德 Key。' });
+  assert.match(bare.final, /部分工具未获得可用结果/);
+});
+// —— 指令回声防护：弱模型照抄提示词示例句时，指令文本绝不能变成答案 ——
+test('instruction-echo answer rejected, real answer accepted next round', async () => {
+  const r = await run('你好', ['Final: 完整回答', 'Final: 你好！有什么可以帮助你的吗？']);
+  assert.equal(r.final, '你好！有什么可以帮助你的吗？');
+});
+test('GEWU-corrupted echo with FFFD head is rejected too', async () => {
+  const bad = 'Final: ' + String.fromCharCode(0xfffd, 0xfffd) + '整回答';
+  const r = await run('你好', [bad, 'Final: 你好！有什么可以帮助你的吗？']);
+  assert.equal(r.final, '你好！有什么可以帮助你的吗？');
+});
+test('echo-only run fails honestly instead of delivering filler', async () => {
+  const r = await run('你好', ['Final: 完整回答']);
+  assert.ok(!r.final.includes('完整回答'));
+  assert.match(r.final, /模型未给出有效最终回复/);
+});
+test('prompts no longer embed parrotable Final examples', async () => {
+  const r = await run('你好', ['Final: 你好！']);
+  assert.ok(r.prompts.length > 0);
+  for (const p of r.prompts) {
+    assert.ok(!p.includes('Final Answer (in Chinese): 完整回答'), 'phase prompt still carries the parrotable example');
+    assert.ok(!p.includes('Final Answer (in Chinese): 完整答案'), 'phase prompt still carries a filler example');
+  }
+});
+test('legit answers containing the phrase pass through', async () => {
+  const r = await run('请完整回答这个问题', ['Final: 以下是完整回答：地球绕太阳一圈约一年。']);
+  assert.match(r.final, /地球绕太阳一圈约一年/);
+});
+test('reviewer echoing its own instruction fails honestly', async () => {
+  const responses = ['Action: map_search[{"query":"深圳 日本"}]', 'Final: 深圳到日本需要乘飞机。',
+    'Final Answer (in Chinese): 完整答案，不输出检查过程或复核说明。'];
+  const r = await run('深圳怎么去日本', responses, { map_search: '地图结果\n还没有配置高德 Key。' }, { finalReview: true });
+  assert.ok(!r.final.includes('不输出检查过程'), 'reviewer instruction filler leaked into the answer');
+  assert.match(r.final, /复核|飞机/);
 });
 (async()=>{
   let passed=0;

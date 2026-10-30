@@ -249,8 +249,8 @@ test('synthesis and conditional review retain executed inputs and concrete issue
   const r=await run(registry,'使用'+name+'读取目标资料',[action(name,{isbn:'B'}),'Final: REJECTED_DRAFT Edition B','Final: Edition A'],{compact:true,finalReview:true});
   assert.deepEqual(inputs,['{"isbn":"A"}']);assert.equal(r.prompts.length,3);assert.equal(r.final,'Edition A');
   assert.match(r.prompts[1],/Executed input: \{"isbn":"A"\}/);
-  assert.match(r.prompts[2],/Executed input \(data\): \{"isbn":"A"\}/);
-  assert.match(r.prompts[2],/Validation issues to resolve \(data\):\n\["[^\n]+"\]/);
+  assert.match(r.prompts[2],/执行输入（数据）：\{"isbn":"A"\}/);
+  assert.match(r.prompts[2],/待修正问题（数据）：\n\["[^\n]+"\]/);
   assert.doesNotMatch(r.prompts[2],/REJECTED_DRAFT|Edition B|"isbn":"B"/);
  }
 });

@@ -19,6 +19,21 @@ export function utf8Bytes(text: string): Uint8Array {
   return new util.TextEncoder().encodeInto(text);
 }
 
+/** 按码点截断到 UTF-8 字节上限（等价 Python text.encode()[:limit].decode(errors='ignore') 的字符边界语义）。 */
+export function capUtf8Bytes(text: string, limit: number): string {
+  if (utf8Bytes(text).length <= limit) return text;
+  const chars = Array.from(text);
+  let used = 0;
+  let capped = '';
+  for (const char of chars) {
+    const size = utf8Bytes(char).length;
+    if (used + size > limit) break;
+    capped += char;
+    used += size;
+  }
+  return capped;
+}
+
 export function sha256Hex(bytes: Uint8Array): string {
   const bitLen = bytes.length * 8;
   const withOne = bytes.length + 1;

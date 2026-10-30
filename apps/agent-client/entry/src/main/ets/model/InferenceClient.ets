@@ -301,8 +301,10 @@ class InferenceClient {
     }
     const profile = this.profile;
     // ReAct turns need room for a multi-line Action/Final. Respect the negotiated
-    // capacity, with a conservative upper bound against unbounded generation.
-    const outputTokens = Math.min(2048, profile.maxOutputTokens);
+    // capacity, with a conservative upper bound against unbounded generation
+    // (4096：云侧推理模型思考占预算，2048 会截断复杂回答；4096 ≈ 75s 生成，
+    // 留在配置的 120s 读超时与 170s 客户端死线之内)。
+    const outputTokens = Math.min(4096, profile.maxOutputTokens);
     hilog.info(0, 'NearbyChat', 'infer prompt chars=%{public}d ctx=%{public}d',
       prompt.length, profile.maxContextTokens);
     const messages: ChatMessage[] | undefined = profile.splitMessages === true && split !== null ?
