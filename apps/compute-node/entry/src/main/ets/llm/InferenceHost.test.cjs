@@ -74,7 +74,7 @@ test('two requests reach native before either completes; reverse completion pres
   assert.equal(h.starts[0].request.messages[0].content, '甲的问题');
   assert.equal(h.starts[1].request.messages[0].content, '乙的问题');
   const first = h.starts[0].id, second = h.starts[1].id;
-  const a = '甲'.repeat(500), b = '乙的回答';
+  const a = Array.from({length: 500}, (_, i) => String.fromCharCode(0x4e00 + i)).join(''), b = '乙的回答';
   h.response(second, b);h.end(second);h.poll();assert.equal(h.host.activeCount(), 1);
   h.response(first, a);h.end(first);h.poll();assert.equal(h.host.activeCount(), 0);
   for (const [epoch, expected] of [[7, a], [8, b]]) {

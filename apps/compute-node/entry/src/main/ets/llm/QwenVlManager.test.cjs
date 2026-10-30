@@ -82,7 +82,8 @@ for (const bad of ['', '���']) {
   const h = fixture(); h.start();
   h.response('已有内容'); h.poll(); h.response('���'); h.end(); h.poll();
   assert.equal(h.starts.length, 1, 'a published stream must never be replayed');
-  assert.equal(deltas(h), '已有内容'); assert(h.updates.at(-1).error);
+  assert.equal(deltas(h), '已有内容', 'a stray replacement char is dropped, not fatal'); assert.equal(h.updates.at(-1).error, undefined);
+  assert.equal(h.updates.at(-1).done, '已有内容');
 }
 for (const option of ['throwRetry', 'refuseRetry']) {
   const h = fixture({ [option]: true }); h.start(); h.end(); h.poll();

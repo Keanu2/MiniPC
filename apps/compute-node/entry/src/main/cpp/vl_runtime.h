@@ -364,10 +364,7 @@ void OnToken(void* userdata, const char* text)
     // 使 answer 只含真实内容，空输出也能被上层正确判定为"无回应"并触发重试。
     if (strcmp(text, "<|im_end|>") == 0 || strcmp(text, "<|endoftext|>") == 0 ||
         (text[0] == '<' && strchr(text, '|') != nullptr && strstr(text, "im_end") != nullptr)) {
-        // 已经陷入重复循环的结束符（如循环体恰为 "<|im_end|>"）不需要再回调
-        if (s.repetitionCut) {
-            return;
-        }
+        return;
     }
     // 重复循环检测：同一 generation 内连续相同分片 >= REPEAT_CUTOFF 次
     const size_t REPEAT_CUTOFF = 8;

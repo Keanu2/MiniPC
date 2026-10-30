@@ -340,12 +340,12 @@ export class QwenVlManager {
    * Recompute from raw text so special tokens split across callbacks stay hidden. */
   private appendAnswer(payload: string): void {
     this.rawAnswer += payload;
-    this.answer = QwenVlManager.stripSpecialTokens(this.rawAnswer);
+    this.answer = QwenVlManager.stripSpecialTokens(this.rawAnswer).replace(/\uFFFD/g, '');
     this.publishAnswer(false);
   }
 
   private publishAnswer(final: boolean): void {
-    if (this.answer.indexOf('\uFFFD') >= 0 || (!final && this.answer.trim().length < 2)) return;
+    if ((!final && this.answer.trim().length < 2)) return;
     const delta = this.answer.substring(this.emittedLength);
     if (delta.length === 0) return;
     this.emittedLength = this.answer.length;
@@ -367,9 +367,9 @@ export class QwenVlManager {
   }
 
   private finish(): void {
-    this.answer = QwenVlManager.stripSpecialTokens(this.rawAnswer, true);
+    this.answer = QwenVlManager.stripSpecialTokens(this.rawAnswer, true).replace(/\uFFFD/g, '');
     const empty = this.answer.trim().length === 0;
-    const invalidEncoding = this.answer.indexOf('\uFFFD') >= 0;
+    const invalidEncoding = this.rawAnswer.length > 0 && this.answer.trim().length === 0 && this.rawAnswer.indexOf('\uFFFD') >= 0;
     // Retry only a normally ended attempt with no published text. A consumer
     // cannot retract deltas already sent over the inference protocol.
     if (!this.failure && !this.cancelled && this.finishReason === 'stop' &&
@@ -417,6 +417,7 @@ export class QwenVlManager {
   private failNow(message: string): void {
     this.failure = message;
     this.emit({ done: message, error: message });
+    try { engine.cancel(); } catch (_) { /* nothing running */ }
     engine.complete();
     this.callback = null;
     this.busy = false;

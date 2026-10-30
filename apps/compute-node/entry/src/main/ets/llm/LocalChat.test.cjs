@@ -26,6 +26,7 @@ const utf8Repair = (() => {
 // 驱动 consumeEvents：捕获 interval 回调 + 事件队列，测试可以手动推进原生事件。
 let consumeTick = null;
 let nativeEvents = [];
+const cancelledIds = [];
 const reuseExports = {};
 vm.runInNewContext(transpile(__dirname + '/SessionReuse.ets'), { exports: reuseExports, Date });
 const startArgs = [];
@@ -40,13 +41,13 @@ const context = { exports: {}, ArrayBuffer, Date: {now:()=>clockOverride ?? Date
       starts++; lastModelPath = modelPath; lastRequest = request;
       return failStart ? 0 : ++nextId;
     },
-    cancel() {}, complete() {}, takeEvents() { return nativeEvents.splice(0); }
+    cancel(id) { cancelledIds.push(id); }, complete() {}, takeEvents() { return nativeEvents.splice(0); }
   } };
   if (name === './SessionReuse') return reuseExports;
   if (name === './OutputSettings') return {outputSettings:()=>({streaming:outputPreference})};
   if (name === '@kit.CoreFileKit') return { fileIo: {accessSync:()=>reuseOn} };
   if (name === './Utf8Repair') return utf8Repair;
-  if (name === '@kit.PerformanceAnalysisKit') return { hilog: { info() {} } };
+  if (name === '@kit.PerformanceAnalysisKit') return { hilog: { info() {}, warn() {} } };
   if (name === './ModelRegistry') return {
     readyModelDirs: () => registryDirs.slice(),
     selectModelDir: (filesDir, needs, taskTier) => {
@@ -263,3 +264,52 @@ console.log('PASS: native callback time and chunk count survive a batched JS pol
   session.close();reopened.close();outputPreference=true;
 }
 console.log('PASS: output preference applies to new requests without changing active streams');
+{
+  const { degenerateOutput } = context.exports;
+  assert.equal(degenerateOutput('!'.repeat(24)), true, 'NaN-logit token 0 stream is garbage from the start');
+  assert.equal(degenerateOutput('!'.repeat(23)), false);
+  assert.equal(degenerateOutput('-'.repeat(40) + '\n'), false, 'markdown rules are not garbage');
+  assert.equal(degenerateOutput('答案如下：' + '相机、'.repeat(60)), true, 'a short verbatim loop is cut');
+  assert.equal(degenerateOutput('我是AI助手，很高兴为你服务。'.repeat(12)), true, 'a sentence loop is cut');
+  assert.equal(degenerateOutput(Array.from({length:30},(_,i)=>String(100+i)).join(', ')), false, 'bench integers pass');
+  assert.equal(degenerateOutput('| a | b |\n|---|---|\n| 1 | 2 |\n'), false);
+  assert.equal(degenerateOutput('Action: {"tool":"x"}\n' + ' '.repeat(200)), false, 'whitespace padding is not a loop');
+
+  const session=new LocalChat('/files'),updates=[];
+  session.start([{role:'user',content:'1+1='}],u=>updates.push(u),'garbage');const id=nextId;
+  for (let i = 0; i < 6; i++) nativeEvents.push(JSON.stringify({event:'response',id:String(id),
+    payload:JSON.stringify({message:{content:'!!!!!'},finish_reason:null})}));
+  consumeTick();
+  assert.equal(cancelledIds.at(-1),id,'garbage cancels the native request');
+  assert.ok(updates.filter(u=>u.kind==='delta').length < 6,'garbage stops streaming once detected');
+  nativeEvents.push(JSON.stringify({event:'abort',id:String(id),payload:'0'}));
+  nativeEvents.push(JSON.stringify({event:'end',id:String(id),payload:'closed'}));consumeTick();
+  assert.equal(updates.at(-1).kind,'done');assert.ok(updates.at(-1).error.indexOf('模型输出异常')===0);
+  assert.equal(updates.at(-1).finishReason,'error','our own cancel must not surface as a user stop');
+  session.close();
+}
+{
+  const session=new LocalChat('/files'),updates=[];
+  session.start([{role:'user',content:'abort'}],u=>updates.push(u),'engine-abort');
+  nativeEvents.push(JSON.stringify({event:'response',id:String(nextId),payload:JSON.stringify({message:{content:'半截'},finish_reason:'abort'})}));
+  consumeTick();
+  assert.equal(updates.at(-1).kind,'done');assert.ok(updates.at(-1).error,'an engine abort is not a complete answer');
+  assert.equal(updates.at(-1).finishReason,'error');session.close();
+}
+console.log('PASS: degenerate output and engine abort fail instead of streaming garbage or truncated answers');
+
+{
+  const { stripThink } = context.exports;
+  assert.equal(stripThink('<think>plan</think>\n\nAnswer'), 'Answer');
+  assert.equal(stripThink('<think>still thinking'), '');
+  assert.equal(stripThink('Hi <thi'), 'Hi ');
+  assert.equal(stripThink('a < b and <b>'), 'a < b and <b>');
+  const session=new LocalChat('/files'),updates=[];
+  session.start([{role:'user',content:'think'}],u=>updates.push(u),'think');const id=nextId;
+  for (const [c,f] of [['<thi',null],['nk>hidden</thi',null],['nk>\n42','stop']]) nativeEvents.push(JSON.stringify({event:'response',id:String(id),
+    payload:JSON.stringify({message:{content:c},finish_reason:f})}));
+  consumeTick();
+  assert.equal(updates.filter(u=>u.kind==='delta').map(u=>u.text).join(''),'42');
+  assert.equal(updates.at(-1).text,'42');session.close();
+}
+console.log('PASS: think blocks are hidden from streamed and final output');

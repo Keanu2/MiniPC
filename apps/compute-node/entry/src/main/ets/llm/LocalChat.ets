@@ -52,6 +52,58 @@ function stallSeconds(payload: string, prefix: string): string {
   return Number.isInteger(value) && value > 0 ? String(value) : '';
 }
 
+const GARBAGE_PREFIX_CHARS = 24;
+const LOOP_SPAN_CHARS = 160;
+const LOOP_MAX_UNIT = 48;
+const LOOP_MIN_REPEATS = 4;
+const DEGENERATE_FAILURE = '模型输出异常（重复或无意义字符），已自动停止。请重试或切换模型。';
+const ENGINE_ABORT_FAILURE = '模型推理被引擎中断，回答不完整，请重试。';
+
+/**
+ * Broken weights or NaN logits make GEWU decode token 0 ("!") forever, and greedy decoding can
+ * lock into a verbatim loop. Neither ever reaches EOS, so they would stream until the 600 s cap.
+ */
+export function degenerateOutput(text: string): boolean {
+  const head = text.trimStart();
+  if (head.length >= GARBAGE_PREFIX_CHARS && '-=*_#~`.'.indexOf(head.charAt(0)) < 0) {
+    let same = true;
+    for (let index = 1; index < GARBAGE_PREFIX_CHARS && same; index++) same = head.charAt(index) === head.charAt(0);
+    if (same) return true;
+  }
+  for (let unit = 1; unit <= LOOP_MAX_UNIT; unit++) {
+    if (text.length < unit * LOOP_MIN_REPEATS) break;
+    const tail = text.substring(text.length - unit);
+    if (tail.trim().length === 0) continue;
+    let repeats = 1;
+    let pos = text.length - unit;
+    while (pos >= unit && repeats * unit < LOOP_SPAN_CHARS && text.substring(pos - unit, pos) === tail) {
+      repeats++;
+      pos -= unit;
+    }
+    if (repeats >= LOOP_MIN_REPEATS && repeats * unit >= LOOP_SPAN_CHARS) return true;
+  }
+  return false;
+}
+
+/** Hide Qwen3-style <think>...</think> reasoning, including an unclosed block and a split opening tag. */
+export function stripThink(text: string): string {
+  let out = '';
+  let rest = text;
+  for (;;) {
+    const open = rest.indexOf('<think>');
+    if (open < 0) {
+      for (let keep = Math.min(6, rest.length); keep > 0; keep--) {
+        if ('<think>'.startsWith(rest.substring(rest.length - keep))) return out + rest.substring(0, rest.length - keep);
+      }
+      return out + rest;
+    }
+    out += rest.substring(0, open);
+    const close = rest.indexOf('</think>', open);
+    if (close < 0) return out;
+    rest = rest.substring(close + 8).replace(/^\n+/, '');
+  }
+}
+
 /** Map native end payloads to the failure the user should see. Empty means success path. */
 function endFailure(payload: string, hasAnswer: boolean, hasFinish: boolean): string {
   if (payload.indexOf('stalled_idle') === 0) {
@@ -76,6 +128,8 @@ interface Job {
   nativeId: number;
   cancelled: boolean;
   answer: string;
+  /** Model text before <think> blocks are removed. */
+  raw: string;
   failure: string;
   finishReason: string;
   delivered: boolean;
@@ -192,7 +246,7 @@ export class LocalChat {
       return '模型繁忙，请稍后再发。';
     }
     this.jobs.push({
-      requestId: requestId, nativeId: nativeId, cancelled: false, answer: '', failure: '',
+      requestId: requestId, nativeId: nativeId, cancelled: false, answer: '', raw: '', failure: '',
       finishReason: '', delivered: false, nativeStartedAt: nativeStartedAt, metrics: { streaming: request.stream },
       plan: plan, promptSource: taskTextOf(messages), callback: callback
     });
@@ -259,7 +313,10 @@ export class LocalChat {
         if (typeof response.message?.content === 'string' && response.message.content.length > 0) {
           // GEWU 引擎可能在回调前就把跨块多字节字符替换成 U+FFFD：先修复后剔除，
           // answer、delta 回调与最终 done 用的都是这一份净化文本。
-          const content = sanitizeModelOutput(response.message.content, job.promptSource);
+          const cleaned = sanitizeModelOutput(response.message.content, job.promptSource);
+          job.raw += cleaned;
+          const visible = stripThink(job.raw);
+          const content = visible.substring(job.answer.length);
           if (content.length > 0) {
             const first = job.answer.length === 0;
             const elapsed = reportedNumber(event.elapsedMs, true);
@@ -268,13 +325,21 @@ export class LocalChat {
               firstOutputMs: first ? elapsed : job.metrics.firstOutputMs, lastOutputMs: elapsed,
               modelLoadMs: job.metrics.modelLoadMs, prefillMs: job.metrics.prefillMs, decodeMs: job.metrics.decodeMs,
               promptTokens: job.metrics.promptTokens, completionTokens: job.metrics.completionTokens };
-            job.answer += content;
+            job.answer = visible;
+            if (degenerateOutput(job.answer)) {
+              hilog.warn(0, 'NearbyChat', 'degenerate output request=%{public}s chars=%{public}d',
+                job.requestId, job.answer.length);
+              job.failure = DEGENERATE_FAILURE;
+              probe.cancel(job.nativeId);
+              continue;
+            }
             if (job.callback) job.callback({ kind: 'delta', text: content, metrics: first ? job.metrics : undefined,
               outputAt: elapsed === undefined ? undefined : job.nativeStartedAt + elapsed });
           }
         }
         if (typeof response.finish_reason === 'string' && response.finish_reason.length > 0) {
           job.finishReason = response.finish_reason;
+          if (job.finishReason === 'abort' && !job.cancelled) job.failure = ENGINE_ABORT_FAILURE;
           probe.complete(job.nativeId);
         } else if (!job.metrics.streaming && job.answer.length > 0) {
           // stream:false has exactly one response; native already treats it as terminal.
@@ -321,7 +386,7 @@ export class LocalChat {
     const update: ChatUpdate = {
       kind: 'done', text: job.failure || (job.cancelled ?
         (job.answer ? job.answer + '\n\n已停止生成' : '已停止生成') : job.answer),
-      finishReason: job.cancelled ? 'cancelled' : job.finishReason, metrics: job.metrics
+      finishReason: job.failure ? 'error' : job.cancelled ? 'cancelled' : job.finishReason, metrics: job.metrics
     };
     if (job.failure) update.error = job.failure;
     const callback = job.callback;
