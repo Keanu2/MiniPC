@@ -249,6 +249,29 @@ export function parseSessionResponseChunk(response: string): ResponseChunk {
 // recovery must rebuild both sides through CollaborationController.
 const MAX_ATTEMPTS = 1;
 
+// No token for this long means the native decode is stuck; the outer run deadline is much longer.
+const NATIVE_IDLE_TIMEOUT_MS = 120000;
+
+/** Same-token floods (NaN logits emit token 0 forever) and verbatim loops never reach EOS. */
+function isDegenerateOutput(text: string): boolean {
+  const head = text.trimStart();
+  if (head.length >= 24 && '-=*_#~`.'.indexOf(head.charAt(0)) < 0) {
+    let same = true;
+    for (let i = 1; i < 24 && same; i++) same = head.charAt(i) === head.charAt(0);
+    if (same) return true;
+  }
+  for (let unit = 1; unit <= 48; unit++) {
+    if (text.length < unit * 4) break;
+    const tail = text.substring(text.length - unit);
+    if (tail.trim().length === 0) continue;
+    let repeats = 1;
+    let pos = text.length - unit;
+    while (pos >= unit && repeats * unit < 160 && text.substring(pos - unit, pos) === tail) { repeats++; pos -= unit; }
+    if (repeats >= 4 && repeats * unit >= 160) return true;
+  }
+  return false;
+}
+
 /**
  * 将本地 C++ LLM 推理服务适配为无状态的 LocalModel 接口。
  *
@@ -616,9 +639,24 @@ export class SessionBackedModel implements LocalModel {
       let buffer = '';
       let settled = false;
 
+      let idleTimer: number = -1;
+      const clearIdle = (): void => { if (idleTimer !== -1) { clearTimeout(idleTimer); idleTimer = -1; } };
+      const armIdle = (): void => {
+        clearIdle();
+        idleTimer = setTimeout((): void => {
+          if (settled) return;
+          const abortId = this.activeRequestId;
+          if (this.sessionId !== null && abortId !== null) {
+            try { this.binding.abortRequest(this.sessionId, abortId); } catch (_error) { /* best effort */ }
+          }
+          finish(() => reject(new Error('Native model produced no output for ' + String(NATIVE_IDLE_TIMEOUT_MS / 1000) + 's.')));
+        }, NATIVE_IDLE_TIMEOUT_MS);
+      };
+
       const finish = (action: () => void): void => {
         if (settled) return;
         settled = true;
+        clearIdle();
         this.activeRequestId = null;
         this.activeRequestCancel = null;
         action();
@@ -642,6 +680,7 @@ export class SessionBackedModel implements LocalModel {
           requestJson,
           (response: string) => {
             if (settled) return;
+            armIdle();
             try {
               this.options.responseListener?.(response, requestId);
             } catch (error) {
@@ -653,6 +692,12 @@ export class SessionBackedModel implements LocalModel {
               if (chunk.finish_reason !== null) requireTextCompletion(chunk.finish_reason);
               if (chunk.content.length > 0) {
                 buffer += chunk.content;
+                if (isDegenerateOutput(buffer)) {
+                  if (this.sessionId !== null && this.activeRequestId !== null) {
+                    try { this.binding.abortRequest(this.sessionId, this.activeRequestId); } catch (_error) { /* best effort */ }
+                  }
+                  throw new Error('Model output degenerated into repetition.');
+                }
                 try {
                   this.tokenStreamListener?.(chunk.content);
                 } catch (_error) {
@@ -678,6 +723,7 @@ export class SessionBackedModel implements LocalModel {
           }
         );
 
+        armIdle();
         if (submitResult.error !== 0) {
           finish(() => reject(new Error('SubmitRequest failed: error=' + submitResult.error)));
           return;

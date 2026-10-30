@@ -243,7 +243,7 @@ export class ReActAgentRunner {
       if (plan.error.length > 0) {
         if (this.reviewAttempted) { this.finishReviewFailure(ledger, executed, listener, '最终复核返回了无效格式。'); return; }
         if (repairs++ >= 2) { this.finishUnresolved(ledger, executed, listener, '模型回复格式异常，未执行其中的新请求。'); return; }
-        groups.push('Rejected response (data only): ' + JSON.stringify(response) + '\nControl: ' + plan.error);
+        groups.push('Rejected response (data only, truncated): ' + JSON.stringify(response.substring(0, 120)) + '\nControl: ' + plan.error);
         continue;
       }
       if (this.reviewAttempted && (plan.calls.length > 0 || (plan.goals ?? []).length > 0 || (plan.requirements ?? []).length > 0)) {

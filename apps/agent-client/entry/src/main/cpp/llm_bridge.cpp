@@ -23,6 +23,8 @@ struct CallbackEntry {
     OH_QoS_GewuRequest request;
     aki::SafetyCallback<void(std::string)> callback;
     std::atomic<bool> active {true};
+    // Tail bytes of a multibyte character split across streamed callbacks.
+    std::string utf8Pending;
 };
 
 using CallbackEntryPtr = std::unique_ptr<CallbackEntry>;
@@ -84,12 +86,66 @@ static DisableCollaborationFn ResolveDisableCollaboration() {
     return fn;
 }
 
+// Streamed chunks can split a multibyte character inside "content". Hold the incomplete tail and
+// prepend it to the next chunk so JS never sees a replacement character. Callbacks of one request
+// are delivered serially, so the per-entry state needs no lock.
+static bool ContentSpan(const std::string& json, size_t& open, size_t& close) {
+    const std::string key = "\"content\"";
+    size_t pos = json.find(key);
+    if (pos == std::string::npos) return false;
+    pos += key.size();
+    auto skip = [&]() { while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) ++pos; };
+    skip();
+    if (pos >= json.size() || json[pos] != ':') return false;
+    ++pos;
+    skip();
+    if (pos >= json.size() || json[pos] != '"') return false;
+    open = pos++;
+    while (pos < json.size()) {
+        if (json[pos] == '\\') { if (pos + 1 >= json.size()) return false; pos += 2; continue; }
+        if (json[pos] == '"') { close = pos; return true; }
+        ++pos;
+    }
+    return false;
+}
+
+static size_t CompleteUtf8End(const std::string& bytes) {
+    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
+    size_t index = 0;
+    const size_t length = bytes.size();
+    while (index < length) {
+        const unsigned char lead = data[index];
+        size_t need = 1;
+        if (lead < 0x80) need = 1;
+        else if ((lead & 0xE0) == 0xC0 && lead >= 0xC2) need = 2;
+        else if ((lead & 0xF0) == 0xE0) need = 3;
+        else if ((lead & 0xF8) == 0xF0 && lead <= 0xF4) need = 4;
+        else { ++index; continue; }
+        if (index + need > length) return index;
+        bool complete = true;
+        for (size_t extra = 1; extra < need; ++extra) {
+            if ((data[index + extra] & 0xC0) != 0x80) { complete = false; break; }
+        }
+        if (!complete) { ++index; continue; }
+        index += need;
+    }
+    return length;
+}
+
+static std::string CarryUtf8(CallbackEntry& entry, const std::string& raw) {
+    size_t open = 0, close = 0;
+    if (!ContentSpan(raw, open, close)) return raw;
+    const std::string content = entry.utf8Pending + raw.substr(open + 1, close - open - 1);
+    const size_t keep = CompleteUtf8End(content);
+    entry.utf8Pending = content.substr(keep);
+    return raw.substr(0, open + 1) + content.substr(0, keep) + raw.substr(close);
+}
 static void OnResponseTrampoline(void* context, const char* response) {
     if (context == nullptr || response == nullptr) return;
     auto* entry = static_cast<CallbackEntry*>(context);
     if (!entry->active.load(std::memory_order_acquire)) return;
     try {
-        entry->callback(std::string(response));
+        entry->callback(CarryUtf8(*entry, std::string(response)));
         // 阻塞直到 ArkTS 回调执行完毕
     } catch (const std::exception&) {
         // env 失效、JS 回调超时等情况均静默丢弃；不能让 IPC
