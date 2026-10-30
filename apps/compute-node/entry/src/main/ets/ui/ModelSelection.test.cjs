@@ -13,6 +13,7 @@ const document = { getElementById: id => elements[id], addEventListener() {}, cr
 const selections = [];
 const outputModes=[];
 const usageSaves=[];
+const routerAlgorithms=[];
 let error = '', currentState = null, tick;
 let usageState={tasks:'3',tokens:'20',yuan:'1.5',priceMode:'flash',inputYuan:'1',outputYuan:'4'};
 const window = { chatBridge: { selectModel(name) { selections.push(name); return error; },
@@ -26,7 +27,8 @@ const window = { chatBridge: { selectModel(name) { selections.push(name); return
     if (patch.reset) usageState=Object.assign({}, usageState, {tasks:'0', tokens:'0', yuan:'0'});
     else usageState=Object.assign({}, usageState, patch);
     return '';
-  } } };
+  },
+  setRouterAlgorithm(name){routerAlgorithms.push(name);return error;} } };
 vm.runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
   document, window, Date, setInterval(fn) { tick = fn; }
 });
@@ -127,3 +129,30 @@ elements.saveUsage.handlers.click();
 assert.equal(elements.usageMessage.textContent,'保存失败');
 assert.equal(elements.saveUsage.disabled,false);
 console.log('PASS: output selector, active-request independence, draft preservation and failed-save retry');
+
+// 面板机制用虚构的两选项驱动（单选项注册表产生不出草稿，但这套 JS 契约与
+// 算法数量无关）；末尾再用真实的单选项形状验证 registry 下发。
+const fabricatedOptions=[{name:'least_load',label:'最小负载'},{name:'future',label:'未来算法'}];
+dashboard({...currentState,routeAlgorithm:'least_load',routeOptions:fabricatedOptions});
+assert.equal(elements.routeAlgorithm.value,'least_load','panel defaults to the hub route mode');
+assert(elements.routeAlgorithm.innerHTML.includes('未来算法'),'options render from the registry choices');
+assert(elements.applyRouteAlgorithm.disabled===true,'no unsaved draft keeps apply disabled');
+elements.routeAlgorithm.value='future';elements.routeAlgorithm.handlers.change();
+assert.equal(elements.applyRouteAlgorithm.disabled,false);
+assert(elements.routeMessage.textContent.includes('保存路由算法'),'change announces the pending save');
+dashboard({...currentState,routeAlgorithm:'least_load',routeOptions:fabricatedOptions});
+assert.equal(elements.routeAlgorithm.value,'future','telemetry preserves the unsaved route draft');
+error='保存失败';elements.applyRouteAlgorithm.handlers.click();
+assert.equal(elements.routeMessage.textContent,error);
+assert.equal(elements.applyRouteAlgorithm.disabled,false,'failed persistence can be retried');
+error='';elements.applyRouteAlgorithm.handlers.click();
+assert.equal(routerAlgorithms.at(-1),'future');
+assert.equal(elements.applyRouteAlgorithm.disabled,true);
+currentState={...currentState,routeAlgorithm:'future'};dashboard(currentState);elements.closeSettings.handlers.click();elements.openSettings.handlers.click();
+assert.equal(elements.routeAlgorithm.value,'future','reopening settings reflects the persisted algorithm');
+// 单算法注册表的真实形状：唯一选项即当前值，无草稿可产生。
+dashboard({...currentState,routeAlgorithm:'least_load',routeOptions:[{name:'least_load',label:'最小负载（空闲优先，档位决胜）'}]});
+assert.equal(elements.routeAlgorithm.value,'least_load','single-option registry keeps the current algorithm');
+assert(elements.routeAlgorithm.innerHTML.includes('最小负载（空闲优先，档位决胜）'),'registry label renders');
+assert(elements.applyRouteAlgorithm.disabled===true,'no other option means no draft');
+console.log('PASS: router algorithm selector, registry options, draft preservation and failed-save retry');

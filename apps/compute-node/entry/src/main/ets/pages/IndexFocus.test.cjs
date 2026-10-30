@@ -80,6 +80,19 @@ function setup(isServer) {
     if (name === '../cluster/ComputeRouter') {
       return loadEts(__dirname + '/../cluster/ComputeRouter.ets');
     }
+    if (name === '../cluster/router/RouterTypes') {
+      return loadEts(__dirname + '/../cluster/router/RouterTypes.ets');
+    }
+    if (name === '../cluster/router/RouterRegistry') {
+      const types = loadEts(__dirname + '/../cluster/router/RouterTypes.ets');
+      const requires = { './RouterTypes': types, './LeastLoadRouter':
+        loadEts(__dirname + '/../cluster/router/LeastLoadRouter.ets', { './RouterTypes': types }) };
+      return loadEts(__dirname + '/../cluster/router/RouterRegistry.ets', requires);
+    }
+    if (name === '../cluster/router/RouterSettings') return {
+      routerSettings: () => ({ algorithm: behavior.routeAlgorithm || 'least_load' }),
+      saveRouterSettings: (_dir, settings) => { behavior.routeAlgorithm = settings.algorithm; return ''; }
+    };
     if (name === '../cluster/TaskRules') {
       return loadEts(__dirname + '/../cluster/TaskRules.ets');
     }
