@@ -3,7 +3,7 @@
 const {spawnSync}=require('node:child_process');
 const path=require('node:path');
 const suites=['react-runner.test.cjs','react-compatibility.test.cjs','parallel-runner.test.cjs','support-models.test.cjs','integration-contract.test.cjs',
- 'integration-lifecycle.test.cjs','index-lifecycle.test.cjs','tablet-queue.test.cjs','task-progress.test.cjs','inference-budget.test.cjs',
+ 'integration-lifecycle.test.cjs','index-lifecycle.test.cjs','tablet-queue.test.cjs','tablet-customization.test.cjs','task-progress.test.cjs','inference-budget.test.cjs',
  'tool-contracts.test.cjs','plain-chat.test.cjs','nearby-background.test.cjs','task-telemetry.test.cjs','task-reporter.test.cjs',
  'utf8-repair.test.cjs','react-core.typecheck.cjs','support-models.typecheck.cjs','integration-contract.typecheck.cjs'];
 const selected=process.argv.includes('--portable') ? suites.filter(suite=>suite!=='support-models.typecheck.cjs') : suites;

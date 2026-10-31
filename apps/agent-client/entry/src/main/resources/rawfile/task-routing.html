@@ -1,0 +1,232 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>任务路由</title><style>
+:root{--ink:#16332C;--muted:#6B7F79;--ok:#1a9b6a;--busy:#3d5bdb}*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}body{font-family:system-ui,'HarmonyOS Sans SC',sans-serif;color:var(--ink);background:white}
+    .flow-view{flex:1;min-height:0;overflow:auto;padding:18px 22px 24px;overscroll-behavior:contain}.flow-view[hidden],#history[hidden],#historyControls[hidden],#taskCount[hidden]{display:none}
+    .flow-labels{display:grid;grid-template-columns:190px 180px 1fr;min-width:960px;color:var(--muted);font-size:16px;padding-bottom:20px}.flow-labels span:last-child{padding-left:36px}.flow-scene{position:relative;min-height:460px}.flow-wires{position:absolute;inset:0;width:100%;height:100%;overflow:visible}.flow-wire{fill:none;stroke:#bfc8d8;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.flow-wire.active{stroke:#4e6bd6;stroke-width:4.2}
+    .flow-phone{position:absolute;left:8px;width:120px;display:flex;flex-direction:column;align-items:center;gap:10px;font-size:17px;font-weight:650}.flow-phone>svg{width:60px;height:90px;color:#89919f}.flow-phone>span{text-align:center;overflow-wrap:anywhere}.flow-router{position:absolute;left:190px;width:84px;height:70px;display:grid;place-items:center;border:1.8px solid #a9b1c0;border-radius:14px;background:#fff;color:#858fa2}.flow-router>svg{width:54px;height:40px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:round}.flow-router>span{position:absolute;top:82px;left:50%;transform:translateX(-50%);color:var(--ink);white-space:nowrap;font-size:16px;font-weight:650;text-align:center;line-height:1.25}.flow-router.active{border-color:#849ae6;background:#f6f8ff;color:#4e6bd6}
+    .flow-compute{position:absolute;display:grid;grid-template-columns:220px minmax(260px,1fr);gap:22px;padding:22px;border:1px solid #e4e9ee;border-radius:18px;background:#fcfdfd}.flow-computer{align-self:start;display:flex;flex-direction:column;align-items:center;gap:10px;font-size:18px;font-weight:650;padding-top:4px}.flow-pc-mark{position:relative;width:136px;height:96px}.flow-pc-mark>svg{width:136px;height:96px;color:#89919f;display:block}.flow-pc-local{position:absolute;left:19%;top:11%;width:62%;height:49%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#3d5bdb;letter-spacing:.12em;pointer-events:none}.flow-computer>span{text-align:center;white-space:nowrap}.flow-memory{width:120px;margin-top:0}.flow-memory>i{height:10px;background:#e3e6eb;border-radius:6px;display:block;overflow:hidden}.flow-memory em{height:100%;display:block;border-radius:6px}.flow-memory>span{display:flex;justify-content:space-between;font-size:13px;line-height:16px;font-weight:450;color:#626b85;margin-top:6px}.flow-memory b{font-weight:650}.flow-computer small{font-size:14px;color:#94640e}.flow-lane{display:flex;flex-direction:column;gap:10px;min-width:0}.flow-lane h3{font-size:18px;font-weight:650;color:var(--ok);line-height:22px;margin:0 0 4px}.flow-lane h3:before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block;vertical-align:3px;margin-right:8px}.flow-lane.busy h3{color:var(--busy)}.flow-idle{font-size:15px;color:var(--muted);padding:20px 0}
+    .flow-task{min-height:72px;display:grid;grid-template-columns:56px minmax(80px,1fr) auto;gap:12px;align-items:center;border:1px solid #d4e9de;border-radius:11px;background:#f2faf6;padding:10px 14px;color:#385745;font:inherit;text-align:left;position:relative}.flow-task:is(button){cursor:pointer}.flow-task>span{font-size:16px;font-weight:550;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}.flow-photo{width:56px;height:56px;object-fit:cover;border-radius:8px;background:#dce8e1}.flow-type{width:40px;height:40px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.flow-task b{font:650 28px/1 ui-monospace,'SFMono-Regular',Consolas,monospace;letter-spacing:.2px;font-variant-numeric:tabular-nums;color:#237b58}.flow-task.working:before{content:'';position:absolute;left:-1px;top:14px;bottom:14px;width:3px;background:#71b391}.flow-packet{position:absolute;left:0;top:0;width:56px;height:56px;border:1.8px solid #849ae6;border-radius:11px;background:#f4f6ff;color:#4e6bd6;display:grid;place-items:center;offset-rotate:0deg;animation:flow-travel 1.2s linear infinite;pointer-events:none;z-index:1}.flow-packet .flow-type{width:36px;height:36px}@keyframes flow-travel{from{offset-distance:0%}to{offset-distance:100%}}@media(prefers-reduced-motion:reduce){.flow-packet{animation:none;offset-distance:65%}}
+    .flow-cloud{border-color:#b9a5eb;background:#faf8ff}.flow-cloud .flow-computer{color:#7953b5}.flow-cloud .flow-task{background:#faf8ff;border-color:#dacdf1;color:#61448a}.flow-cloud .flow-task b{color:#7953b5}.flow-cloud .flow-task.working:before{background:#a58bd0}.flow-cloud .flow-lane{background:transparent}.flow-cloud .flow-computer small{color:#7953b5}.flow-cloud .flow-task>span{display:block}.flow-question{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.flow-model{margin-top:4px}.flow-cloud .flow-lane h3{color:#7953b5}.flow-cloud-icon{width:90px;height:72px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.flow-model{display:block;font-size:12px;color:#7953b5;overflow-wrap:anywhere}.flow-wire.cloud{stroke:#9b7ad0}
+    .flow-empty{position:absolute;left:410px;top:170px;color:var(--muted);font-size:16px}
+    @media(max-width:959px){.flow-view{padding:12px 16px;min-height:230px}.task-view-switch button{font-size:12px;padding:7px}.task-toolbar{padding:14px 16px 0}.task-heading{flex-wrap:wrap}.task-view-switch{margin-left:0}.clear-tasks{font-size:12px}.stats{overflow-x:auto}.stat{flex:0 0 auto;min-width:130px}.usage-stats{flex-basis:100%;margin-left:0;padding-left:0;border-left:0}}
+
+
+#viewport{position:relative;width:100%;height:100%;overflow:auto;overscroll-behavior:contain;touch-action:pan-y}#stage{position:absolute;left:0;top:0;width:1000px;transform-origin:top left}.flow-view{width:1000px;padding:8px 20px 16px;min-height:0;overflow:visible}.flow-labels{min-width:960px}.flow-empty{left:370px}#detail{position:fixed;inset:12px;padding:16px;background:#f7fbfa;border:1px solid #d8e5df;border-radius:14px;overflow:auto}#detail[hidden]{display:none}#detailText{white-space:pre-wrap;overflow-wrap:anywhere}#closeDetail{float:right;border:0;border-radius:8px;padding:8px;background:#d8f3ea;color:#0f8a74}
+</style></head><body><svg style="position:absolute;width:0;height:0" aria-hidden="true"><defs><symbol id="flow-phone" viewBox="0 0 58 87"><g fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="2" width="46" height="81" rx="8" fill="#fff"/><rect x="10" y="8" width="38" height="65" rx="3" stroke="#d3d8e1" fill="#fbfcff"/><path d="M24 5h10M24 78h10" stroke-linecap="round"/></g></symbol>
+<symbol id="flow-pc" viewBox="0 0 110 83"><g fill="white" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="16" y="4" width="78" height="52" rx="4"/><rect x="21" y="9" width="68" height="41" rx="1.5" stroke="#cbd1da" stroke-width="1.2" fill="#fcfdfd"/><path d="M16 57h78l12 17q1 4-4 4H8q-5 0-4-4z"/><path d="M4 73h102M26 61h58l5 7H22z" stroke="#bdc5cf" stroke-width="1.1"/><path d="M46 71h18l3 5H43z" stroke="#b2bac5" stroke-width="1"/><path d="M34 61l-2 7m15-7-1 7m15-7 1 7m13-7 2 7" stroke="#d1d6de" stroke-width="1"/></g></symbol>
+<symbol id="flow-task-text" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></symbol>
+<symbol id="flow-task-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="16" cy="9" r="1.5"/><path d="m3 17 5-6 5 6 3-3 5 5"/></symbol>
+<symbol id="flow-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V8l2 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+<symbol id="flow-mini-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 5h4m-3 14h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+<symbol id="flow-mini-pc" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m4 16-2 4h20l-2-4M9 8h6v4H9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></symbol></defs></svg>
+<div id="viewport"><div id="space"></div><div id="stage"><section id="collaboration" class="flow-view" aria-label="设备协同运行图"></section></div></div>
+<div id="detail" hidden><button id="closeDetail">关闭</button><p id="detailText"></p></div>
+<script>let jobs=[],remoteCalls=[],devices=[],groups=[],selfLabel='算力设备1';
+function allCalls(){return jobs.concat(remoteCalls);}
+    function summaryText(text){
+      let value=String(text||'').replace(/^（附图）/,'').replace(/^【(?:子任务\s+\d+\/\d+|任务拆分|合并结果)】/,'');
+      const marker=value.match(/(?:^|\n)(?:User task:|## User request|Original question:|用户请求：|原始问题：)\s*\n/);
+      if(marker)value=value.slice(marker.index+marker[0].length).split('\n')[0];
+      else if(/\n|^(?:You are|# Role|Return |System:|Developer:|把用户请求拆成|下面是同一个用户请求)/i.test(value))value='推理请求';
+      value=value.replace(/\s+/g,' ').trim()||'推理请求';
+      return value.length>80?value.slice(0,80)+'…':value;
+    }
+    function morphNode(current,next){
+      if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next);return;}
+      if(current.nodeType===3){if(current.data!==next.data)current.data=next.data;return;}
+      if(current.nodeType!==1)return;
+      for(const attribute of Array.from(current.attributes))if(!next.hasAttribute(attribute.name))current.removeAttribute(attribute.name);
+      for(const attribute of Array.from(next.attributes))if(current.getAttribute(attribute.name)!==attribute.value)current.setAttribute(attribute.name,attribute.value);
+      const children=Array.from(next.childNodes);
+      for(let index=0;index<children.length;index++){
+        if(current.childNodes[index])morphNode(current.childNodes[index],children[index]);else current.appendChild(children[index]);
+      }
+      while(current.childNodes.length>children.length)current.lastChild.remove();
+    }
+    function renderMarkup(view,html){
+      if(view.innerHTML===html)return;
+      const top=view.scrollTop||0;
+      const template=document.createElement('template');
+      if(!template.content||!view.insertBefore){view.innerHTML=html;view.scrollTop=top;return;}
+      template.innerHTML=html;
+      const key=node=>node.getAttribute('data-row-key')||node.getAttribute('data-filter')||'';
+      const old=Array.from(view.children), keyed=new Map(old.filter(key).map(node=>[key(node),node]));
+      const viewTop=view.getBoundingClientRect().top;
+      const anchor=top>0?old.find(node=>key(node)&&node.getBoundingClientRect().bottom>viewTop):null;
+      const anchorOffset=anchor?anchor.getBoundingClientRect().top-viewTop:0;
+      const used=new Set();
+      Array.from(template.content.children).forEach((next,index)=>{
+        const current=key(next)?keyed.get(key(next)):(old[index]&&!key(old[index])?old[index]:null);
+        const node=current&&!used.has(current)?current:next;
+        if(node!==next)morphNode(node,next);
+        if(view.children[index]!==node)view.insertBefore(node,view.children[index]||null);
+        used.add(node);
+      });
+      for(const node of old)if(!used.has(node))node.remove();
+      const desired=anchor&&anchor.isConnected?view.scrollTop+anchor.getBoundingClientRect().top-viewTop-anchorOffset:top;
+      if(Math.abs(view.scrollTop-desired)>.5)view.scrollTop=desired;
+    }
+    function groupRunning(group){return group.phase==='running'||group.phase==='merging';}
+    function esc(text){
+      return String(text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function publicJobName(name, role){
+      const text=String(name||'');
+      if(text==='本机'||text.indexOf('算力设备')===0||text.indexOf('聊天设备')===0) return text;
+      return role==='chat'?'聊天设备':'算力设备';
+    }
+    function computeKindLabel(device){
+      const caps=device&&device.capabilities;
+      if(Array.isArray(caps)&&caps.indexOf('vision')>=0)return '多模态';
+      if(device&&device.model&&String(device.model).toLowerCase().indexOf('vl')>=0)return '多模态';
+      return '纯文本';
+    }
+    function computeDisplayName(device){
+      return publicJobName(device&&device.name,'compute')+'-'+computeKindLabel(device);
+    }
+    function jobKey(job){
+      return String(job.key||job.id||'');
+    }
+    const flowView=document.getElementById('collaboration');
+    const historyControls=document.getElementById('historyControls');
+    const viewSwitch=document.getElementById('taskViewSwitch');
+    let taskView='flow',queuedCalls=[],mirroredCalls=[],flowSignature='',flowItems=[];
+    const flowSeen=new Map(),flowWaitStarts=new Map(),flowFlights=new Map();
+    function flowClock(ms){
+      const seconds=Math.max(0,Math.floor(ms/1000));
+      const pad=n=>String(n).padStart(2,'0');
+      return (seconds>=3600?pad(Math.floor(seconds/3600))+':':'')+pad(Math.floor(seconds/60)%60)+':'+pad(seconds%60);
+    }
+    function flowIcon(kind){return '<svg class="flow-type" aria-hidden="true"><use href="#flow-task-'+(kind==='image'?'image':'text')+'"/></svg>';}
+    function flowPhoto(image){
+      return typeof image==='string'&&/^data:image\/(jpeg|png|webp|gif);base64,/.test(image)?image:'';
+    }
+    function flowTitle(item){
+      return item.question||((item.kind==='image'?'图片':'文本')+'任务');
+    }
+    function resolveFlowDevice(id,label,compute){
+      const candidates=devices.filter(device=>(device.role==='self'||device.role==='compute')===compute);
+      if(id)return candidates.find(device=>device.id===id)||null;
+      const matches=candidates.filter(device=>device.name===label||(device.role==='self'&&label==='本机'&&compute));
+      return matches.length===1?matches[0]:null;
+    }
+    function flowData(){
+      const now=Date.now(),items=[],live=allCalls().concat(mirroredCalls.filter(job=>job.phase!=='queued')).filter(job=>job.running);
+      for(const job of live){
+        const executor=job.executionBackend==='cloud'?{id:'cloud-executor'}:resolveFlowDevice(job.executorId,job.source||selfLabel,true);
+        const origin=resolveFlowDevice(job.originId,job.origin,false);
+        const key=jobKey(job)+':'+job.startedAt;
+        const phase=job.phase||'running';
+        const item={key,jobKey:job.key&&job.key.indexOf('mirror:')===0?undefined:jobKey(job),kind:job.kind||((job.image||/^（附图）/.test(job.question||''))?'image':'text'),
+          question:summaryText(job.question||''),image:flowPhoto(job.image),model:job.executionBackend==='cloud'?(job.executionModel||'云端模型'):'',
+          phase,at:job.phaseStartedAt||job.startedAt||now,origin:origin&&origin.id,executor:executor&&executor.id,gateway:(resolveFlowDevice(job.executorId,job.source||selfLabel,true)||{}).id};
+        items.push(item);
+        // A brief one-shot shows an observed dispatch even when acceptance was faster than painting.
+        const route=key+':'+(item.executor||'');
+        if(!flowSeen.has(route)){flowSeen.set(route,now);if(executor&&(phase==='sending'||now-(job.startedAt||0)<2000))flowFlights.set(route,{...item,until:now+1200});}
+      }
+      for(const job of queuedCalls.concat(mirroredCalls.filter(job=>job.phase==='queued'))){
+        if(now-job.startedAt>130000)continue;
+        items.push({key:'waiting:'+jobKey(job),kind:job.kind||'text',question:summaryText(job.question||''),image:flowPhoto(job.image),
+          phase:'queued',at:job.phaseStartedAt||job.startedAt,
+          origin:(resolveFlowDevice(job.originId,job.origin,false)||{}).id,executor:null});
+      }
+      for(const group of groups){
+        if(!groupRunning(group))continue;
+        for(const child of group.subtasks||[]){
+          if(child.phase!=='queued'||live.some(job=>job.groupKey===group.key&&job.subtaskId===child.id))continue;
+          // An explicit retry-wait notice is more precise than a parent snapshot.
+          if(queuedCalls.some(job=>job.groupKey===group.key&&job.subtaskId===child.id))continue;
+          const key='child:'+group.key+':'+child.id;
+          if(!flowWaitStarts.has(key))flowWaitStarts.set(key,now);
+          const executor=resolveFlowDevice('',child.device,true);
+          items.push({key,groupKey:group.key,childId:child.id,kind:'text',question:summaryText(child.input||child.title||''),
+            phase:'queued',at:flowWaitStarts.get(key),
+            origin:(resolveFlowDevice('',group.origin,false)||{}).id,executor:executor&&executor.id});
+        }
+      }
+      const waitingKeys=new Set(items.filter(item=>item.phase==='queued').map(item=>item.key));
+      for(const key of flowWaitStarts.keys())if(!waitingKeys.has(key))flowWaitStarts.delete(key);
+      for(const [key,flight] of flowFlights)if(flight.until<=now||!items.some(item=>item.key===flight.key))flowFlights.delete(key);
+      while(flowSeen.size>512)flowSeen.delete(flowSeen.keys().next().value);
+      return items;
+    }
+    function flowCard(item){
+      const action=item.jobKey?' data-flow-detail="'+esc(item.jobKey)+'"':item.groupKey?
+        ' data-flow-group="'+esc(item.groupKey)+'" data-flow-child="'+esc(item.childId)+'"':'';
+      const title=flowTitle(item);
+      const media=item.image?'<img class="flow-photo" alt="" src="'+item.image+'">':flowIcon(item.kind);
+      const label=title+' · 推理中';
+      return '<'+(action?'button':'div')+' class="flow-task working" data-row-key="'+esc(item.key)+'"'+
+        (action?' type="button"'+action:'')+' aria-label="'+esc(label)+'">'+media+'<span>'+(item.model?'<span class="flow-question">'+esc(title)+'</span><small class="flow-model">'+esc(item.model)+'</small>':esc(title))+'</span><b data-flow-clock="'+esc(item.key)+'">'+flowClock(Date.now()-item.at)+'</b></'+(action?'button':'div')+'>';
+    }
+    function renderFlow(){
+      if(!flowView)return;
+      flowItems=flowData();
+      const computers=devices.filter(device=>device.role==='self'||device.role==='compute');
+      const chats=devices.filter(device=>device.role!=='self'&&device.role!=='compute');
+      const sources=chats.slice();
+      if(flowItems.some(item=>!item.origin))sources.push({id:'local-source',name:'本机 / 未知来源',ready:true});
+      const width=Math.max(960,(flowView.clientWidth||1024)-44),left=380,rowWidth=width-left-18;
+      const cloudActive=flowItems.filter(item=>item.executor==='cloud-executor');
+      const executionNodes=cloudActive.length?computers.concat([{id:'cloud-executor',name:'云端推理',role:'cloud',ready:true,jobs:cloudActive.length}]):computers;
+      let top=8;const rows=executionNodes.map(device=>{
+        const active=flowItems.filter(item=>item.executor===device.id&&item.phase!=='sending'&&item.phase!=='queued');
+        const delegated=cloudActive.filter(item=>item.gateway===device.id).length;
+        const busy=active.length>0||Math.max(0,(typeof device.jobs==='number'?device.jobs:0)-delegated)>0;
+        const height=Math.max(210,88+Math.max(1,active.length)*96),row={device,active,busy,y:top,height};top+=height+36;return row;
+      });
+      const height=Math.max(460,top-24,sources.length*180),center=height/2;
+      const sourceY=new Map(sources.map((source,i)=>[source.id,(i+.5)*height/Math.max(1,sources.length)]));
+      const targetY=new Map(rows.map(row=>[row.device.id,row.y+row.height/2]));
+      const sourcePath=y=>'M120 '+y+'H148Q158 '+y+' 158 '+(y+(y<center?12:-12))+'V'+(center+(y<center?-12:12))+'Q158 '+center+' 168 '+center+'H190';
+      const targetPath=y=>'M274 '+center+'H300Q310 '+center+' 310 '+(center+(y<center?-12:12))+'V'+(y+(y<center?12:-12))+'Q310 '+y+' 320 '+y+'H'+left;
+      const flights=Array.from(flowFlights.values());
+      for(const item of flowItems.filter(item=>item.phase==='sending'))if(!flights.some(flight=>flight.key===item.key))flights.push(item);
+      const activeSource=new Set(flights.map(item=>item.origin||'local-source')),activeTarget=new Set(flights.map(item=>item.executor));
+      const signature=JSON.stringify({width,computers,sources,items:flowItems.filter(item=>item.phase!=='queued').map(item=>[item.key,item.kind,item.phase,item.origin,item.executor,item.gateway,item.model||'',item.question||'',item.image?1:0]),flights:flights.map(item=>[item.key,item.origin,item.executor])});
+      if(signature!==flowSignature){
+        flowSignature=signature;
+        const wires='<svg class="flow-wires" viewBox="0 0 '+width+' '+height+'" aria-hidden="true"><defs><marker id="flow-arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="m1 1 5 3-5 3" fill="none" stroke="context-stroke" stroke-width="1.6"/></marker></defs>'+
+          sources.map(source=>'<path class="flow-wire '+(activeSource.has(source.id)?'active':'')+'" d="'+sourcePath(sourceY.get(source.id))+'" marker-end="url(#flow-arrow)"/>').join('')+
+          rows.map(row=>'<path class="flow-wire '+(row.device.role==='cloud'?'cloud ':'')+(activeTarget.has(row.device.id)?'active':'')+'" d="'+targetPath(targetY.get(row.device.id))+'" marker-end="url(#flow-arrow)"/>').join('')+'</svg>';
+        const phones=sources.map(source=>'<div class="flow-phone" data-row-key="source:'+esc(source.id)+'" style="top:'+(sourceY.get(source.id)-58)+'px"><svg aria-hidden="true"><use href="#flow-phone"/></svg><span>'+esc(source.id==='local-source'?'本机 / 未知来源':publicJobName(source.name,'chat'))+'</span></div>').join('');
+        const router='<div class="flow-router '+(flights.length?'active':'')+'" style="top:'+(center-35)+'px"><svg aria-hidden="true" viewBox="0 0 48 36"><rect x="2" y="13" width="10" height="10" rx="2"/><rect x="35" y="2" width="10" height="10" rx="2"/><rect x="35" y="24" width="10" height="10" rx="2"/><path d="M12 18h9q4 0 4-4v-3q0-4 4-4h6M21 18q4 0 4 4v3q0 4 4 4h6"/></svg><span>路由中心<br>(算力设备1)</span></div>';
+        const boxes=rows.map(row=>{
+          const d=row.device;
+          if(d.role==='cloud')return '<section class="flow-compute flow-cloud" data-row-key="cloud-executor" style="left:'+left+'px;top:'+row.y+'px;width:'+rowWidth+'px;min-height:'+row.height+'px" aria-label="云端路由"><div class="flow-computer"><svg class="flow-cloud-icon" viewBox="0 0 100 72" aria-hidden="true"><path d="M25 57h52a15 15 0 0 0 1-30 25 25 0 0 0-48-7 18 18 0 0 0-5 37Z"/><path d="M39 39h22m-7-7 7 7-7 7"/></svg><span>云端推理</span><small>已路由至云端</small></div><div class="flow-lane busy"><h3>推理中 · '+row.active.length+' 个任务</h3>'+row.active.map(flowCard).join('')+'</div></section>';
+          const mem=typeof d.memUsage==='number'&&Number.isFinite(d.memUsage)&&d.memUsage>=0?Math.min(100,d.memUsage):null;
+          const memory='<div class="flow-memory" aria-label="内存 '+(mem===null?'未采集':mem+'%')+'"><i><em style="width:'+(mem===null?0:mem)+'%;background:'+(mem>50?'#e1b43b':'#279a73')+'"></em></i><span>内存<b>'+(mem===null?'—':Math.round(mem)+'%')+'</b></span></div>';
+          return '<section class="flow-compute" data-row-key="compute:'+esc(d.id)+'" style="left:'+left+'px;top:'+row.y+'px;width:'+rowWidth+'px;min-height:'+row.height+'px" aria-label="'+esc(computeDisplayName(d))+'"><div class="flow-computer"><div class="flow-pc-mark"><svg aria-hidden="true"><use href="#flow-pc"/></svg>'+(d.role==='self'?'<span class="flow-pc-local">本机</span>':'')+'</div><span>'+esc(computeDisplayName(d))+'</span>'+memory+(!d.ready?'<small>连接中</small>':'')+'</div><div class="flow-lane'+(row.busy?' busy':'')+'"><h3>'+(row.busy?'推理中':'在线')+'</h3>'+row.active.map(flowCard).join('')+(!row.active.length&&row.busy?'<span class="flow-idle">设备忙碌 · 无任务明细</span>':'')+'</div></section>';
+        }).join('');
+        const packets=flights.filter(item=>targetY.has(item.executor)).map(item=>{
+          const y=sourceY.get(item.origin||'local-source')||center;
+          const route=sourcePath(y)+'L274 '+center+targetPath(targetY.get(item.executor)).replace(/^M274 [^H]+/,'');
+          return '<div class="flow-packet" data-row-key="packet:'+esc(item.key)+'" aria-label="'+(item.kind==='image'?'图片':'文本')+'任务正在分派" style="offset-path:path(\''+route+'\')">'+flowIcon(item.kind)+'</div>';
+        }).join('');
+        renderMarkup(flowView,'<div class="flow-labels" data-row-key="labels"><span>任务发起</span><span>路由分发</span><span>算力执行</span></div><div class="flow-scene" data-row-key="scene" style="width:'+width+'px;height:'+height+'px">'+wires+phones+router+boxes+packets+(!computers.length?'<div class="flow-empty">等待算力设备上线</div>':'')+'</div>');
+      }
+      updateFlowClocks();
+    }
+    function updateFlowClocks(){
+      if(!flowView||!flowView.querySelectorAll)return;
+      const times=new Map(flowItems.map(item=>[item.key,item.at]));
+      for(const element of flowView.querySelectorAll('[data-flow-clock]')){
+        const at=times.get(element.getAttribute('data-flow-clock'));if(at!==undefined)element.textContent=flowClock(Date.now()-at);
+      }
+    }
+
+const viewport=document.getElementById('viewport'),stage=document.getElementById('stage'),space=document.getElementById('space');
+function fitFlow(){const scale=Math.min(1,viewport.clientWidth/1000);stage.style.transform='scale('+scale+')';space.style.height=Math.ceil(stage.scrollHeight*scale)+'px';}
+window.onNativeEvent=function(event){devices=event.devices||[];jobs=event.jobs||[];groups=[];queuedCalls=event.queuedCalls||[];mirroredCalls=event.flowCalls||[];renderFlow();fitFlow();};
+window.addEventListener('resize',()=>{flowSignature='';renderFlow();fitFlow();});
+flowView.addEventListener('click',event=>{const button=event.target.closest('[data-flow-detail]');if(!button)return;
+ const job=jobs.find(j=>jobKey(j)===button.getAttribute('data-flow-detail'));if(!job)return;
+ document.getElementById('detailText').textContent=(job.question||'推理请求')+'\n执行设备：'+(job.source||'等待分派')+'\n状态：'+(job.phase||'running');
+ document.getElementById('detail').hidden=false;
+});
+document.getElementById('closeDetail').addEventListener('click',()=>document.getElementById('detail').hidden=true);
+setInterval(()=>{renderFlow();fitFlow();},500);renderFlow();fitFlow();
+</script></body></html>

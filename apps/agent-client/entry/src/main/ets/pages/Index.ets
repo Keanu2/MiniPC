@@ -37,9 +37,12 @@ import {
 import { getLocalLlmBinding } from '../llm/LocalLlmBinding';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
 import { inferenceClient, INFERENCE_STOPPED } from '../model/InferenceClient';
-import { TaskChildSnapshot, TaskSnapshot } from '../protocol/ChatProtocol';
+import { TaskChildSnapshot, TaskSnapshot, WireMessage } from '../protocol/ChatProtocol';
 import { TaskReporter } from '../model/TaskReporter';
 import { TaskProgress, TaskProgressPhase, taskProgressActive } from '../model/TaskProgress';
+import { TaskRoutingView } from '../ui/TaskRoutingView';
+import { TaskRoutingStore } from '../ui/TaskRoutingStore';
+import { DEFAULT_QUICK_INPUTS, loadTabletPreferences, saveTabletPreferences } from '../model/TabletPreferences';
 import { TaskProgressCard } from '../ui/TaskProgressCard';
 import { RemoteComputeModel } from '../model/RemoteComputeModel';
 import { ChatMode, loadChatMode, saveChatMode } from '../model/ChatModeStore';
@@ -51,8 +54,8 @@ import {
   CollaborationStatus
 } from '../llm/CollaborationController';
 
-// Target tablet display: 198 mm wide × 127 mm high. ArkUI lays out in vp.
-const TABLET_DISPLAY_RATIO = 198 / 127;
+// Target tablet display: 127 mm wide × 198 mm high. ArkUI lays out in vp.
+const TABLET_DISPLAY_RATIO = 127 / 198;
 const MAX_STEPS = 10;
 const LIVE_PLACEHOLDER = '正在生成…';
 const LIVE_TOOL_PREFIX = '正在调用工具：';
@@ -266,13 +269,22 @@ interface TabletQueuedTask {
 @Entry
 @Component
 struct Index {
+  @State quickInputs: string[] = DEFAULT_QUICK_INPUTS.slice();
+  @State quickInputDrafts: string[] = DEFAULT_QUICK_INPUTS.slice();
+  @State tabletSettingsError: string = '';
+  @State tabletSettingsMessage: string = '';
+  @State sidebarCollapsed: boolean = false;
+  @State sidebarWidth: number = 200;
+  @State routingJson: string = '{}';
+  private sidebarResizeStart: number = 200;
+  private routingStore: TaskRoutingStore = new TaskRoutingStore();
   @State sessions: TabletSession[] = [];
   @State selectedSessionId: string = '';
   @State engineSessionId: string = '';
   @State taskQueue: TabletQueuedTask[] = [];
   @State preparingSubmission: boolean = false;
-  @State tabletWidth: number = 1024;
-  @State tabletHeight: number = 1024 / TABLET_DISPLAY_RATIO;
+  @State tabletWidth: number = 768;
+  @State tabletHeight: number = 768 / TABLET_DISPLAY_RATIO;
   @State clusterSummary: string = '等待算力连接';
   private queueDraining: boolean = false;
   private nextSessionId: number = 1;
@@ -350,6 +362,74 @@ struct Index {
   private pageActive: boolean = false;
   private chatBubbleTextWidthVp: number = 280;
   private collaborationKeepsScreenOn: boolean = false;
+
+  private initializeTabletPreferences(): void {
+    const saved = loadTabletPreferences(this.getAbilityContext());
+    this.quickInputs = saved.quickInputs;
+    this.quickInputDrafts = saved.quickInputs.slice();
+    this.sidebarCollapsed = saved.sidebarCollapsed;
+    this.sidebarWidth = saved.sidebarWidth;
+  }
+
+  private async persistTabletPreferences(): Promise<void> {
+    try {
+      await saveTabletPreferences(this.getAbilityContext(), { quickInputs: this.quickInputs,
+        sidebarCollapsed: this.sidebarCollapsed, sidebarWidth: this.sidebarWidth });
+      this.tabletSettingsError = '';
+    } catch (_error) { this.tabletSettingsError = '设置保存失败，请重试。'; }
+  }
+
+  private openTabletSettings(): void {
+    this.quickInputDrafts = this.quickInputs.slice();
+    this.tabletSettingsError = ''; this.tabletSettingsMessage = '';
+    this.settingsVisible = true;
+  }
+
+  private async saveQuickInputs(): Promise<void> {
+    try {
+      await saveTabletPreferences(this.getAbilityContext(), { quickInputs: this.quickInputDrafts,
+        sidebarCollapsed: this.sidebarCollapsed, sidebarWidth: this.sidebarWidth });
+      this.quickInputs = this.quickInputDrafts.slice();
+      this.tabletSettingsError = ''; this.tabletSettingsMessage = '快捷输入已保存';
+    } catch (_error) { this.tabletSettingsMessage = ''; this.tabletSettingsError = '保存失败，请重试。'; }
+  }
+
+  private quickInputLabel(index: number): string {
+    const text = this.quickInputs[index].replace(/\s+/g, ' ').trim();
+    return text.length > 0 ? (text.length > 12 ? text.substring(0, 12) + '…' : text) : '快捷输入 ' + (index + 1);
+  }
+
+  private toggleSessionSidebar(): void {
+    this.sidebarCollapsed = !this.sidebarCollapsed;
+    this.persistTabletPreferences();
+  }
+
+  private startRoutingView(): void {
+    inferenceClient.setRoutingListener((message: WireMessage, _epoch: number): void => {
+      if (!this.pageActive) { return; }
+      this.routingStore.receiveFlow(message); this.refreshRoutingView();
+    });
+    nearbyChannel.subscribe((message: WireMessage, epoch: number): void => {
+      if (!this.pageActive || epoch !== nearbyChannel.readyEpoch()) { return; }
+      this.routingStore.receive(message, epoch);
+      this.refreshRoutingView();
+    }, (connected: boolean, _epoch: number): void => {
+      if (!connected) { this.routingStore.clear(); }
+      if (this.pageActive) { this.refreshRoutingView(); }
+    });
+    this.refreshRoutingView();
+  }
+
+  private stopRoutingView(): void {
+    inferenceClient.setRoutingListener(null);
+    nearbyChannel.unsubscribe();
+    this.routingStore.clear(); this.routingJson = '{}';
+  }
+
+  private refreshRoutingView(): void {
+    this.routingJson = this.routingStore.snapshot(inferenceClient.routingCalls(), nearbyChannel.selfLabel(),
+      nearbyChannel.localUid(), nearbyChannel.isConnected(), nearbyChannel.readyEpoch());
+  }
 
   private initializeTabletSessions(): void {
     const initial: TabletSession = {
@@ -459,6 +539,7 @@ struct Index {
   }
 
   private refreshClusterSummary(): void {
+    this.refreshRoutingView();
     const load = inferenceClient.clusterLoad();
     this.clusterSummary = load.total > 0 ? '算力 ' + load.total + ' 台 · 空闲 ' + load.idle + ' 台' : '等待算力连接';
   }
@@ -535,11 +616,13 @@ struct Index {
     this.agentEnabled = this.chatMode !== 'chat';
     this.restoreConversation();
     this.initializeTabletSessions();
+    this.initializeTabletPreferences();
     this.restoreTabletSessions();
     this.clusterTimer = setInterval((): void => { this.refreshClusterSummary(); }, 1500);
     ensureBundledWorkspaceFiles(context).catch((_error: Error): void => {});
     nearbyChannel.initialize(context);
     inferenceClient.bind();
+    this.startRoutingView();
     inferenceClient.setLinkListener((): void => {
       if (this.pageActive) { this.refreshLinkChrome(); }
     });
@@ -549,6 +632,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.stopRoutingView();
     clearInterval(this.clusterTimer);
     this.taskQueue = [];
     this.persistTabletSessions();
@@ -588,6 +672,7 @@ struct Index {
 
   @Builder
   settingsPage() {
+    Scroll() {
     Column() {
       Row() {
         Button('返回')
@@ -628,12 +713,32 @@ struct Index {
           .width('100%')
           .margin({ top: 8 })
       }
+      Text('快捷输入').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
+        .width('100%').margin({ top: 20, bottom: 6 })
+      Text('点击快捷按钮填入下方自定义文本；留空可停用该按钮。').fontSize(12).fontColor('#6B7F79').width('100%')
+      ForEach([0, 1, 2], (index: number) => {
+        Text('快捷输入 ' + (index + 1)).fontSize(13).fontColor('#16332C').width('100%').margin({ top: 12, bottom: 6 })
+        TextArea({ text: this.quickInputDrafts[index], placeholder: '输入自定义文本…' })
+          .width('100%').height(90).maxLength(4000).fontSize(14).backgroundColor(Color.White).borderRadius(12)
+          .onChange((value: string) => {
+            this.quickInputDrafts = this.quickInputDrafts.map((text: string, slot: number): string => slot === index ? value : text);
+            this.tabletSettingsMessage = '';
+          })
+      }, (index: number) => index.toString())
+      Button('保存快捷输入').height(44).fontColor(Color.White).backgroundColor('#0F8A74')
+        .margin({ top: 14 }).onClick(() => { this.saveQuickInputs(); })
+      if (this.tabletSettingsError.length > 0) {
+        Text(this.tabletSettingsError).fontColor('#C4473A').fontSize(13).margin({ top: 8 })
+      }
+      if (this.tabletSettingsMessage.length > 0) {
+        Text(this.tabletSettingsMessage).fontColor('#0F8A74').fontSize(13).margin({ top: 8 })
+      }
     }
     .width('100%')
-    .height('100%')
     .alignItems(HorizontalAlign.Start)
     .padding({ left: 16, right: 16, top: 14, bottom: 16 })
     .backgroundColor('#EEF6F3')
+    }.width('100%').height('100%').backgroundColor('#EEF6F3')
   }
 
   @Builder
@@ -670,8 +775,19 @@ struct Index {
   @Builder
   chatPage() {
     Stack({ alignContent: Alignment.Center }) {
-      Row({ space: 16 }) {
+      Row({ space: 8 }) {
         this.sessionSidebar()
+        if (!this.sidebarCollapsed) {
+          Column() {
+            Column().width(4).height(56).backgroundColor('#B9D7CB').borderRadius(2)
+          }.width(12).height('100%').justifyContent(FlexAlign.Center).accessibilityText('左右拖动调整会话栏宽度')
+            .gesture(PanGesture({ direction: PanDirection.Horizontal })
+              .onActionStart(() => { this.sidebarResizeStart = this.sidebarWidth; })
+              .onActionUpdate((event: GestureEvent) => {
+                this.sidebarWidth = Math.max(160, Math.min(300, this.sidebarResizeStart + event.offsetX));
+              })
+              .onActionEnd(() => { this.persistTabletPreferences(); }))
+        }
         Column({ space: 12 }) {
           this.chatToolbar()
           this.routingPanel()
@@ -684,10 +800,11 @@ struct Index {
             this.chatResults()
           }.layoutWeight(1).width('100%').padding(16).backgroundColor('#F7FBFA').borderRadius(20)
           Row({ space: 8 }) {
-            ForEach(['总结一下当前结果', '列出下一步计划', '帮我分析这个问题'], (prompt: string) => {
-              Button(prompt).fontSize(12).height(36).fontColor('#0F8A74').backgroundColor('#E0F1EB')
-                .borderRadius(12).layoutWeight(1).onClick(() => { this.message = prompt; })
-            })
+            ForEach([0, 1, 2], (index: number) => {
+              Button(this.quickInputLabel(index)).fontSize(12).height(36).fontColor('#0F8A74').backgroundColor('#E0F1EB')
+                .borderRadius(12).layoutWeight(1).enabled(this.quickInputs[index].trim().length > 0 && !this.preparingSubmission)
+                .onClick(() => { this.message = this.quickInputs[index]; })
+            }, (index: number) => index.toString())
           }.width('100%')
           this.chatComposer()
         }.layoutWeight(1).height('100%')
@@ -706,6 +823,23 @@ struct Index {
   @Builder
   sessionSidebar() {
     Column({ space: 12 }) {
+      Button(this.sidebarCollapsed ? '›' : '‹ 收起会话')
+        .height(40).width('100%').fontColor('#0F8A74').fontSize(14).backgroundColor(Color.White).borderRadius(12)
+        .accessibilityText(this.sidebarCollapsed ? '展开会话栏' : '收起会话栏')
+        .onClick(() => { this.toggleSessionSidebar(); })
+      if (this.sidebarCollapsed) {
+        Button('＋').height(40).width('100%').fontSize(20).fontColor(Color.White).backgroundColor('#0F8A74')
+          .accessibilityText('新建会话').onClick(() => { this.newSession(); })
+        Scroll() {
+          Column({ space: 8 }) {
+            ForEach(this.sessions, (session: TabletSession, index: number) => {
+              Button((index + 1).toString()).width('100%').height(40).fontSize(13).fontColor('#0F8A74')
+                .backgroundColor(session.id === this.selectedSessionId ? '#D8F3EA' : Color.White)
+                .accessibilityText(session.title).onClick(() => { this.selectSession(session.id); })
+            }, (session: TabletSession) => session.id)
+          }.width('100%')
+        }.layoutWeight(1).width('100%')
+      } else {
       Text('Loopy').fontSize(23).fontWeight(FontWeight.Bold).fontColor('#16332C').width('100%')
       Text('会话空间').fontSize(12).fontColor('#6B7F79').width('100%')
       Button('＋ 新建会话').width('100%').height(44).fontSize(14).fontColor(Color.White)
@@ -728,7 +862,9 @@ struct Index {
       Button('清除待发送任务').fontSize(12).height(40).width('100%').fontColor('#C4473A')
         .backgroundColor(Color.White).enabled(this.taskQueue.length > 0)
         .onClick(() => { this.taskQueue = []; })
-    }.width(this.tabletWidth >= 1000 ? 224 : 176).height('100%').padding(14)
+      }
+    }.width(this.sidebarCollapsed ? 64 : Math.min(this.sidebarWidth, this.tabletWidth * 0.36)).height('100%')
+      .padding(this.sidebarCollapsed ? 8 : 14)
       .backgroundColor('#F7FBFA').borderRadius(20).alignItems(HorizontalAlign.Start)
   }
 
@@ -782,7 +918,7 @@ struct Index {
           .margin({ right: 8 })
           .accessibilityText('设置')
           .onClick(() => {
-            this.settingsVisible = true;
+            this.openTabletSettings();
           })
 
         Button('清空会话')
@@ -826,27 +962,14 @@ struct Index {
 
   @Builder
   routingPanel() {
-    Column({ space: 10 }) {
+    Column({ space: 8 }) {
       Row() {
         Text('任务路由').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
         Blank()
         Text(this.clusterSummary).fontSize(12).fontColor('#0F8A74')
       }.width('100%')
-      Scroll() {
-        Column({ space: 8 }) {
-          ForEach(this.sessions, (session: TabletSession) => {
-            Row({ space: 10 }) {
-              Text(session.title).fontSize(12).fontColor('#16332C').maxLines(1).layoutWeight(1)
-              Text('→').fontColor('#8AA39C')
-              Text('算力中心').fontSize(13).fontColor('#0F8A74').padding(10)
-                .backgroundColor('#E7F6F2').borderRadius(12)
-              Text('→').fontColor('#8AA39C')
-              Text(this.sessionStatus(session.id)).fontSize(12).fontColor('#6B7F79').layoutWeight(1)
-            }.width('100%').padding(8).backgroundColor('#F7FBFA').borderRadius(12)
-          }, (session: TabletSession) => session.id)
-        }.width('100%')
-      }.width('100%').constraintSize({ maxHeight: this.tabletWidth >= 1000 ? 180 : 148 })
-    }.width('100%').padding(16).backgroundColor(Color.White).borderRadius(20)
+      TaskRoutingView({ eventJson: this.routingJson }).width('100%').layoutWeight(1)
+    }.width('100%').height(this.tabletHeight * 0.3).padding(12).backgroundColor(Color.White).borderRadius(20)
   }
 
   @Builder

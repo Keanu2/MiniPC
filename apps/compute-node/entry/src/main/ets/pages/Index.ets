@@ -1152,13 +1152,13 @@ struct Index {
       }
     }
     while (this.flowNotices.size > 256) this.flowNotices.delete(Array.from(this.flowNotices.keys())[0]);
-    const peers = this.channel.peerInfos().filter((peer) => peer.ready && peer.role === 'compute');
+    const peers = this.channel.peerInfos().filter((peer) => peer.ready && (peer.role === 'compute' || peer.role === 'chat'));
     for (const peer of peers) {
       let delivered = this.flowDeliveries.get(peer.epoch);
       if (delivered === undefined) { delivered = new Map(); this.flowDeliveries.set(peer.epoch, delivered); }
       for (const notice of this.flowNotices.values()) {
         // The executor already has authoritative local callbacks for its own calls.
-        if (notice.source === computeLabel(peer.epoch, this.channel.peerInfos()) && !delivered.has(notice.key)) continue;
+        if (peer.role === 'compute' && notice.source === computeLabel(peer.epoch, this.channel.peerInfos()) && !delivered.has(notice.key)) continue;
         if ((delivered.get(notice.key) || 0) >= notice.revision) continue;
         const revision = notice.revision;
         delivered.set(notice.key, revision);
@@ -1628,9 +1628,8 @@ struct Index {
     // created a cycle in which a disconnected chat survived forever as a ghost.
     for (const peer of peers) {
       if (!peer.ready) continue;
-      // Chat peers neither consume the cluster roster nor supply scheduling
-      // metrics. Avoid sending a multi-frame snapshot to every chat phone.
-      if (peer.role !== 'compute') continue;
+      // Tablet chat peers consume this roster for the same read-only route view.
+      if (peer.role !== 'compute' && peer.role !== 'chat') continue;
       if (busy) {
         this.channel.send(this.inferenceLoadStatus(this.jobs.filter((job: ActiveJob): boolean => job.workerEpoch === 0).length), peer.epoch);
       }

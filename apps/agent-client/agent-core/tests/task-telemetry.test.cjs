@@ -34,8 +34,15 @@ const flush=async()=>{for(let i=0;i<10;i++)await Promise.resolve()};
   client.deliver=(request,epoch)=>{sent.push([request,epoch]);return true};
   const pending=client.complete('q',{owner:'child',taskId:'task2',subtaskId:'s1',label:'子任务 1/2'},null);
   const request=sent.at(-1)[0];assert.equal(request.taskId,'task2');assert.equal(request.subtaskId,'s1');
+  let route=client.routingCalls()[0];assert.equal(route.phase,'sending');assert.equal(route.device,'');
+  client.onMessage({type:'infer.accepted',requestId:request.requestId,device:'算力设备2'},999);
+  assert.equal(client.routingCalls()[0].device,'','stale acceptance cannot change the route');
+  client.onMessage({type:'infer.accepted',requestId:request.requestId,device:'算力设备2'},8);
+  route=client.routingCalls()[0];assert.equal(route.device,'算力设备2');assert.equal(route.phase,'running');
+  client.onMessage({type:'infer.status',requestId:request.requestId,state:'queued'},999);
+  assert.equal(client.routingCalls()[0].phase,'running','stale status cannot change the route');
   // Settle the model promise without starting a platform model.
-  const call=client.calls.get(request.requestId);clearTimeout(call.timer);client.calls.delete(request.requestId);call.resolve('ok');assert.equal(await pending,'ok');
+  const call=client.calls.get(request.requestId);clearTimeout(call.timer);client.calls.delete(request.requestId);call.resolve('ok');assert.equal(await pending,'ok');assert.equal(client.routingCalls().length,0,'completed calls leave the live route');
   const hostSent=[];let shown;
   const {InferenceHost,InferCardHooks}=load(path.resolve(__dirname,'../../../../apps/compute-node/entry/src/main/ets/llm/InferenceHost.ets'),{
     './QwenVlManager':{QwenVlManager:{getInstance:()=>({isBusy:()=>false,unloadIfIdle(){}})}},

@@ -22,7 +22,16 @@ export interface InferenceMetrics {
 export const MAX_IMAGE_BASE64: number = 24000;
 
 export interface ChatMessage { role: string; content: string; }
+export interface RoutingCall {
+  id: string;
+  question: string;
+  image: string;
+  device: string;
+  phase: string;
+  startedAt: number;
+}
 export interface DeviceInfoEntry {
+  capabilities?: string[];
   id?: string;
   /** Stable per-install identity. `id` remains for compatibility with older builds. */
   deviceUid?: string;

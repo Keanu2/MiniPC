@@ -1,6 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
-import { ChatMessage, ClusterInfo, InferProfile, TaskSnapshot, validTaskSnapshot, WireMessage } from '../protocol/ChatProtocol';
+import { ChatMessage, ClusterInfo, InferProfile, RoutingCall, TaskSnapshot, validTaskSnapshot, WireMessage } from '../protocol/ChatProtocol';
 import { sha256Hex, utf8Bytes } from './InferenceWire';
 import { repairUtf8FromSource } from './Utf8Repair';
 
@@ -59,6 +59,8 @@ class StreamState {
   next: number = 1;
   text: string = '';
   accepted: boolean = false;
+  device: string = '';
+  phase: string = 'sending';
   /** Start of the current attempt; the post-acceptance deadline counts from here. */
   started: number = 0;
   /** First dispatch, bounding how long a refused request may keep waiting for an idle device. */
@@ -103,6 +105,7 @@ class InferenceClient {
   private waitingCalls: StreamState[] = [];
   private linkListener: (() => void) | null = null;
   private loadListener: (() => void) | null = null;
+  private routingListener: ((message: WireMessage, epoch: number) => void) | null = null;
   private status: string = '正在检查模型能力';
   private broken: boolean = false;
   private taskEpochs: Map<string, number> = new Map();
@@ -163,6 +166,19 @@ class InferenceClient {
     }
     const ready = this.isReady();
     return { idle: ready && this.calls.size === 0 ? 1 : 0, total: ready ? 1 : 0 };
+  }
+
+  setRoutingListener(listener: ((message: WireMessage, epoch: number) => void) | null): void {
+    this.routingListener = listener;
+  }
+
+  routingCalls(): RoutingCall[] {
+    return Array.from(this.calls.values()).concat(this.waitingCalls).concat(this.queued).map((state: StreamState): RoutingCall => ({
+      id: state.requestId || state.hooks.taskId || 'pending', question: state.hooks.label || '推理请求',
+      image: state.image, device: state.device,
+      phase: state.waiting || this.queued.includes(state) ? 'queued' : state.phase,
+      startedAt: state.started || Date.now()
+    }));
   }
 
   cancel(): void {
@@ -386,6 +402,7 @@ class InferenceClient {
     state.next = 1;
     state.text = '';
     state.accepted = false;
+    state.device = ''; state.phase = 'sending';
     state.waiting = false;
     this.calls.set(requestId, state);
     clearTimeout(state.timer);
@@ -519,6 +536,12 @@ class InferenceClient {
   }
 
   private onMessage(message: WireMessage, epoch?: number): void {
+    if (message.type === 'infer.status' && message.source === 'flow-display') {
+      if (epoch !== undefined && epoch === nearbyChannel.readyEpoch()) {
+        try { this.routingListener?.(message, epoch); } catch (_error) { /* Display cannot fail inference. */ }
+      }
+      return;
+    }
     if (message.type === 'infer.capabilities' && this.negotiateId.length > 0 &&
       message.requestId === this.negotiateId) {
       const profiles = message.profiles;
@@ -556,8 +579,9 @@ class InferenceClient {
       // （infer.status 也被通道当作集群信息载体，那种帧没有 requestId，自然被这里忽略。）
       if (typeof message.state === 'string' && typeof message.requestId === 'string') {
         const pending = this.calls.get(message.requestId);
-        if (pending !== undefined && pending.hooks.onPhase !== undefined) {
-          pending.hooks.onPhase(message.state);
+        if (pending !== undefined && (epoch === undefined || pending.epoch === epoch)) {
+          pending.phase = message.state === 'queued' ? 'queued' : 'running';
+          pending.hooks.onPhase?.(message.state);
         }
       }
       return;
@@ -577,6 +601,7 @@ class InferenceClient {
     }
     if (message.type === 'infer.accepted') {
       call.accepted = true;
+      call.device = message.device || ''; call.phase = 'running';
       this.arm(call);
       const accepted = call.hooks.onAccepted;
       if (accepted !== undefined && typeof message.device === 'string' && message.device.length > 0) {
