@@ -75,6 +75,8 @@ const settings=load('model/TabletPreferences.ets',{'@kit.ArkData':{preferences}}
  const window={addEventListener(){}};vm.runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],{document,window,Date,Map,Set,JSON,Math,Array,String,Number,setInterval(){}});
  window.onNativeEvent({devices:[{id:'hub',name:'算力设备1',role:'compute',ready:true,memUsage:52},{id:'chat',name:'聊天设备1',role:'chat',ready:true}],jobs:[{id:'r',key:'client:r',source:'算力设备1',originId:'chat',origin:'聊天设备1',phase:'running',running:true,question:'测试<任务>',startedAt:Date.now()-5000}]});
  assert.match(elements.collaboration.innerHTML,/flow-compute/);assert.match(elements.collaboration.innerHTML,/测试&lt;任务&gt;/);assert.match(elements.collaboration.innerHTML,/路由中心/);assert.equal(elements.stage.style.transform,'scale(0.64)');
+ window.onNativeEvent({devices:[{id:'hub',name:'算力设备1',role:'compute',ready:true},{id:'worker',name:'算力设备2',role:'compute',ready:true,jobs:0},{id:'chat',name:'聊天设备1',role:'chat',ready:true}],jobs:[]});
+ assert.equal((elements.collaboration.innerHTML.match(/class="flow-compute"/g)||[]).length,2,'idle compute members must remain visible');
  const beforeRoster=JSON.parse(new TaskRoutingStore().snapshot([],'聊天设备1','chat',true,7,connectedHub));
  window.onNativeEvent(beforeRoster);assert.match(elements.collaboration.innerHTML,/flow-compute/);assert.doesNotMatch(elements.collaboration.innerHTML,/等待算力设备上线/);
  const sending=JSON.parse(new TaskRoutingStore().snapshot([{id:'upload',question:'任务',image:'',device:'',phase:'sending',startedAt:Date.now()}],'聊天设备1','chat',true,7,connectedHub));

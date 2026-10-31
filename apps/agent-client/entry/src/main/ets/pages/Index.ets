@@ -4,6 +4,7 @@ import fs from '@ohos.file.fs';
 import window from '@ohos.window';
 import {
   AgentEvent,
+  ChatMessage,
   AgentEventKind,
   buildLocalCollaborationInfo,
   buildLocalSessionAttributes,
@@ -38,6 +39,8 @@ import { getLocalLlmBinding } from '../llm/LocalLlmBinding';
 import { nearbyChannel } from '../nearby/LinkEnhanceChannel';
 import { inferenceClient, INFERENCE_STOPPED } from '../model/InferenceClient';
 import { TaskChildSnapshot, TaskSnapshot, WireMessage } from '../protocol/ChatProtocol';
+import { ConcurrentChatTask, ChatTaskInput, ChatTaskUpdate } from '../model/ConcurrentChatTask';
+import { TaskConversationLedger } from '../model/TaskConversationLedger';
 import { TaskReporter } from '../model/TaskReporter';
 import { TaskProgress, TaskProgressPhase, taskProgressActive } from '../model/TaskProgress';
 import { TaskRoutingView } from '../ui/TaskRoutingView';
@@ -175,6 +178,7 @@ interface ChatBubble {
   collapsible: boolean;
   expanded: boolean;
   revision: number;
+  pending?: boolean;
   taskProgress?: TaskProgress;
 }
 
@@ -237,6 +241,7 @@ struct InferenceMetricCellView {
 }
 
 interface StoredTabletSession {
+  resultTranscript?: string;
   id: string;
   title: string;
   draft: string;
@@ -244,6 +249,7 @@ interface StoredTabletSession {
 }
 
 interface TabletSession {
+  presentationEpoch: number;
   id: string;
   title: string;
   messages: ChatBubble[];
@@ -256,6 +262,8 @@ interface TabletSession {
 }
 
 interface TabletQueuedTask {
+  presentationEpoch: number;
+  history: ConversationContext;
   id: number;
   sessionId: string;
   mode: ChatMode;
@@ -263,6 +271,15 @@ interface TabletQueuedTask {
   display: string;
   imagePath: string;
   imagePayload: string;
+}
+
+interface ActiveChatTask {
+  task: TabletQueuedTask;
+  runner: ConcurrentChatTask;
+  progressId: number;
+  replyId: number;
+  processId: number;
+  historyCommitted: boolean;
 }
 
 @Entry
@@ -289,6 +306,11 @@ struct Index {
   @State preparingSubmission: boolean = false;
   @State clusterSummary: string = '等待算力连接';
   private queueDraining: boolean = false;
+  private activeChatTasks: Map<number, ActiveChatTask> = new Map();
+  private taskLedgers: Map<string, TaskConversationLedger> = new Map();
+  @State activeTaskSessions: string[] = [];
+  private taskConnection: Promise<boolean> | null = null;
+  private taskClosing: boolean = false;
   private nextSessionId: number = 1;
   private nextQueuedTaskId: number = 1;
   private clusterTimer: number = -1;
@@ -449,7 +471,7 @@ struct Index {
     const initial: TabletSession = {
       id: 's' + this.nextSessionId++, title: this.messages.length > 0 ? '历史会话' : '新对话',
       messages: this.messages, conversation: this.conversation, draft: '',
-      pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: ''
+      pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '', presentationEpoch: 0
     };
     this.sessions = [initial];
     this.selectedSessionId = initial.id;
@@ -477,23 +499,19 @@ struct Index {
   }
 
   private selectSession(id: string): void {
-    this.captureEngineSession();
-    this.saveSelectedDraft();
+    this.captureEngineSession(); this.saveSelectedDraft();
     const session = this.sessions.find((item: TabletSession): boolean => item.id === id);
     if (session === undefined) { return; }
-    this.selectedSessionId = id;
-    this.message = session.draft;
-    this.pendingKind = session.pendingKind;
-    this.pendingName = session.pendingName;
-    this.pendingPath = session.pendingPath;
-    this.pendingLocal = session.pendingLocal;
-    this.attachError = '';
+    this.selectedSessionId = id; this.engineSessionId = id;
+    this.messages = session.messages; this.conversation = session.conversation;
+    this.message = session.draft; this.pendingKind = session.pendingKind; this.pendingName = session.pendingName;
+    this.pendingPath = session.pendingPath; this.pendingLocal = session.pendingLocal; this.attachError = '';
   }
 
   private isEmptyTabletSession(session: TabletSession): boolean {
-    return (session.title === '新对话' || session.title === '新会话') && session.messages.length === 0 &&
+    return (session.title === '新对话' || session.title === '新会话') && session.messages.length === 0 && session.conversation.toChatMessages().length === 0 &&
       session.draft.trim().length === 0 && session.pendingPath.length === 0 &&
-      !(this.sending && session.id === this.engineSessionId) &&
+      !this.activeTaskSessions.includes(session.id) &&
       !this.taskQueue.some((task: TabletQueuedTask): boolean => task.sessionId === session.id);
   }
 
@@ -505,7 +523,7 @@ struct Index {
     const id = 's' + this.nextSessionId++;
     this.sessions = [...this.sessions, {
       id: id, title: '新对话', messages: [], conversation: new ConversationContext(), draft: '',
-      pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: ''
+      pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '', presentationEpoch: 0
     }];
     this.selectSession(id);
   }
@@ -515,16 +533,17 @@ struct Index {
   }
 
   private sessionStatus(id: string): string {
-    const count = this.taskQueue.filter((task: TabletQueuedTask): boolean => task.sessionId === id).length;
-    return (this.sending && id === this.engineSessionId ? '执行中' : '就绪') + (count > 0 ? ' · 排队 ' + count : '');
+    const active = this.activeTaskSessions.filter((sessionId: string): boolean => sessionId === id).length;
+    const queued = this.taskQueue.filter((task: TabletQueuedTask): boolean => task.sessionId === id).length;
+    return (active > 0 ? '执行中 ' + active : '就绪') + (queued > 0 ? ' · 排队 ' + queued : '');
   }
 
   private visibleMessages(): ChatBubble[] {
     const session = this.sessions.find((item: TabletSession): boolean => item.id === this.selectedSessionId);
-    const bubbles = this.selectedSessionId === this.engineSessionId ? this.messages : (session?.messages ?? []);
+    const bubbles = session?.messages ?? [];
     const waiting: ChatBubble[] = [];
     for (const task of this.taskQueue) {
-      if (task.sessionId !== this.selectedSessionId) { continue; }
+      if (task.sessionId !== this.selectedSessionId || task.presentationEpoch !== session?.presentationEpoch) { continue; }
       waiting.push({ id: -task.id, speaker: 'You', text: task.display + '（等待执行）', kind: BubbleKind.USER,
         imagePath: task.imagePath, collapsible: false, expanded: false, revision: 0 });
     }
@@ -545,7 +564,7 @@ struct Index {
   }
 
   private canClearSession(): boolean {
-    return !(this.sending && this.engineSessionId === this.selectedSessionId) &&
+    return !this.activeTaskSessions.includes(this.selectedSessionId) &&
       !this.taskQueue.some((task: TabletQueuedTask): boolean => task.sessionId === this.selectedSessionId);
   }
 
@@ -554,6 +573,7 @@ struct Index {
     this.sessions = this.sessions.map((session: TabletSession): TabletSession => {
       if (session.id === this.selectedSessionId) {
         session.messages = []; session.conversation = new ConversationContext(); session.title = '新对话';
+        session.presentationEpoch++; this.taskLedgers.delete(session.id);
         if (session.id === this.engineSessionId) {
           this.messages = []; this.conversation = session.conversation;
         }
@@ -565,42 +585,177 @@ struct Index {
 
   private refreshClusterSummary(): void {
     this.refreshRoutingView();
+    this.drainTaskQueue();
     const load = inferenceClient.clusterLoad();
     this.clusterSummary = load.total > 0 ? '算力 ' + load.total + ' 台 · 空闲 ' + load.idle + ' 台' :
       (nearbyChannel.isConnected() ? '已连接 · 检查模型' : '等待算力连接');
   }
 
   private async drainTaskQueue(): Promise<void> {
-    if (this.queueDraining || !this.pageActive) { return; }
+    if (this.queueDraining || !this.pageActive || this.taskClosing) { return; }
     this.queueDraining = true;
     try {
-      while (this.pageActive && this.taskQueue.length > 0) {
-        const task = this.taskQueue[0];
-        this.taskQueue = this.taskQueue.slice(1);
-        this.captureEngineSession();
-        const session = this.sessions.find((item: TabletSession): boolean => item.id === task.sessionId);
-        if (session === undefined) { continue; }
-        this.engineSessionId = session.id;
-        this.messages = session.messages;
-        this.conversation = session.conversation;
-        this.liveReplyId = -1; this.liveReplyPending = false; this.processId = -1; this.activeTaskProgressId = -1;
-        try {
-          await this.runRemoteAgent(task.task, task.display, task.imagePath, task.imagePayload, task.mode);
-        } finally {
-          this.captureEngineSession();
-          this.persistTabletSessions();
-        }
+      const load = inferenceClient.clusterLoad();
+      const capacity = Math.max(1, Math.min(16, Number.isFinite(load.total) ? Math.floor(load.total) : 1));
+      while (this.pageActive && !this.taskClosing && this.taskQueue.length > 0 && this.activeTaskSessions.length < capacity) {
+        const task = this.taskQueue[0]; this.taskQueue = this.taskQueue.slice(1);
+        if (this.sessions.some((session: TabletSession): boolean => session.id === task.sessionId)) { this.startConcurrentTask(task); }
       }
-    } finally {
-      this.queueDraining = false;
+    } finally { this.queueDraining = false; }
+  }
+
+  private ledgerFor(session: TabletSession): TaskConversationLedger {
+    let ledger = this.taskLedgers.get(session.id);
+    if (ledger === undefined) { ledger = new TaskConversationLedger(session.conversation); this.taskLedgers.set(session.id, ledger); }
+    return ledger;
+  }
+
+  private async ensureTaskConnection(): Promise<boolean> {
+    if (this.taskConnection !== null) { return await this.taskConnection; }
+    const pending = this.ensureRemoteReady(this.remoteRunGeneration);
+    this.taskConnection = pending;
+    try { return await pending; } finally { if (this.taskConnection === pending) { this.taskConnection = null; } }
+  }
+
+  private setSessionMessages(session: TabletSession, messages: ChatBubble[]): void {
+    session.messages = messages;
+    if (session.id === this.engineSessionId) { this.messages = messages; this.conversation = session.conversation; }
+    this.sessions = this.sessions.slice();
+  }
+
+  private refreshTaskActivity(): void {
+    this.activeTaskSessions = Array.from(this.activeChatTasks.values()).filter((run: ActiveChatTask): boolean => !run.historyCommitted).map((run: ActiveChatTask): string => run.task.sessionId);
+    this.sending = this.activeTaskSessions.length > 0;
+    this.setCollaborationKeepScreenOn(this.sending);
+  }
+
+  private startConcurrentTask(task: TabletQueuedTask): void {
+    const session = this.sessions.find((item: TabletSession): boolean => item.id === task.sessionId);
+    if (session === undefined) { return; }
+    let progressId = -1, replyId = -1;
+    if (task.presentationEpoch === session.presentationEpoch) {
+      const user = this.createChatBubble('You', task.display, BubbleKind.USER, task.imagePath);
+      const progress = this.createChatBubble('Task', '', BubbleKind.TASK);
+      progress.taskProgress = { kind: task.imagePayload.length > 0 ? '图像' : '文本', phase: 'preparing', startedAt: Date.now(), endedAt: 0 };
+      const reply = this.createChatBubble('Loop', LIVE_PLACEHOLDER, BubbleKind.LOOP); reply.pending = true;
+      progressId = progress.id; replyId = reply.id;
+      this.setSessionMessages(session, session.messages.concat([user, progress, reply]));
     }
+    const input: ChatTaskInput = { id: 'task-' + Date.now().toString(36) + '-' + task.id,
+      task: task.task, display: task.display, imagePayload: task.imagePayload, mode: task.mode,
+      context: this.getAbilityContext(), conversation: task.history };
+    const runner = new ConcurrentChatTask(input, (): Promise<boolean> => this.ensureTaskConnection(),
+      (state: ChatTaskUpdate): void => this.updateConcurrentTask(task.id, state));
+    this.activeChatTasks.set(task.id, { task: task, runner: runner, progressId: progressId, replyId: replyId, processId: -1, historyCommitted: false });
+    this.refreshTaskActivity();
+    runner.run().then((): void => this.finishConcurrentTask(task.id), (): void => this.finishConcurrentTask(task.id))
+      .catch((_error: Error): void => { if (this.pageActive) { this.attachError = '任务收尾失败，请重试。'; } });
+  }
+
+  private updateConcurrentTask(id: number, state: ChatTaskUpdate): void {
+    if (!this.pageActive) { return; }
+    const run = this.activeChatTasks.get(id);
+    if (run === undefined) { return; }
+    const session = this.sessions.find((item: TabletSession): boolean => item.id === run.task.sessionId);
+    if (session === undefined) { return; }
+    const terminal = !taskProgressActive(state.phase);
+    if (terminal && !run.historyCommitted) {
+      run.historyCommitted = true;
+      session.conversation = this.ledgerFor(session).finish(id,
+        state.phase === 'done' ? state.answer : state.phase === 'partial' ? PARTIAL_HISTORY_NOTE : null);
+      if (session.id === this.engineSessionId) { this.conversation = session.conversation; }
+      this.refreshTaskActivity(); this.drainTaskQueue();
+    }
+    if (run.task.presentationEpoch !== session.presentationEpoch) { this.sessions = this.sessions.slice(); return; }
+    let next = session.messages.map((bubble: ChatBubble): ChatBubble => {
+      if (bubble.id === run.progressId) {
+        return { id: bubble.id, speaker: bubble.speaker, text: '', kind: BubbleKind.TASK, imagePath: '', collapsible: false,
+          expanded: false, revision: bubble.revision + 1,
+          taskProgress: { kind: run.task.imagePayload.length > 0 ? '图像' : '文本', phase: state.phase, startedAt: state.startedAt, endedAt: state.endedAt } };
+      }
+      if (bubble.id === run.replyId) {
+        return { id: bubble.id, speaker: state.phase === 'failed' ? 'Error' : 'Loop', text: state.answer || state.status,
+          kind: state.phase === 'failed' ? BubbleKind.ERROR : BubbleKind.LOOP, imagePath: '', collapsible: false,
+          expanded: false, revision: bubble.revision + 1, pending: !terminal && state.answer.length === 0 };
+      }
+      if (bubble.id === run.processId) {
+        return { id: bubble.id, speaker: bubble.speaker, text: state.process, kind: BubbleKind.PROCESS, imagePath: '',
+          collapsible: true, expanded: bubble.expanded, revision: bubble.revision + 1 };
+      }
+      return bubble;
+    });
+    if (state.process.length > 0 && run.processId < 0) {
+      const process = this.createChatBubble('Process', state.process, BubbleKind.PROCESS); process.collapsible = true;
+      run.processId = process.id;
+      const index = next.findIndex((bubble: ChatBubble): boolean => bubble.id === run.replyId);
+      next.splice(index >= 0 ? index : next.length, 0, process);
+    }
+    this.setSessionMessages(session, next);
+    if (session.id === this.selectedSessionId) { this.scroller.scrollEdge(Edge.Bottom); }
+  }
+
+  private finishConcurrentTask(id: number): void {
+    if (!this.activeChatTasks.has(id)) { return; }
+    this.activeChatTasks.delete(id); this.refreshTaskActivity();
+    if (this.pageActive) { this.persistTabletSessions(); this.drainTaskQueue(); }
+  }
+
+  private cancelSessionTasks(sessionId: string): void {
+    const removed = this.taskQueue.filter((task: TabletQueuedTask): boolean => task.sessionId === sessionId);
+    this.taskQueue = this.taskQueue.filter((task: TabletQueuedTask): boolean => task.sessionId !== sessionId);
+    const ledger = this.taskLedgers.get(sessionId);
+    for (const task of removed) { ledger?.finish(task.id, null); }
+    for (const run of Array.from(this.activeChatTasks.values())) {
+      if (run.task.sessionId === sessionId) { run.runner.cancel(); this.activeChatTasks.delete(run.task.id); }
+    }
+    this.refreshTaskActivity();
+  }
+
+  private cancelAllConcurrentTasks(): void {
+    this.taskClosing = true;
+    for (const session of this.sessions) { this.cancelSessionTasks(session.id); }
+    this.taskQueue = []; this.refreshTaskActivity();
+  }
+
+  private clearWaitingTasks(): void {
+    for (const task of this.taskQueue) { this.taskLedgers.get(task.sessionId)?.finish(task.id, null); }
+    this.taskQueue = [];
+  }
+
+  private deleteSession(id: string): void {
+    this.captureEngineSession(); this.saveSelectedDraft();
+    this.cancelSessionTasks(id); this.taskLedgers.delete(id);
+    this.sessions = this.sessions.filter((session: TabletSession): boolean => session.id !== id);
+    if (this.selectedSessionId === id) {
+      this.selectedSessionId = ''; this.engineSessionId = ''; this.messages = []; this.conversation = new ConversationContext();
+      this.message = ''; this.clearAttachment();
+      if (this.sessions.length > 0) { this.selectSession(this.sessions[0].id); } else { this.newSession(); }
+    }
+    this.persistTabletSessions(); this.drainTaskQueue();
+  }
+
+  private clearResults(): void {
+    const session = this.sessions.find((item: TabletSession): boolean => item.id === this.selectedSessionId);
+    if (session === undefined) { return; }
+    session.presentationEpoch++; this.setSessionMessages(session, []);
+    this.persistTabletSessions();
+  }
+
+  private resultTranscript(session: TabletSession): string {
+    const pendingReplies = Array.from(this.activeChatTasks.values()).filter((run: ActiveChatTask): boolean =>
+      run.task.sessionId === session.id && !run.historyCommitted).map((run: ActiveChatTask): number => run.replyId);
+    const turns: ChatMessage[] = session.messages.filter((bubble: ChatBubble): boolean =>
+      (bubble.kind === BubbleKind.USER || bubble.kind === BubbleKind.LOOP) && !pendingReplies.includes(bubble.id))
+      .map((bubble: ChatBubble): ChatMessage => ({ role: bubble.kind === BubbleKind.USER ? 'user' : 'assistant', content: bubble.text }));
+    return JSON.stringify(turns);
   }
 
   private persistTabletSessions(): void {
     this.captureEngineSession();
     this.saveSelectedDraft();
     const saved: StoredTabletSession[] = this.sessions.map((session: TabletSession): StoredTabletSession => ({
-      id: session.id, title: session.title, draft: session.draft, transcript: JSON.stringify(session.conversation.toChatMessages())
+      id: session.id, title: session.title, draft: session.draft, transcript: JSON.stringify(session.conversation.toChatMessages()),
+      resultTranscript: this.resultTranscript(session)
     }));
     try {
       const file = fs.openSync(this.getAbilityContext().filesDir + '/tablet-sessions.json',
@@ -619,8 +774,9 @@ struct Index {
         if (typeof item.title !== 'string' || typeof item.transcript !== 'string') { continue; }
         const conversation = ConversationContext.fromMessages(JSON.parse(item.transcript));
         const session: TabletSession = { id: 's' + this.nextSessionId++, title: item.title, conversation: conversation,
-          messages: this.buildMessagesFromConversation(conversation), draft: item.draft ?? '',
-          pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '' };
+          messages: this.buildMessagesFromConversation(item.resultTranscript !== undefined ?
+            ConversationContext.fromMessages(JSON.parse(item.resultTranscript)) : conversation), draft: item.draft ?? '',
+          pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '', presentationEpoch: 0 };
         if (this.isEmptyTabletSession(session)) {
           if (restoredEmpty) { continue; }
           restoredEmpty = true; session.title = '新对话';
@@ -642,6 +798,7 @@ struct Index {
 
   aboutToAppear(): void {
     this.pageActive = true;
+    this.taskClosing = false;
     this.stopRequested = false;
     const context = this.getAbilityContext();
     this.chatMode = loadChatMode(context);
@@ -665,6 +822,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopRoutingView();
+    this.cancelAllConcurrentTasks();
     clearInterval(this.clusterTimer);
     this.taskQueue = [];
     this.persistTabletSessions();
@@ -829,6 +987,8 @@ struct Index {
             Blank()
             Text(this.selectedSessionTitle()).fontSize(12).fontColor('#6B7F79').maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '46%' })
+            Button('清空').height(28).fontSize(12).padding({ left: 10, right: 10 }).fontColor('#6B7F79')
+              .backgroundColor(Color.White).margin({ left: 8 }).onClick(() => { this.clearResults(); })
           }.width('100%').padding({ bottom: 8 })
           this.chatResults()
         }.layoutWeight(2).constraintSize({ minHeight: 80 }).width('100%').padding(12)
@@ -884,14 +1044,18 @@ struct Index {
                 .border({ width: 1, color: session.id === this.selectedSessionId ? '#0F8A74' : '#E3EDE8' })
                 .onClick(() => { this.selectSession(session.id); })
             }
-          }, (session: TabletSession) => session.id)
+          }, (session: TabletSession) => session.id + ':' + session.title)
         }.width('100%').constraintSize({ minHeight: '100%' }).justifyContent(FlexAlign.Start)
           .alignItems(this.sidebarIsCompact() ? HorizontalAlign.Center : HorizontalAlign.Start)
       }.layoutWeight(1).width('100%').scrollable(ScrollDirection.Vertical).align(Alignment.TopStart).scrollBar(BarState.Off)
+      Button(this.sidebarIsCompact() ? '删' : '删除当前会话').type(ButtonType.Normal).height(36)
+        .width(this.sidebarIsCompact() ? 40 : '100%').padding(0).fontSize(12).fontColor('#C4473A')
+        .backgroundColor(Color.White).accessibilityText('删除当前会话')
+        .onClick(() => { this.deleteSession(this.selectedSessionId); })
       Button(this.sidebarIsCompact() ? '×' : '清除待发送任务').type(ButtonType.Normal).height(40)
         .width(this.sidebarIsCompact() ? 40 : '100%').padding(this.sidebarIsCompact() ? 0 : 8).fontSize(12)
         .fontColor('#C4473A').backgroundColor(Color.White).enabled(this.taskQueue.length > 0)
-        .accessibilityText('清除待发送任务').onClick(() => { this.taskQueue = []; })
+        .accessibilityText('清除待发送任务').onClick(() => { this.clearWaitingTasks(); })
     }.width(this.sidebarIsCompact() ? 64 : Math.min(this.sidebarWidth, this.viewportWidth * 0.32))
       .height('100%').padding(this.sidebarIsCompact() ? 8 : 10).backgroundColor('#F7FBFA').borderRadius(16)
       .alignItems(this.sidebarIsCompact() ? HorizontalAlign.Center : HorizontalAlign.Start)
@@ -911,7 +1075,9 @@ struct Index {
         .padding({ left: 10, right: 10 }).borderRadius(12).enabled(!this.linkBusy).onClick(() => { this.toggleLink(); })
       if (this.sending) {
         Button('停止').height(36).fontSize(12).fontColor('#C4473A').backgroundColor('#FDECEA')
-          .padding({ left: 10, right: 10 }).borderRadius(12).onClick(() => { this.stopGeneration(); })
+          .padding({ left: 10, right: 10 }).borderRadius(12)
+          .enabled(this.activeTaskSessions.includes(this.selectedSessionId) || this.taskQueue.some((task: TabletQueuedTask): boolean => task.sessionId === this.selectedSessionId))
+          .accessibilityText('停止当前会话的任务').onClick(() => { this.stopGeneration(); })
       }
       Button('⚙').height(36).width(36).fontSize(17).fontColor('#0F8A74').backgroundColor('#F7FBFA')
         .padding(0).borderRadius(12).accessibilityText('设置').onClick(() => { this.openTabletSettings(); })
@@ -1027,7 +1193,7 @@ struct Index {
             .justifyContent(bubble.kind === BubbleKind.USER ? FlexAlign.End : FlexAlign.Start)
             .margin({ bottom: 10 })
             // The task card already represents waiting; keep detailed parallel progress visible.
-            .visibility(bubble.id === this.liveReplyId && this.liveReplyPending && this.parallelHeader.length === 0 ?
+            .visibility(bubble.pending === true || (bubble.id === this.liveReplyId && this.liveReplyPending && this.parallelHeader.length === 0) ?
               Visibility.None : Visibility.Visible)
           }, (bubble: ChatBubble) => `${bubble.id}-${bubble.revision}`)
         }
@@ -1683,200 +1849,7 @@ struct Index {
     });
   }
 
-  private async runRemoteAgent(task: string, display: string, imagePath: string,
-    imagePayload: string = '', runMode: ChatMode = this.chatMode): Promise<void> {
-    if (!this.pageActive || this.sending) { return; }
-    const mode: ChatMode = runMode === 'agent' || runMode === 'chat' ? runMode : 'agent_split';
-    const useAgent = mode !== 'chat';
-    const generation = ++this.remoteRunGeneration;
-    this.stopRequested = false;
-    this.sending = true;
-    this.setCollaborationKeepScreenOn(true);
-    let finalAnswer: string | null = null;
-    let finalPartial = false;
-    let failureText = '';
-    const startedAt = Date.now();
-    this.appendUserMessage(display, imagePath);
-    this.beginTaskProgress(imagePath.length > 0 || imagePayload.length > 0 ? '图像' : '文本', startedAt);
-    let reporter: TaskReporter | null = null;
-    try {
-      const ready = await this.ensureRemoteReady(generation);
-      if (!this.isCurrentRemoteRun(generation)) { return; }
-      if (!ready) {
-        this.appendLine('Error', this.remoteStatus, BubbleKind.ERROR);
-        return;
-      }
-      if (!nearbyChannel.inferenceReady()) {
-        this.appendLine('Error', '算力端版本不支持', BubbleKind.ERROR);
-        return;
-      }
-      const negotiate = await inferenceClient.ensureReady();
-      if (!this.isCurrentRemoteRun(generation)) { return; }
-      this.refreshLinkChrome();
-      if (negotiate.length > 0) {
-        this.appendLine('Error', negotiate, BubbleKind.ERROR);
-        return;
-      }
-      reporter = new TaskReporter('t' + startedAt.toString(36) + '_' + generation.toString(36) + '_' +
-        Math.floor(Math.random() * 1679616).toString(36), task, startedAt,
-        (snapshot: TaskSnapshot): void => inferenceClient.publishTask(snapshot));
-      this.activeTaskReporter = reporter;
-      this.updateTaskProgress('running');
-      if (!useAgent) {
-        const prompt = buildPlainChatPrompt(task, inferenceClient.promptBudgetBytes());
-        const answer = await inferenceClient.complete(prompt, {
-          label: '普通聊天', taskId: reporter.id, subtaskId: 'main',
-          onPhase: (state: string): void => {
-            if (this.isCurrentRemoteRun(generation)) { this.setLivePhase(remotePhaseText(state)); }
-          },
-          onStart: (): void => {
-            if (this.isCurrentRemoteRun(generation)) { this.beginLiveReply(); }
-          },
-          onDelta: (text: string): void => {
-            if (this.isCurrentRemoteRun(generation)) { this.commitLiveAnswer(text); }
-          }
-        }, null, imagePayload);
-        if (!this.isCurrentRemoteRun(generation)) { return; }
-        if (answer.trim().length === 0) { throw new Error('算力未返回回答，请重试'); }
-        finalAnswer = answer;
-        this.commitLiveAnswer(answer);
-        return;
-      }
-      const context = this.getAbilityContext();
-      const skillSnapshot = this.skillSnapshot ?? await createSkillSnapshot(context);
-      if (!this.isCurrentRemoteRun(generation)) { return; }
-      this.skillSnapshot = skillSnapshot;
-      if (!this.toolRegistryIncludesSkills) {
-        const oldTools = this.toolRegistryPromise;
-        oldTools?.then(async (registry: ToolRegistry): Promise<void> => registry.close()).catch((_error: Error): void => {});
-        this.toolRegistryPromise = createConfiguredLoopToolRegistry(context, skillSnapshot);
-        this.toolRegistryIncludesSkills = true;
-      }
-      const pendingTools = this.toolRegistryPromise;
-      if (pendingTools === null) {
-        this.appendLine('Error', '工具尚未就绪', BubbleKind.ERROR);
-        return;
-      }
-      const tools = await pendingTools;
-      if (!this.isCurrentRemoteRun(generation)) { return; }
-      // Hooks belong to this run's model only, so a superseded run can never
-      // drive the next run's placeholder.
-      const model = new RemoteComputeModel({
-        taskId: reporter.id, subtaskId: 'main',
-        onStart: (): void => {
-          if (!this.isCurrentRemoteRun(generation)) { return; }
-          this.beginLiveReply();
-          this.setLivePhase(LIVE_PLACEHOLDER);
-        },
-        onDelta: (text: string): void => {
-          if (this.isCurrentRemoteRun(generation)) { this.showLiveReply(text); }
-        },
-        onPhase: (state: string): void => {
-          if (this.isCurrentRemoteRun(generation)) { this.setLivePhase(remotePhaseText(state)); }
-        }
-      });
-      // 附图随本轮**第一次**模型调用发出，RemoteComputeModel 用完即清。
-      // 只在确有图片时调用：本轮 model 是新建的，本就无需清空，也让不涉及图片的
-      // 调用方（含测试替身）不必实现这个 setter。
-      if (imagePayload.length > 0) {
-        model.setImage(imagePayload);
-      }
-      const runner = new ReActAgentRunner(
-        model, tools, MAX_STEPS, skillSnapshot, true, false, true,
-        (): number => inferenceClient.promptBudgetBytes(), false, true);
-      this.activeRunner = runner;
-      this.processId = -1;
-      this.liveReplyId = -1;
-      this.liveReplyPending = false;
-      const listener = (event: AgentEvent): void => {
-        if (!this.isCurrentRemoteRun(generation)) { return; }
-        if (event.kind === AgentEventKind.ACTION || event.kind === AgentEventKind.OBSERVATION ||
-          event.kind === AgentEventKind.SKILL || event.kind === AgentEventKind.THOUGHT) {
-          if (event.kind === AgentEventKind.ACTION || event.kind === AgentEventKind.OBSERVATION) {
-            reporter?.record(event.kind, event.text, event.toolName, event.input);
-          }
-          this.appendProcess(event);
-          if (event.kind === AgentEventKind.ACTION) {
-            this.setLivePhase(LIVE_TOOL_PREFIX + (event.toolName ?? '工具') + '…');
-          } else if (event.kind === AgentEventKind.OBSERVATION) {
-            this.setLivePhase(LIVE_COMPOSING);
-          }
-          return;
-        }
-        if (event.kind === AgentEventKind.FINAL) {
-          finalAnswer = event.text;
-          finalPartial = event.status === PARTIAL_FINAL_STATUS;
-          this.finishInferenceMetricsTask();
-          this.commitLiveAnswer(event.text);
-          return;
-        }
-        if (event.kind === AgentEventKind.ERROR) failureText = event.text;
-        if (event.kind === AgentEventKind.ERROR && event.text === INFERENCE_STOPPED) {
-          this.dropLivePlaceholder();
-          if (this.liveReplyId < 0) {
-            this.appendLine('Loop', INFERENCE_STOPPED, BubbleKind.LOOP);
-          }
-          return;
-        }
-        if (event.kind === AgentEventKind.ERROR) {
-          this.dropLivePlaceholder();
-        }
-        this.addEvent(event);
-      };
-      const conversation = this.buildRemoteConversation();
-      // 不拆分的 Agent 直接走下面的单模型工具循环。拆分模式才把独立子任务分到空闲算力。
-      // 带图请求同样不拆：并行分支会为每个子任务新建 RemoteComputeModel，附图只注入到
-      // 上面这一个主模型。
-      let handled = false;
-      if (imagePayload.length === 0 && mode === 'agent_split') {
-        const parallel = this.createParallelRunner(generation, tools, skillSnapshot);
-        this.activeParallel = parallel;
-        handled = await parallel.tryRun(task, conversation, this.parallelObserver(generation, reporter), listener, startedAt + 300000, reporter.id);
-      }
-      if (!handled && this.isCurrentRemoteRun(generation)) {
-        this.parallelHeader = '';
-        this.parallelViews = [];
-        this.setLivePhase(LIVE_PLACEHOLDER);
-        await runner.run(task, listener, conversation, { namespace: '', goals: [], evidence: [], deadlineAt: startedAt + 300000 });
-      }
-    } catch (error) {
-      if (this.isCurrentRemoteRun(generation)) {
-        this.dropLivePlaceholder();
-        const message = error instanceof Error ? error.message : '远程推理失败';
-        failureText = message;
-        this.appendLine('Error', message, BubbleKind.ERROR);
-      }
-    } finally {
-      reporter?.finish(this.isCurrentRemoteRun(generation) ?
-        (finalAnswer !== null ? (finalPartial ? 'partial' : 'done') : 'failed') : 'cancelled', finalAnswer ?? failureText);
-      if (this.activeTaskReporter === reporter) this.activeTaskReporter = null;
-      // A disposed or superseded run must not clear the next run's listeners
-      // or persist a late answer. Stop invalidates the generation immediately.
-      if (this.pageActive && generation === this.remoteRunGeneration) {
-        this.updateTaskProgress(finalAnswer !== null ? (finalPartial ? 'partial' : 'done') : 'failed');
-        this.finishInferenceMetricsTask();
-        if (!this.stopRequested && finalAnswer !== null) {
-          // A partial report keeps the question for follow-ups but is not a
-          // resolved answer that later turns may treat as established context.
-          this.conversation.addUser(display);
-          this.conversation.addAssistant(finalPartial ? PARTIAL_HISTORY_NOTE : finalAnswer);
-          saveConversation(this.getAbilityContext(), this.conversation);
-        } else {
-          this.dropLivePlaceholder();
-        }
-        this.sending = false;
-        this.stopRequested = false;
-        this.activeRunner = null;
-        this.activeParallel = null;
-        this.parallelHeader = '';
-        this.parallelViews = [];
-        this.liveReplyId = -1;
-        this.liveReplyPending = false;
-        this.processId = -1;
-        this.setCollaborationKeepScreenOn(false);
-      }
-    }
-  }
+
 
   private beginTaskProgress(kind: string, startedAt: number): void {
     const bubble = this.createChatBubble('Task', '', BubbleKind.TASK);
@@ -1908,108 +1881,20 @@ struct Index {
     if (!taskProgressActive(phase)) { this.activeTaskProgressId = -1; }
   }
 
-  private createParallelRunner(generation: number, tools: ToolRegistry, skillSnapshot: SkillSnapshot): ParallelTaskRunner {
-    // Owners are per run and per sub-task, so stopping one never cancels another's requests.
-    const owner = (name: string): string => 'p' + generation.toString() + ':' + name;
-    const deps: ParallelDeps = {
-      modelFor: (id: string, hooks: SubtaskModelHooks): LocalModel =>
-        new RemoteComputeModel({ owner: owner(id), onAccepted: hooks.onAccepted, label: hooks.label,
-          taskId: hooks.taskId, subtaskId: hooks.subtaskId }),
-      splitModel: (taskId?: string): LocalModel => new RemoteComputeModel({ owner: owner('split'), label: '任务拆分', taskId: taskId, subtaskId: 'plan' }),
-      mergeModel: (taskId?: string): LocalModel => new RemoteComputeModel({ owner: owner('merge'), label: '合并结果', taskId: taskId, subtaskId: 'merge' }),
-      tools: tools,
-      skills: skillSnapshot,
-      maxSteps: MAX_STEPS,
-      maxPromptBytes: (): number => inferenceClient.promptBudgetBytes(),
-      load: (): ClusterSize => {
-        const info = inferenceClient.clusterLoad();
-        const size: ClusterSize = { idle: info.idle, total: info.total };
-        return size;
-      }
-    };
-    return new ParallelTaskRunner(deps);
-  }
+
 
   /** Sub-task rows live in the placeholder bubble until the merged answer replaces it. */
-  private parallelObserver(generation: number, reporter?: TaskReporter): ParallelObserver {
-    const observer: ParallelObserver = {
-      onTask: (task: ParallelTaskSnapshot): void => {
-        if (!this.isCurrentRemoteRun(generation) && task.phase !== 'cancelled') { return; }
-        const subtasks: TaskChildSnapshot[] = [];
-        for (const child of task.subtasks) {
-          const copy: TaskChildSnapshot = {
-            id: child.id, title: child.title, input: child.input, activity: child.activity, device: child.device, phase: child.phase,
-            detail: child.detail, result: child.result, resultTruncated: child.resultTruncated,
-            startedAt: child.startedAt, endedAt: child.endedAt
-          };
-          subtasks.push(copy);
-        }
-        const snapshot: TaskSnapshot = {
-          id: task.id, title: task.title, phase: task.phase, revision: task.revision,
-          startedAt: task.startedAt, endedAt: task.endedAt, answer: task.answer, answerTruncated: task.answerTruncated, subtasks: subtasks
-        };
-        if (reporter !== undefined) reporter.update(snapshot);
-        else inferenceClient.publishTask(snapshot);
-      },
-      onPhase: (text: string): void => {
-        if (!this.isCurrentRemoteRun(generation)) { return; }
-        this.beginLiveReply();
-        this.parallelHeader = text;
-        this.renderParallel();
-      },
-      onPlan: (views: SubtaskView[]): void => {
-        if (!this.isCurrentRemoteRun(generation)) { return; }
-        this.beginLiveReply();
-        this.parallelViews = views;
-        this.parallelHeader = '已拆分为 ' + views.length.toString() + ' 个独立任务，并行处理：';
-        this.renderParallel();
-      },
-      onProcess: (event: AgentEvent): void => {
-        if (!this.isCurrentRemoteRun(generation)) { return; }
-        this.appendProcess(event);
-      },
-      onUpdate: (view: SubtaskView): void => {
-        if (!this.isCurrentRemoteRun(generation)) { return; }
-        this.parallelViews = this.parallelViews.map((item: SubtaskView): SubtaskView => item.id === view.id ? view : item);
-        this.renderParallel();
-      }
-    };
-    return observer;
-  }
 
-  private renderParallel(): void {
-    let text = this.parallelHeader;
-    for (let index = 0; index < this.parallelViews.length; index++) {
-      const view = this.parallelViews[index];
-      text += '\n' + (index + 1).toString() + '. ' + view.title +
-        (view.device.length > 0 ? ' · ' + view.device : '') + ' · ' + view.detail;
-    }
-    this.setLivePhase(text);
-  }
+
+
 
   private sendEnabled(): boolean {
     return this.canSend();
   }
 
   private stopGeneration(): void {
-    if (!this.sending) { return; }
-    this.updateTaskProgress('cancelled');
-    this.stopRequested = true;
-    this.remoteRunGeneration++;
-    this.activeRunner?.requestStop();
-    this.activeRunner = null;
-    this.activeParallel?.requestStop();
-    this.activeTaskReporter?.finish('cancelled');
-    this.activeTaskReporter = null;
-    this.activeParallel = null;
-    inferenceClient.cancelActive();
-    this.dropLivePlaceholder();
-    this.finishInferenceMetricsTask();
-    this.sending = false;
-    this.linkBusy = false;
-    this.processId = -1;
-    this.setCollaborationKeepScreenOn(false);
-    if (this.pageActive) { this.appendLine('Loop', INFERENCE_STOPPED, BubbleKind.LOOP); }
+    this.cancelSessionTasks(this.selectedSessionId);
+    if (this.pageActive) { this.persistTabletSessions(); this.drainTaskQueue(); }
   }
 
   private beginLiveReply(): void {
@@ -2258,16 +2143,19 @@ struct Index {
       if (session.title === '新会话' || session.title === '新对话') { session.title = shown.substring(0, 28); }
       session.draft = ''; session.pendingKind = ''; session.pendingName = ''; session.pendingPath = ''; session.pendingLocal = '';
       if (this.selectedSessionId === sessionId) { this.message = ''; this.clearAttachment(); }
-      this.taskQueue = [...this.taskQueue, { id: this.nextQueuedTaskId++, sessionId: sessionId, mode: mode,
-        task: task, display: shown, imagePath: imagePath, imagePayload: imagePayload }];
+      const id = this.nextQueuedTaskId++;
+      this.ledgerFor(session).reserve(id, shown);
+      this.taskQueue = [...this.taskQueue, { id: id, sessionId: sessionId, mode: mode,
+        task: task, display: shown, imagePath: imagePath, imagePayload: imagePayload,
+        presentationEpoch: session.presentationEpoch, history: this.buildRemoteConversation(session.conversation) }];
       this.drainTaskQueue().catch((_error: Error): void => { this.attachError = '任务执行失败，请重试。'; });
     } catch (error) {
       this.attachError = error instanceof Error ? error.message : '附件编码失败';
     } finally { this.preparingSubmission = false; }
   }
   /** Most recent whole exchanges within a fixed budget, oldest dropped first. */
-  private buildRemoteConversation(): ConversationContext {
-    const turns = this.conversation.toChatMessages();
+  private buildRemoteConversation(conversation: ConversationContext = this.conversation): ConversationContext {
+    const turns = conversation.toChatMessages();
     let start = Math.max(0, turns.length - REMOTE_HISTORY_TURNS);
     while (start < turns.length && turns[start].role !== ConversationRole.USER) {
       start++;

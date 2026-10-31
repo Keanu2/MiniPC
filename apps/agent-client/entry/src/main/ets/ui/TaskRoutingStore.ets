@@ -96,7 +96,8 @@ export class TaskRoutingStore {
   snapshot(calls: RoutingCall[], selfLabel: string, selfUid: string, connected: boolean, readyEpoch: number, connectedHub: DeviceInfoEntry | null = null): string {
     if (!connected || (this.epoch >= 0 && this.epoch !== readyEpoch)) { this.clear(); }
     const devices: RouteDevice[] = this.roster.map((device: DeviceInfoEntry, index: number): RouteDevice => ({
-      id: device.deviceUid || device.id || 'roster-' + index, name: device.name || (device.role === 'chat' ? '聊天设备' : '算力设备') + (device.slot || ''),
+      id: device.deviceUid || device.id || 'roster-' + index, name: device.slot !== undefined && device.slot > 0 ?
+        (device.role === 'chat' ? '聊天设备' : '算力设备') + device.slot : (device.name || (device.role === 'chat' ? '聊天设备' : '算力设备')),
       role: device.role === 'chat' ? 'chat' : 'compute', ready: device.ready !== false,
       jobs: device.modelRequests ?? 0, model: device.model, memUsage: device.memUsage,
       capabilities: device.capabilities

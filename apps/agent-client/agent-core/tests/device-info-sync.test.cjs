@@ -11,7 +11,8 @@ const snapshot=store=>JSON.parse(store.snapshot([],'聊天设备1','chat',true,7
  assert.equal(device.memUsage,62);assert.equal(device.model,'Qwen-VL');assert.equal(device.jobs,2);assert.deepEqual(device.capabilities,['text','vision']);
  store.receive({type:'deviceInfo',requestId:'poll',capabilities:[]},7,hub);
  assert.equal(snapshot(store).devices.find(d=>d.id==='hub').memUsage,62,'an empty poll is not a telemetry update');
- store.receive({type:'deviceInfoSync',devices:[{id:'hub',role:'self',ready:true,slot:1,capabilities:[]},{id:'worker',role:'compute',ready:true,slot:2,model:'text',memUsage:45}]},7,hub);
+ store.receive({type:'deviceInfoSync',devices:[{id:'hub',role:'self',ready:true,slot:1,capabilities:[]},{id:'worker',name:'Hardware Name',role:'compute',ready:true,slot:2,model:'text',memUsage:45}]},7,hub);
+ assert.equal(snapshot(store).devices.find(d=>d.id==='worker').name,'算力设备2');
  device=snapshot(store).devices.find(d=>d.id==='hub');assert.equal(device.memUsage,62);assert.equal(device.model,'Qwen-VL');assert.deepEqual(device.capabilities,['text','vision']);
  store.receive({type:'deviceInfo',modelRequests:0},7,hub);device=snapshot(store).devices.find(d=>d.id==='hub');assert.equal(device.jobs,0);assert.equal(device.memUsage,62);
  store.receive({type:'deviceInfo',memUsage:70},7,hub);assert.equal(snapshot(store).devices.find(d=>d.id==='hub').memUsage,70);
@@ -19,7 +20,7 @@ const snapshot=store=>JSON.parse(store.snapshot([],'聊天设备1','chat',true,7
  assert.equal(snapshot(store).devices.filter(d=>d.role==='compute').length,1,'roster removal must not retain departed workers');
  store.clear();assert.equal(snapshot(store).devices.find(d=>d.id==='hub').memUsage,undefined,'disconnect clears telemetry');
  const sent=[];const poller=new DeviceInfoPoller(async(message,epoch)=>{sent.push({message,epoch});return true;});
- poller.poll(7,100);poller.poll(7,1000);assert.equal(sent.length,1);assert.deepEqual(Array.from(sent[0].message.capabilities),[]);
+ poller.poll(7,100);poller.poll(7,1000);assert.equal(sent.length,1);assert.deepEqual(Array.from(sent[0].message.capabilities),[]);assert.equal(sent[0].message.source,'tablet-roster');
  poller.acknowledge({type:'deviceInfo',requestId:sent[0].message.requestId},7);poller.poll(7,2000);assert.equal(sent.length,1,'reply does not remove the rate limit');
  poller.poll(7,5100);assert.equal(sent.length,2);poller.poll(7,10200);assert.equal(sent.length,3,'missing reply permits a bounded retry');
  poller.poll(-1,10201);assert.equal(sent.length,3);poller.poll(8,10202);assert.equal(sent.length,4,'reconnect queries immediately');
@@ -36,5 +37,14 @@ const snapshot=store=>JSON.parse(store.snapshot([],'聊天设备1','chat',true,7
  assert.equal(settings.loadTabletPreferences({}).routingCollapsed,true);
  assert.equal(settings.normalizeTabletPreferences({quickInputs:[],sidebarWidth:200}).routingCollapsed,false,'older settings keep routing expanded');
  const p=new box.exports.Page();p.quickInputs=['任意文本','其他文本','第三段'];assert.equal(p.quickInputLabel(0),'快捷输入1');assert.equal(p.quickInputLabel(1),'快捷输入2');assert.equal(p.quickInputLabel(2),'快捷输入3');
+ // Querying the existing endpoint also requests a fresh complete membership list.
+ const computeSource=fs.readFileSync(path.resolve(__dirname,'../../../compute-node/entry/src/main/ets/pages/Index.ets'),'utf8').replace(/\r\n/g,'\n');
+ const hs=computeSource.indexOf('  private handleDeviceInfo('),he=computeSource.indexOf('\n  }',hs)+4;
+ const hostBox={exports:{}};vm.runInNewContext(ts.transpileModule('class Host {'+computeSource.slice(hs,he)+'} exports.Host=Host;', {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,hostBox);
+ const host=new hostBox.exports.Host(),events=[];
+ Object.assign(host,{rosterDeliveries:new Map([[7,{}]]),isComputeHub:()=>true,replyDeviceInfo:(id,epoch)=>events.push(['info',epoch]),pollDeviceInfo:()=>events.push(['roster'])});
+ host.handleDeviceInfo({type:'deviceInfo',requestId:'query',source:'tablet-roster',capabilities:[]},7);
+ assert.deepEqual(events,[['info',7],['roster']]);assert.equal(host.rosterDeliveries.has(7),false);
+ events.length=0;host.handleDeviceInfo({type:'deviceInfo',requestId:'ordinary-poll',capabilities:[]},7);assert.deepEqual(events,[['info',7]],'ordinary peers keep the existing endpoint behavior');
  console.log('PASS single-device telemetry, compact roster merging, membership removal, bounded polling, reconnect, capability validation and stable shortcut names');
 })().catch(e=>{console.error(e);process.exitCode=1;});

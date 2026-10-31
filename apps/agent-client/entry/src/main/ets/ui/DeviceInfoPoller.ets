@@ -22,7 +22,7 @@ export class DeviceInfoPoller {
     const id = 'tablet-info-' + epoch + '-' + (++this.serial);
     this.pendingId = id; this.nextAt = now + 5000; this.deadlineAt = now + 4000;
     try {
-      this.send({ type: 'deviceInfo', requestId: id, capabilities: [] }, epoch).then((sent: boolean): void => {
+      this.send({ type: 'deviceInfo', requestId: id, capabilities: [], source: 'tablet-roster' }, epoch).then((sent: boolean): void => {
         if (!sent && this.epoch === epoch && this.pendingId === id) { this.pendingId = ''; }
       }).catch((_error: Error): void => {
         if (this.epoch === epoch && this.pendingId === id) { this.pendingId = ''; }

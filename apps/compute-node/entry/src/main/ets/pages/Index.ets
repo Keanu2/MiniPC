@@ -1495,7 +1495,14 @@ struct Index {
       this.relay?.publishLoad();
       return;
     }
-    if (message.requestId) this.replyDeviceInfo(message.requestId, epoch);
+    if (message.requestId) {
+      this.replyDeviceInfo(message.requestId, epoch);
+      // Tablet clients explicitly request the complete membership, including idle workers.
+      if (message.source === 'tablet-roster' && this.isComputeHub()) {
+        this.rosterDeliveries.delete(epoch);
+        this.pollDeviceInfo();
+      }
+    }
   }
 
   private handleClusterSync(message: WireMessage, epoch: number): void {

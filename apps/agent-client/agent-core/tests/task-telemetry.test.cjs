@@ -43,6 +43,15 @@ const flush=async()=>{for(let i=0;i<10;i++)await Promise.resolve()};
   assert.equal(client.routingCalls()[0].phase,'running','stale status cannot change the route');
   // Settle the model promise without starting a platform model.
   const call=client.calls.get(request.requestId);clearTimeout(call.timer);client.calls.delete(request.requestId);call.resolve('ok');assert.equal(await pending,'ok');assert.equal(client.routingCalls().length,0,'completed calls leave the live route');
+  const first=client.complete('并发一',{owner:'parallel-one'}).catch(error=>error.message);
+  const firstId=sent.at(-1)[0].requestId;
+  const second=client.complete('并发二',{owner:'parallel-two'});
+  const secondId=sent.at(-1)[0].requestId;
+  assert.notEqual(firstId,secondId);assert.equal(client.calls.size,2,'actual client sends two requests before either completes');
+  client.cancelOwner('parallel-one');assert.equal(client.calls.has(secondId),true,'owner cancellation leaves the other request active');
+  client.onMessage({type:'infer.error',requestId:firstId},8);
+  const secondCall=client.calls.get(secondId);clearTimeout(secondCall.timer);client.calls.delete(secondId);secondCall.resolve('第二条完成');
+  assert.equal(await first,'已停止生成');assert.equal(await second,'第二条完成');
   const hostSent=[];let shown;
   const {InferenceHost,InferCardHooks}=load(path.resolve(__dirname,'../../../../apps/compute-node/entry/src/main/ets/llm/InferenceHost.ets'),{
     './QwenVlManager':{QwenVlManager:{getInstance:()=>({isBusy:()=>false,unloadIfIdle(){}})}},
