@@ -447,7 +447,7 @@ struct Index {
 
   private initializeTabletSessions(): void {
     const initial: TabletSession = {
-      id: 's' + this.nextSessionId++, title: this.messages.length > 0 ? '历史会话' : '新会话',
+      id: 's' + this.nextSessionId++, title: this.messages.length > 0 ? '历史会话' : '新对话',
       messages: this.messages, conversation: this.conversation, draft: '',
       pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: ''
     };
@@ -490,17 +490,28 @@ struct Index {
     this.attachError = '';
   }
 
+  private isEmptyTabletSession(session: TabletSession): boolean {
+    return (session.title === '新对话' || session.title === '新会话') && session.messages.length === 0 &&
+      session.draft.trim().length === 0 && session.pendingPath.length === 0 &&
+      !(this.sending && session.id === this.engineSessionId) &&
+      !this.taskQueue.some((task: TabletQueuedTask): boolean => task.sessionId === session.id);
+  }
+
   private newSession(): void {
+    this.captureEngineSession();
+    this.saveSelectedDraft();
+    const empty = this.sessions.find((session: TabletSession): boolean => this.isEmptyTabletSession(session));
+    if (empty !== undefined) { this.selectSession(empty.id); return; }
     const id = 's' + this.nextSessionId++;
     this.sessions = [...this.sessions, {
-      id: id, title: '新会话', messages: [], conversation: new ConversationContext(), draft: '',
+      id: id, title: '新对话', messages: [], conversation: new ConversationContext(), draft: '',
       pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: ''
     }];
     this.selectSession(id);
   }
 
   private selectedSessionTitle(): string {
-    return this.sessions.find((session: TabletSession): boolean => session.id === this.selectedSessionId)?.title ?? '新会话';
+    return this.sessions.find((session: TabletSession): boolean => session.id === this.selectedSessionId)?.title ?? '新对话';
   }
 
   private sessionStatus(id: string): string {
@@ -542,7 +553,7 @@ struct Index {
     if (!this.canClearSession()) { return; }
     this.sessions = this.sessions.map((session: TabletSession): TabletSession => {
       if (session.id === this.selectedSessionId) {
-        session.messages = []; session.conversation = new ConversationContext(); session.title = '新会话';
+        session.messages = []; session.conversation = new ConversationContext(); session.title = '新对话';
         if (session.id === this.engineSessionId) {
           this.messages = []; this.conversation = session.conversation;
         }
@@ -603,12 +614,18 @@ struct Index {
       const saved = JSON.parse(fs.readTextSync(this.getAbilityContext().filesDir + '/tablet-sessions.json')) as StoredTabletSession[];
       if (!Array.isArray(saved) || saved.length === 0) { return; }
       const restored: TabletSession[] = [];
+      let restoredEmpty = false;
       for (const item of saved) {
         if (typeof item.title !== 'string' || typeof item.transcript !== 'string') { continue; }
         const conversation = ConversationContext.fromMessages(JSON.parse(item.transcript));
-        restored.push({ id: 's' + this.nextSessionId++, title: item.title, conversation: conversation,
+        const session: TabletSession = { id: 's' + this.nextSessionId++, title: item.title, conversation: conversation,
           messages: this.buildMessagesFromConversation(conversation), draft: item.draft ?? '',
-          pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '' });
+          pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '' };
+        if (this.isEmptyTabletSession(session)) {
+          if (restoredEmpty) { continue; }
+          restoredEmpty = true; session.title = '新对话';
+        }
+        restored.push(session);
       }
       if (restored.length === 0) { return; }
       this.sessions = restored;
@@ -2238,7 +2255,7 @@ struct Index {
       if (!this.pageActive) { return; }
       const session = this.sessions.find((item: TabletSession): boolean => item.id === sessionId);
       if (session === undefined) { return; }
-      if (session.title === '新会话') { session.title = shown.substring(0, 28); }
+      if (session.title === '新会话' || session.title === '新对话') { session.title = shown.substring(0, 28); }
       session.draft = ''; session.pendingKind = ''; session.pendingName = ''; session.pendingPath = ''; session.pendingLocal = '';
       if (this.selectedSessionId === sessionId) { this.message = ''; this.clearAttachment(); }
       this.taskQueue = [...this.taskQueue, { id: this.nextQueuedTaskId++, sessionId: sessionId, mode: mode,
