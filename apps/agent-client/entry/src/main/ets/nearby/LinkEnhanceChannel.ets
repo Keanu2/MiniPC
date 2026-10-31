@@ -5,7 +5,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { connection as btConnection, ble } from '@kit.ConnectivityKit';
 import { util } from '@kit.ArkTS';
-import { encodeMessage, MessageAssembler, FragmentReceipt, WireMessage } from '../protocol/ChatProtocol';
+import { encodeMessage, MessageAssembler, FragmentReceipt, DeviceInfoEntry, WireMessage } from '../protocol/ChatProtocol';
 import { COMPUTE_ADV_KEY_BYTES, COMPUTE_ADV_TYPE, COMPUTE_MANUFACTURE_ID, IS_SERVER } from './NearbyConfig';
 
 const BUNDLE = 'com.jiuwen.registrychatui';
@@ -340,6 +340,17 @@ export class LinkEnhanceChannel {
   readyEpoch(): number {
     const peer = this.peers.find((item: Peer) => item.ready);
     return peer === undefined ? -1 : peer.epoch;
+  }
+
+  /** A real, handshake-complete compute connection, available before any roster broadcast. */
+  connectedComputeInfo(): DeviceInfoEntry | null {
+    if (IS_SERVER) { return null; }
+    const peer = this.peers.find((item: Peer): boolean => item.ready);
+    if (peer === undefined) { return null; }
+    const hit = this.lastHits.find((item: BleHit): boolean => this.idsMatch(item.mac, peer.peerId));
+    return { id: peer.deviceUid || peer.peerId, deviceUid: peer.deviceUid || undefined,
+      name: hit !== undefined && hit.slot > 0 ? '算力设备' + hit.slot : '算力设备',
+      role: 'compute', ready: true, slot: hit !== undefined && hit.slot > 0 ? hit.slot : undefined };
   }
 
   async prepare(): Promise<void> {

@@ -50,7 +50,7 @@ export class TaskRoutingStore {
     }
   }
   clear(): void { this.roster = []; this.epoch = -1; this.flows.clear(); this.revisions.clear(); }
-  snapshot(calls: RoutingCall[], selfLabel: string, selfUid: string, connected: boolean, readyEpoch: number): string {
+  snapshot(calls: RoutingCall[], selfLabel: string, selfUid: string, connected: boolean, readyEpoch: number, connectedHub: DeviceInfoEntry | null = null): string {
     if (!connected || (this.epoch >= 0 && this.epoch !== readyEpoch)) { this.clear(); }
     const devices: RouteDevice[] = this.roster.map((device: DeviceInfoEntry, index: number): RouteDevice => ({
       id: device.deviceUid || device.id || 'roster-' + index, name: device.name || (device.role === 'chat' ? '聊天设备' : '算力设备') + (device.slot || ''),
@@ -58,6 +58,12 @@ export class TaskRoutingStore {
       jobs: device.modelRequests ?? 0, model: device.model, memUsage: device.memUsage,
       capabilities: device.capabilities
     }));
+    // A completed handshake is enough to show the connected hub. Older compute builds
+    // do not broadcast rosters to chat peers, and newer rosters can arrive later.
+    if (connected && connectedHub !== null && !devices.some((device: RouteDevice): boolean => device.role === 'compute')) {
+      devices.push({ id: connectedHub.deviceUid || connectedHub.id || 'connected:' + readyEpoch,
+        name: connectedHub.name || '算力设备', role: 'compute', ready: true, jobs: 0 });
+    }
     if (!devices.some((device: RouteDevice): boolean => device.id === selfUid)) {
       devices.push({ id: selfUid, name: selfLabel, role: 'chat', ready: true, jobs: 0 });
     }
@@ -65,11 +71,17 @@ export class TaskRoutingStore {
     const queued: RouteJob[] = [];
     for (const call of calls) {
       if (!connected) { break; }
+      if (connectedHub !== null && call.device === '算力设备1') {
+        const hubId = connectedHub.deviceUid || connectedHub.id || 'connected:' + readyEpoch;
+        const hub = devices.find((device: RouteDevice): boolean => device.id === hubId);
+        if (hub !== undefined && hub.name === '算力设备') { hub.name = call.device; }
+      }
       // An accepted public device label is evidence even before the first roster arrives.
       if (call.device.length > 0 && !devices.some((device: RouteDevice): boolean => device.name === call.device)) {
         devices.push({ id: 'accepted:' + call.device, name: call.device, role: 'compute', ready: true, jobs: 1 });
       }
-      const job: RouteJob = { id: call.id, key: 'client:' + call.id, source: call.device,
+      const job: RouteJob = { id: call.id, key: 'client:' + call.id,
+        source: call.device || (call.phase === 'sending' && connectedHub !== null ? connectedHub.name || '算力设备' : ''),
         origin: selfLabel, originId: selfUid, question: call.question, kind: call.image.length > 0 ? 'image' : 'text',
         image: call.image.length > 0 ? 'data:image/jpeg;base64,' + call.image : '', phase: call.phase,
         running: call.phase !== 'queued', startedAt: call.startedAt, phaseStartedAt: call.startedAt };

@@ -54,8 +54,6 @@ import {
   CollaborationStatus
 } from '../llm/CollaborationController';
 
-// Target tablet display: 127 mm wide × 198 mm high. ArkUI lays out in vp.
-const TABLET_DISPLAY_RATIO = 127 / 198;
 const MAX_STEPS = 10;
 const LIVE_PLACEHOLDER = '正在生成…';
 const LIVE_TOOL_PREFIX = '正在调用工具：';
@@ -275,16 +273,16 @@ struct Index {
   @State tabletSettingsMessage: string = '';
   @State sidebarCollapsed: boolean = false;
   @State sidebarWidth: number = 200;
-  @State routingJson: string = '{}';
+  @State viewportWidth: number = 720;
+  @State viewportHeight: number = 1000;
   private sidebarResizeStart: number = 200;
+  @State routingJson: string = '{}';
   private routingStore: TaskRoutingStore = new TaskRoutingStore();
   @State sessions: TabletSession[] = [];
   @State selectedSessionId: string = '';
   @State engineSessionId: string = '';
   @State taskQueue: TabletQueuedTask[] = [];
   @State preparingSubmission: boolean = false;
-  @State tabletWidth: number = 768;
-  @State tabletHeight: number = 768 / TABLET_DISPLAY_RATIO;
   @State clusterSummary: string = '等待算力连接';
   private queueDraining: boolean = false;
   private nextSessionId: number = 1;
@@ -399,6 +397,10 @@ struct Index {
     return text.length > 0 ? (text.length > 12 ? text.substring(0, 12) + '…' : text) : '快捷输入 ' + (index + 1);
   }
 
+  private sidebarIsCompact(): boolean {
+    return this.sidebarCollapsed;
+  }
+
   private toggleSessionSidebar(): void {
     this.sidebarCollapsed = !this.sidebarCollapsed;
     this.persistTabletPreferences();
@@ -428,7 +430,7 @@ struct Index {
 
   private refreshRoutingView(): void {
     this.routingJson = this.routingStore.snapshot(inferenceClient.routingCalls(), nearbyChannel.selfLabel(),
-      nearbyChannel.localUid(), nearbyChannel.isConnected(), nearbyChannel.readyEpoch());
+      nearbyChannel.localUid(), nearbyChannel.isConnected(), nearbyChannel.readyEpoch(), nearbyChannel.connectedComputeInfo());
   }
 
   private initializeTabletSessions(): void {
@@ -541,7 +543,8 @@ struct Index {
   private refreshClusterSummary(): void {
     this.refreshRoutingView();
     const load = inferenceClient.clusterLoad();
-    this.clusterSummary = load.total > 0 ? '算力 ' + load.total + ' 台 · 空闲 ' + load.idle + ' 台' : '等待算力连接';
+    this.clusterSummary = load.total > 0 ? '算力 ' + load.total + ' 台 · 空闲 ' + load.idle + ' 台' :
+      (nearbyChannel.isConnected() ? '已连接 · 检查模型' : '等待算力连接');
   }
 
   private async drainTaskQueue(): Promise<void> {
@@ -663,11 +666,13 @@ struct Index {
   }
 
   build() {
-    if (this.settingsVisible) {
-      this.settingsPage();
-    } else {
-      this.chatPage();
-    }
+    Column() {
+      if (this.settingsVisible) { this.settingsPage(); } else { this.chatPage(); }
+    }.width('100%').height('100%').backgroundColor('#EEF6F3')
+      .onAreaChange((_old: Area, area: Area) => {
+        this.viewportWidth = Number(area.width);
+        this.viewportHeight = Number(area.height);
+      })
   }
 
   @Builder
@@ -774,190 +779,112 @@ struct Index {
 
   @Builder
   chatPage() {
-    Stack({ alignContent: Alignment.Center }) {
-      Row({ space: 8 }) {
-        this.sessionSidebar()
-        if (!this.sidebarCollapsed) {
-          Column() {
-            Column().width(4).height(56).backgroundColor('#B9D7CB').borderRadius(2)
-          }.width(12).height('100%').justifyContent(FlexAlign.Center).accessibilityText('左右拖动调整会话栏宽度')
-            .gesture(PanGesture({ direction: PanDirection.Horizontal })
-              .onActionStart(() => { this.sidebarResizeStart = this.sidebarWidth; })
-              .onActionUpdate((event: GestureEvent) => {
-                this.sidebarWidth = Math.max(160, Math.min(300, this.sidebarResizeStart + event.offsetX));
-              })
-              .onActionEnd(() => { this.persistTabletPreferences(); }))
-        }
-        Column({ space: 12 }) {
-          this.chatToolbar()
-          this.routingPanel()
-          Column() {
-            Row() {
-              Text('结果返回').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
-              Blank()
-              Text(this.selectedSessionTitle()).fontSize(12).fontColor('#6B7F79').maxLines(1)
-            }.width('100%').padding({ bottom: 10 })
-            this.chatResults()
-          }.layoutWeight(1).width('100%').padding(16).backgroundColor('#F7FBFA').borderRadius(20)
-          Row({ space: 8 }) {
-            ForEach([0, 1, 2], (index: number) => {
-              Button(this.quickInputLabel(index)).fontSize(12).height(36).fontColor('#0F8A74').backgroundColor('#E0F1EB')
-                .borderRadius(12).layoutWeight(1).enabled(this.quickInputs[index].trim().length > 0 && !this.preparingSubmission)
-                .onClick(() => { this.message = this.quickInputs[index]; })
-            }, (index: number) => index.toString())
-          }.width('100%')
-          this.chatComposer()
-        }.layoutWeight(1).height('100%')
-      }.width(this.tabletWidth).height(this.tabletHeight).padding(16).backgroundColor('#EEF6F3')
-    }.width('100%').height('100%').backgroundColor('#EEF6F3')
-      .onAreaChange((_old: Area, area: Area) => {
-        const availableWidth = Number(area.width);
-        const availableHeight = Number(area.height);
-        if (availableWidth > 0 && availableHeight > 0) {
-          this.tabletWidth = Math.min(availableWidth, availableHeight * TABLET_DISPLAY_RATIO);
-          this.tabletHeight = this.tabletWidth / TABLET_DISPLAY_RATIO;
-        }
-      })
+    Row({ space: 8 }) {
+      this.sessionSidebar()
+      if (!this.sidebarIsCompact()) {
+        Column() {
+          Column().width(4).height(52).backgroundColor('#B9D7CB').borderRadius(2)
+        }.width(10).height('100%').justifyContent(FlexAlign.Center).accessibilityText('左右拖动调整会话栏宽度')
+          .gesture(PanGesture({ direction: PanDirection.Horizontal })
+            .onActionStart(() => { this.sidebarResizeStart = this.sidebarWidth; })
+            .onActionUpdate((event: GestureEvent) => {
+              this.sidebarWidth = Math.max(160, Math.min(300, this.viewportWidth * 0.32, this.sidebarResizeStart + event.offsetX));
+            }).onActionEnd(() => { this.persistTabletPreferences(); }))
+      }
+      Column({ space: 10 }) {
+        this.chatToolbar()
+        this.routingPanel()
+        Column() {
+          Row() {
+            Text('结果返回').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
+            Blank()
+            Text(this.selectedSessionTitle()).fontSize(12).fontColor('#6B7F79').maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '46%' })
+          }.width('100%').padding({ bottom: 8 })
+          this.chatResults()
+        }.layoutWeight(2).constraintSize({ minHeight: 80 }).width('100%').padding(12)
+          .backgroundColor('#F7FBFA').borderRadius(16)
+        Row({ space: 8 }) {
+          ForEach([0, 1, 2], (index: number) => {
+            Button(this.quickInputLabel(index)).fontSize(12).height(36).fontColor('#0F8A74').backgroundColor('#E0F1EB')
+              .borderRadius(12).layoutWeight(1).enabled(this.quickInputs[index].trim().length > 0 && !this.preparingSubmission)
+              .accessibilityText(this.quickInputs[index])
+              .onClick(() => { this.message = this.quickInputs[index]; })
+          }, (index: number) => index.toString())
+        }.width('100%')
+        this.chatComposer()
+      }.layoutWeight(1).height('100%')
+    }.width('100%').height('100%').padding(this.viewportWidth < 600 ? 8 : 12).backgroundColor('#EEF6F3')
   }
 
   @Builder
   sessionSidebar() {
-    Column({ space: 12 }) {
-      Button(this.sidebarCollapsed ? '›' : '‹ 收起会话')
-        .height(40).width('100%').fontColor('#0F8A74').fontSize(14).backgroundColor(Color.White).borderRadius(12)
-        .accessibilityText(this.sidebarCollapsed ? '展开会话栏' : '收起会话栏')
-        .onClick(() => { this.toggleSessionSidebar(); })
-      if (this.sidebarCollapsed) {
+    Column({ space: 10 }) {
+      if (this.sidebarIsCompact()) {
+        Button('☰').height(36).width('100%').fontColor('#0F8A74').fontSize(13)
+          .backgroundColor(Color.White).borderRadius(12).accessibilityText('展开会话栏')
+          .onClick(() => { this.toggleSessionSidebar(); })
         Button('＋').height(40).width('100%').fontSize(20).fontColor(Color.White).backgroundColor('#0F8A74')
           .accessibilityText('新建会话').onClick(() => { this.newSession(); })
-        Scroll() {
-          Column({ space: 8 }) {
-            ForEach(this.sessions, (session: TabletSession, index: number) => {
+      } else {
+        Row({ space: 6 }) {
+          Button('新建会话').layoutWeight(1).height(38).fontSize(12).fontColor(Color.White)
+            .backgroundColor('#0F8A74').borderRadius(10).padding(4).onClick(() => { this.newSession(); })
+          Button('清空').height(38).fontSize(12).fontColor('#C4473A').backgroundColor(Color.White)
+            .borderRadius(10).padding({ left: 10, right: 10 }).enabled(this.canClearSession())
+            .onClick(() => { this.clearSelectedSession(); })
+        }.width('100%')
+        Button('‹ 收起会话').height(36).width('100%').fontColor('#0F8A74').fontSize(13)
+          .backgroundColor(Color.White).borderRadius(12).accessibilityText('收起会话栏')
+          .onClick(() => { this.toggleSessionSidebar(); })
+      }
+      Scroll() {
+        Column({ space: 8 }) {
+          ForEach(this.sessions, (session: TabletSession, index: number) => {
+            if (this.sidebarIsCompact()) {
               Button((index + 1).toString()).width('100%').height(40).fontSize(13).fontColor('#0F8A74')
                 .backgroundColor(session.id === this.selectedSessionId ? '#D8F3EA' : Color.White)
                 .accessibilityText(session.title).onClick(() => { this.selectSession(session.id); })
-            }, (session: TabletSession) => session.id)
-          }.width('100%')
-        }.layoutWeight(1).width('100%')
-      } else {
-      Text('Loopy').fontSize(23).fontWeight(FontWeight.Bold).fontColor('#16332C').width('100%')
-      Text('会话空间').fontSize(12).fontColor('#6B7F79').width('100%')
-      Button('＋ 新建会话').width('100%').height(44).fontSize(14).fontColor(Color.White)
-        .backgroundColor('#0F8A74').borderRadius(14).onClick(() => { this.newSession(); })
-      Scroll() {
-        Column({ space: 8 }) {
-          ForEach(this.sessions, (session: TabletSession) => {
-            Column({ space: 5 }) {
-              Text(session.title).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#16332C')
-                .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text(this.sessionStatus(session.id)).fontSize(12).fontColor('#6B7F79')
-            }.width('100%').alignItems(HorizontalAlign.Start).padding(12).borderRadius(14)
-              .backgroundColor(session.id === this.selectedSessionId ? '#D8F3EA' : Color.White)
-              .border({ width: 1, color: session.id === this.selectedSessionId ? '#0F8A74' : '#E3EDE8' })
-              .onClick(() => { this.selectSession(session.id); })
+            } else {
+              Column({ space: 5 }) {
+                Text(session.title).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#16332C')
+                  .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(this.sessionStatus(session.id)).fontSize(11).fontColor('#6B7F79')
+              }.width('100%').alignItems(HorizontalAlign.Start).padding(10).borderRadius(12)
+                .backgroundColor(session.id === this.selectedSessionId ? '#D8F3EA' : Color.White)
+                .border({ width: 1, color: session.id === this.selectedSessionId ? '#0F8A74' : '#E3EDE8' })
+                .onClick(() => { this.selectSession(session.id); })
+            }
           }, (session: TabletSession) => session.id)
         }.width('100%')
       }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
-      Text('任务可连续提交，结果按会话保存').fontSize(12).fontColor('#6B7F79').width('100%')
-      Button('清除待发送任务').fontSize(12).height(40).width('100%').fontColor('#C4473A')
-        .backgroundColor(Color.White).enabled(this.taskQueue.length > 0)
-        .onClick(() => { this.taskQueue = []; })
-      }
-    }.width(this.sidebarCollapsed ? 64 : Math.min(this.sidebarWidth, this.tabletWidth * 0.36)).height('100%')
-      .padding(this.sidebarCollapsed ? 8 : 14)
-      .backgroundColor('#F7FBFA').borderRadius(20).alignItems(HorizontalAlign.Start)
+      Button(this.sidebarIsCompact() ? '×' : '清除待发送任务').height(36).width('100%').fontSize(12)
+        .fontColor('#C4473A').backgroundColor(Color.White).enabled(this.taskQueue.length > 0)
+        .accessibilityText('清除待发送任务').onClick(() => { this.taskQueue = []; })
+    }.width(this.sidebarIsCompact() ? 56 : Math.min(this.sidebarWidth, this.viewportWidth * 0.32))
+      .height('100%').padding(this.sidebarIsCompact() ? 6 : 10).backgroundColor('#F7FBFA').borderRadius(16)
+      .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
   chatToolbar() {
-      Row() {
-        Image($r('app.media.icon'))
-          .width(36)
-          .height(36)
-          .borderRadius(12)
-          .objectFit(ImageFit.Cover)
-
-        Column() {
-          Text(this.titleText)
-            .fontSize(17)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#16332C')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-
-          Row() {
-            Circle()
-              .width(7)
-              .height(7)
-              .fill(this.statusColor())
-            Text(this.statusText)
-              .fontSize(12)
-              .fontColor(this.statusColor())
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .margin({ left: 6 })
-              .layoutWeight(1)
-          }
-          .padding({ left: 6, right: 8, top: 2, bottom: 2 })
-          .borderRadius(999)
-          .backgroundColor(this.statusFill())
-          .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        .margin({ left: 10 })
-
-        Button('⚙')
-          .fontSize(18)
-          .fontColor('#0F8A74')
-          .backgroundColor(Color.White)
-          .borderRadius(18)
-          .width(36)
-          .height(36)
-          .padding(0)
-          .margin({ right: 8 })
-          .accessibilityText('设置')
-          .onClick(() => {
-            this.openTabletSettings();
-          })
-
-        Button('清空会话')
-          .fontSize(13)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#C4473A')
-          .backgroundColor(Color.White)
-          .borderRadius(16)
-          .height(36)
-          .padding({ left: 12, right: 12 })
-          .margin({ right: 8 })
-          .enabled(this.canClearSession())
-          .onClick(() => {
-            this.clearSelectedSession();
-          })
-
-        Button(this.connectLabel)
-          .fontSize(13)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#0F8A74')
-          .backgroundColor(Color.White)
-          .borderRadius(16)
-          .height(36)
-          .padding({ left: 12, right: 12 })
-          .enabled(!this.linkBusy)
-          .onClick(() => {
-            this.toggleLink();
-          })
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-
+    Row({ space: 8 }) {
+      Image($r('app.media.icon')).width(30).height(30).borderRadius(10).objectFit(ImageFit.Cover)
+      Column({ space: 3 }) {
+        Text(this.titleText).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C').maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        Text(this.sending ? this.statusText + ' · 等待 ' + this.taskQueue.length : this.statusText)
+          .fontSize(11).fontColor(this.statusColor()).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Button(this.connectLabel).height(36).fontSize(12).fontColor('#0F8A74').backgroundColor('#E7F6F2')
+        .padding({ left: 10, right: 10 }).borderRadius(12).enabled(!this.linkBusy).onClick(() => { this.toggleLink(); })
       if (this.sending) {
-        Row() {
-          Text('正在执行 · ' + this.taskQueue.length + ' 个等待中').fontSize(12).fontColor('#6B7F79').layoutWeight(1)
-          Button('停止当前任务').height(32).fontSize(12).fontColor('#C4473A').backgroundColor(Color.White)
-            .onClick(() => { this.stopGeneration(); })
-        }.width('100%').margin({ top: 8 })
+        Button('停止').height(36).fontSize(12).fontColor('#C4473A').backgroundColor('#FDECEA')
+          .padding({ left: 10, right: 10 }).borderRadius(12).onClick(() => { this.stopGeneration(); })
       }
+      Button('⚙').height(36).width(36).fontSize(17).fontColor('#0F8A74').backgroundColor('#F7FBFA')
+        .padding(0).borderRadius(12).accessibilityText('设置').onClick(() => { this.openTabletSettings(); })
+    }.width('100%').height(64).padding(10).backgroundColor(Color.White).borderRadius(16)
   }
 
   @Builder
@@ -966,10 +893,10 @@ struct Index {
       Row() {
         Text('任务路由').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
         Blank()
-        Text(this.clusterSummary).fontSize(12).fontColor('#0F8A74')
+        Text(this.clusterSummary).fontSize(11).fontColor('#0F8A74').maxLines(1)
       }.width('100%')
       TaskRoutingView({ eventJson: this.routingJson }).width('100%').layoutWeight(1)
-    }.width('100%').height(this.tabletHeight * 0.3).padding(12).backgroundColor(Color.White).borderRadius(20)
+    }.width('100%').layoutWeight(5).constraintSize({ minHeight: 120 }).padding(12).backgroundColor(Color.White).borderRadius(16)
   }
 
   @Builder
@@ -1122,53 +1049,22 @@ struct Index {
             .margin({ left: 8, bottom: 4 })
         }
 
-        Row() {
-          Button('附件')
-            .height(36)
-            .fontSize(13)
-            .fontColor('#0F8A74')
-            .backgroundColor('#E7F6F2')
-            .borderRadius(18)
-            .padding({ left: 12, right: 12 })
-            .enabled(!this.preparingSubmission)
-            .onClick(() => {
-              this.chooseAttachment();
-            })
-          TextInput({ text: this.message, placeholder: '输入问题…' })
-            .layoutWeight(1)
-            .height(44)
-            .fontSize(16)
-            .fontColor('#16332C')
-            .placeholderColor('#8AA39C')
-            .backgroundColor(Color.Transparent)
-            .padding({ left: 8, right: 4 })
-            .margin({ left: 4 })
-            .copyOption(CopyOptions.LocalDevice)
-            .enabled(!this.preparingSubmission)
-            .onChange((value: string) => {
-              this.message = value;
-            })
-            .onSubmit(() => {
-              this.runAgent();
-            })
-
-          Button('清空')
-            .height(40).fontSize(12).fontColor('#6B7F79').backgroundColor('#EEF6F3').borderRadius(14)
-            .enabled(!this.preparingSubmission)
+        Row({ space: 8 }) {
+          Row() {
+            Button('＋').width(30).height(36).fontSize(18).fontColor('#0F8A74').backgroundColor(Color.Transparent)
+              .padding(0).accessibilityText('添加附件').enabled(!this.preparingSubmission)
+              .onClick(() => { this.chooseAttachment(); })
+            TextInput({ text: this.message, placeholder: '输入问题…' }).layoutWeight(1).height(44).fontSize(15)
+              .fontColor('#16332C').placeholderColor('#8AA39C').backgroundColor(Color.Transparent)
+              .padding({ left: 4, right: 8 }).copyOption(CopyOptions.LocalDevice).enabled(!this.preparingSubmission)
+              .onChange((value: string) => { this.message = value; }).onSubmit(() => { this.runAgent(); })
+          }.layoutWeight(1).height(44).backgroundColor('#F7FBFA').borderRadius(12)
+          Button('发送').width(52).height(44).fontSize(13).fontColor(Color.White).borderRadius(12)
+            .padding(0).backgroundColor(this.sendEnabled() ? '#0F8A74' : '#C9D4D0').enabled(this.sendEnabled())
+            .onClick(() => { this.runAgent(); })
+          Button('清空').width(48).height(44).fontSize(12).fontColor('#6B7F79').backgroundColor('#EEF6F3')
+            .padding(0).borderRadius(12).enabled(!this.preparingSubmission)
             .onClick(() => { this.message = ''; this.clearAttachment(); this.attachError = ''; })
-          Button() {
-            Text('➤')
-              .fontSize(18)
-              .fontColor(Color.White)
-          }
-          .width(44)
-          .height(44)
-          .borderRadius(22)
-          .backgroundColor(this.sendEnabled() ? '#0F8A74' : '#C9D4D0')
-          .enabled(this.sendEnabled())
-          .onClick(() => {
-            this.runAgent();
-          })
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
