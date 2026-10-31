@@ -51,6 +51,8 @@ import {
   CollaborationStatus
 } from '../llm/CollaborationController';
 
+// Target tablet display: 198 mm wide × 127 mm high. ArkUI lays out in vp.
+const TABLET_DISPLAY_RATIO = 198 / 127;
 const MAX_STEPS = 10;
 const LIVE_PLACEHOLDER = '正在生成…';
 const LIVE_TOOL_PREFIX = '正在调用工具：';
@@ -232,9 +234,50 @@ struct InferenceMetricCellView {
   }
 }
 
+interface StoredTabletSession {
+  id: string;
+  title: string;
+  draft: string;
+  transcript: string;
+}
+
+interface TabletSession {
+  id: string;
+  title: string;
+  messages: ChatBubble[];
+  conversation: ConversationContext;
+  draft: string;
+  pendingKind: string;
+  pendingName: string;
+  pendingPath: string;
+  pendingLocal: string;
+}
+
+interface TabletQueuedTask {
+  id: number;
+  sessionId: string;
+  mode: ChatMode;
+  task: string;
+  display: string;
+  imagePath: string;
+  imagePayload: string;
+}
+
 @Entry
 @Component
 struct Index {
+  @State sessions: TabletSession[] = [];
+  @State selectedSessionId: string = '';
+  @State engineSessionId: string = '';
+  @State taskQueue: TabletQueuedTask[] = [];
+  @State preparingSubmission: boolean = false;
+  @State tabletWidth: number = 1024;
+  @State tabletHeight: number = 1024 / TABLET_DISPLAY_RATIO;
+  @State clusterSummary: string = '等待算力连接';
+  private queueDraining: boolean = false;
+  private nextSessionId: number = 1;
+  private nextQueuedTaskId: number = 1;
+  private clusterTimer: number = -1;
   @State messages: ChatBubble[] = [];
   @State message: string = '';
   @State sending: boolean = false;
@@ -308,6 +351,178 @@ struct Index {
   private chatBubbleTextWidthVp: number = 280;
   private collaborationKeepsScreenOn: boolean = false;
 
+  private initializeTabletSessions(): void {
+    const initial: TabletSession = {
+      id: 's' + this.nextSessionId++, title: this.messages.length > 0 ? '历史会话' : '新会话',
+      messages: this.messages, conversation: this.conversation, draft: '',
+      pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: ''
+    };
+    this.sessions = [initial];
+    this.selectedSessionId = initial.id;
+    this.engineSessionId = initial.id;
+  }
+
+  private captureEngineSession(): void {
+    this.sessions = this.sessions.map((session: TabletSession): TabletSession => {
+      if (session.id === this.engineSessionId) {
+        session.messages = this.messages;
+        session.conversation = this.conversation;
+      }
+      return session;
+    });
+  }
+
+  private saveSelectedDraft(): void {
+    const session = this.sessions.find((item: TabletSession): boolean => item.id === this.selectedSessionId);
+    if (session === undefined) { return; }
+    session.draft = this.message;
+    session.pendingKind = this.pendingKind;
+    session.pendingName = this.pendingName;
+    session.pendingPath = this.pendingPath;
+    session.pendingLocal = this.pendingLocal;
+  }
+
+  private selectSession(id: string): void {
+    this.captureEngineSession();
+    this.saveSelectedDraft();
+    const session = this.sessions.find((item: TabletSession): boolean => item.id === id);
+    if (session === undefined) { return; }
+    this.selectedSessionId = id;
+    this.message = session.draft;
+    this.pendingKind = session.pendingKind;
+    this.pendingName = session.pendingName;
+    this.pendingPath = session.pendingPath;
+    this.pendingLocal = session.pendingLocal;
+    this.attachError = '';
+  }
+
+  private newSession(): void {
+    const id = 's' + this.nextSessionId++;
+    this.sessions = [...this.sessions, {
+      id: id, title: '新会话', messages: [], conversation: new ConversationContext(), draft: '',
+      pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: ''
+    }];
+    this.selectSession(id);
+  }
+
+  private selectedSessionTitle(): string {
+    return this.sessions.find((session: TabletSession): boolean => session.id === this.selectedSessionId)?.title ?? '新会话';
+  }
+
+  private sessionStatus(id: string): string {
+    const count = this.taskQueue.filter((task: TabletQueuedTask): boolean => task.sessionId === id).length;
+    return (this.sending && id === this.engineSessionId ? '执行中' : '就绪') + (count > 0 ? ' · 排队 ' + count : '');
+  }
+
+  private visibleMessages(): ChatBubble[] {
+    const session = this.sessions.find((item: TabletSession): boolean => item.id === this.selectedSessionId);
+    const bubbles = this.selectedSessionId === this.engineSessionId ? this.messages : (session?.messages ?? []);
+    const waiting: ChatBubble[] = [];
+    for (const task of this.taskQueue) {
+      if (task.sessionId !== this.selectedSessionId) { continue; }
+      waiting.push({ id: -task.id, speaker: 'You', text: task.display + '（等待执行）', kind: BubbleKind.USER,
+        imagePath: task.imagePath, collapsible: false, expanded: false, revision: 0 });
+    }
+    return bubbles.concat(waiting);
+  }
+
+  private toggleVisibleBubble(id: number): void {
+    if (this.selectedSessionId === this.engineSessionId) { this.toggleBubbleExpansion(id); return; }
+    this.sessions = this.sessions.map((session: TabletSession): TabletSession => {
+      if (session.id === this.selectedSessionId) {
+        session.messages = session.messages.map((bubble: ChatBubble): ChatBubble => {
+          if (bubble.id === id) { bubble.expanded = !bubble.expanded; bubble.revision++; }
+          return bubble;
+        });
+      }
+      return session;
+    });
+  }
+
+  private canClearSession(): boolean {
+    return !(this.sending && this.engineSessionId === this.selectedSessionId) &&
+      !this.taskQueue.some((task: TabletQueuedTask): boolean => task.sessionId === this.selectedSessionId);
+  }
+
+  private clearSelectedSession(): void {
+    if (!this.canClearSession()) { return; }
+    this.sessions = this.sessions.map((session: TabletSession): TabletSession => {
+      if (session.id === this.selectedSessionId) {
+        session.messages = []; session.conversation = new ConversationContext(); session.title = '新会话';
+        if (session.id === this.engineSessionId) {
+          this.messages = []; this.conversation = session.conversation;
+        }
+      }
+      return session;
+    });
+    this.persistTabletSessions();
+  }
+
+  private refreshClusterSummary(): void {
+    const load = inferenceClient.clusterLoad();
+    this.clusterSummary = load.total > 0 ? '算力 ' + load.total + ' 台 · 空闲 ' + load.idle + ' 台' : '等待算力连接';
+  }
+
+  private async drainTaskQueue(): Promise<void> {
+    if (this.queueDraining || !this.pageActive) { return; }
+    this.queueDraining = true;
+    try {
+      while (this.pageActive && this.taskQueue.length > 0) {
+        const task = this.taskQueue[0];
+        this.taskQueue = this.taskQueue.slice(1);
+        this.captureEngineSession();
+        const session = this.sessions.find((item: TabletSession): boolean => item.id === task.sessionId);
+        if (session === undefined) { continue; }
+        this.engineSessionId = session.id;
+        this.messages = session.messages;
+        this.conversation = session.conversation;
+        this.liveReplyId = -1; this.liveReplyPending = false; this.processId = -1; this.activeTaskProgressId = -1;
+        try {
+          await this.runRemoteAgent(task.task, task.display, task.imagePath, task.imagePayload, task.mode);
+        } finally {
+          this.captureEngineSession();
+          this.persistTabletSessions();
+        }
+      }
+    } finally {
+      this.queueDraining = false;
+    }
+  }
+
+  private persistTabletSessions(): void {
+    this.captureEngineSession();
+    this.saveSelectedDraft();
+    const saved: StoredTabletSession[] = this.sessions.map((session: TabletSession): StoredTabletSession => ({
+      id: session.id, title: session.title, draft: session.draft, transcript: JSON.stringify(session.conversation.toChatMessages())
+    }));
+    try {
+      const file = fs.openSync(this.getAbilityContext().filesDir + '/tablet-sessions.json',
+        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try { fs.writeSync(file.fd, JSON.stringify(saved)); } finally { fs.closeSync(file); }
+    } catch (_error) { this.attachError = '会话未能保存到本机，请检查存储空间。'; }
+  }
+
+  private restoreTabletSessions(): void {
+    try {
+      const saved = JSON.parse(fs.readTextSync(this.getAbilityContext().filesDir + '/tablet-sessions.json')) as StoredTabletSession[];
+      if (!Array.isArray(saved) || saved.length === 0) { return; }
+      const restored: TabletSession[] = [];
+      for (const item of saved) {
+        if (typeof item.title !== 'string' || typeof item.transcript !== 'string') { continue; }
+        const conversation = ConversationContext.fromMessages(JSON.parse(item.transcript));
+        restored.push({ id: 's' + this.nextSessionId++, title: item.title, conversation: conversation,
+          messages: this.buildMessagesFromConversation(conversation), draft: item.draft ?? '',
+          pendingKind: '', pendingName: '', pendingPath: '', pendingLocal: '' });
+      }
+      if (restored.length === 0) { return; }
+      this.sessions = restored;
+      this.engineSessionId = restored[0].id;
+      this.selectedSessionId = restored[0].id;
+      this.messages = restored[0].messages; this.conversation = restored[0].conversation;
+      this.message = restored[0].draft;
+    } catch (_error) { /* First launch migrates the existing conversation. */ }
+  }
+
   private getAbilityContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
   }
@@ -319,6 +534,9 @@ struct Index {
     this.chatMode = loadChatMode(context);
     this.agentEnabled = this.chatMode !== 'chat';
     this.restoreConversation();
+    this.initializeTabletSessions();
+    this.restoreTabletSessions();
+    this.clusterTimer = setInterval((): void => { this.refreshClusterSummary(); }, 1500);
     ensureBundledWorkspaceFiles(context).catch((_error: Error): void => {});
     nearbyChannel.initialize(context);
     inferenceClient.bind();
@@ -331,6 +549,9 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    clearInterval(this.clusterTimer);
+    this.taskQueue = [];
+    this.persistTabletSessions();
     this.updateTaskProgress('cancelled');
     this.pageActive = false;
     this.remoteRunGeneration++;
@@ -448,7 +669,71 @@ struct Index {
 
   @Builder
   chatPage() {
-    Column() {
+    Stack({ alignContent: Alignment.Center }) {
+      Row({ space: 16 }) {
+        this.sessionSidebar()
+        Column({ space: 12 }) {
+          this.chatToolbar()
+          this.routingPanel()
+          Column() {
+            Row() {
+              Text('结果返回').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
+              Blank()
+              Text(this.selectedSessionTitle()).fontSize(12).fontColor('#6B7F79').maxLines(1)
+            }.width('100%').padding({ bottom: 10 })
+            this.chatResults()
+          }.layoutWeight(1).width('100%').padding(16).backgroundColor('#F7FBFA').borderRadius(20)
+          Row({ space: 8 }) {
+            ForEach(['总结一下当前结果', '列出下一步计划', '帮我分析这个问题'], (prompt: string) => {
+              Button(prompt).fontSize(12).height(36).fontColor('#0F8A74').backgroundColor('#E0F1EB')
+                .borderRadius(12).layoutWeight(1).onClick(() => { this.message = prompt; })
+            })
+          }.width('100%')
+          this.chatComposer()
+        }.layoutWeight(1).height('100%')
+      }.width(this.tabletWidth).height(this.tabletHeight).padding(16).backgroundColor('#EEF6F3')
+    }.width('100%').height('100%').backgroundColor('#EEF6F3')
+      .onAreaChange((_old: Area, area: Area) => {
+        const availableWidth = Number(area.width);
+        const availableHeight = Number(area.height);
+        if (availableWidth > 0 && availableHeight > 0) {
+          this.tabletWidth = Math.min(availableWidth, availableHeight * TABLET_DISPLAY_RATIO);
+          this.tabletHeight = this.tabletWidth / TABLET_DISPLAY_RATIO;
+        }
+      })
+  }
+
+  @Builder
+  sessionSidebar() {
+    Column({ space: 12 }) {
+      Text('Loopy').fontSize(23).fontWeight(FontWeight.Bold).fontColor('#16332C').width('100%')
+      Text('会话空间').fontSize(12).fontColor('#6B7F79').width('100%')
+      Button('＋ 新建会话').width('100%').height(44).fontSize(14).fontColor(Color.White)
+        .backgroundColor('#0F8A74').borderRadius(14).onClick(() => { this.newSession(); })
+      Scroll() {
+        Column({ space: 8 }) {
+          ForEach(this.sessions, (session: TabletSession) => {
+            Column({ space: 5 }) {
+              Text(session.title).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#16332C')
+                .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text(this.sessionStatus(session.id)).fontSize(12).fontColor('#6B7F79')
+            }.width('100%').alignItems(HorizontalAlign.Start).padding(12).borderRadius(14)
+              .backgroundColor(session.id === this.selectedSessionId ? '#D8F3EA' : Color.White)
+              .border({ width: 1, color: session.id === this.selectedSessionId ? '#0F8A74' : '#E3EDE8' })
+              .onClick(() => { this.selectSession(session.id); })
+          }, (session: TabletSession) => session.id)
+        }.width('100%')
+      }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
+      Text('任务可连续提交，结果按会话保存').fontSize(12).fontColor('#6B7F79').width('100%')
+      Button('清除待发送任务').fontSize(12).height(40).width('100%').fontColor('#C4473A')
+        .backgroundColor(Color.White).enabled(this.taskQueue.length > 0)
+        .onClick(() => { this.taskQueue = []; })
+    }.width(this.tabletWidth >= 1000 ? 224 : 176).height('100%').padding(14)
+      .backgroundColor('#F7FBFA').borderRadius(20).alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  chatToolbar() {
       Row() {
         Image($r('app.media.icon'))
           .width(36)
@@ -500,7 +785,7 @@ struct Index {
             this.settingsVisible = true;
           })
 
-        Button('清除')
+        Button('清空会话')
           .fontSize(13)
           .fontWeight(FontWeight.Medium)
           .fontColor('#C4473A')
@@ -509,9 +794,9 @@ struct Index {
           .height(36)
           .padding({ left: 12, right: 12 })
           .margin({ right: 8 })
-          .enabled(this.messages.length > 0 && !this.sending)
+          .enabled(this.canClearSession())
           .onClick(() => {
-            this.clearConversation();
+            this.clearSelectedSession();
           })
 
         Button(this.connectLabel)
@@ -530,9 +815,45 @@ struct Index {
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
+      if (this.sending) {
+        Row() {
+          Text('正在执行 · ' + this.taskQueue.length + ' 个等待中').fontSize(12).fontColor('#6B7F79').layoutWeight(1)
+          Button('停止当前任务').height(32).fontSize(12).fontColor('#C4473A').backgroundColor(Color.White)
+            .onClick(() => { this.stopGeneration(); })
+        }.width('100%').margin({ top: 8 })
+      }
+  }
+
+  @Builder
+  routingPanel() {
+    Column({ space: 10 }) {
+      Row() {
+        Text('任务路由').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
+        Blank()
+        Text(this.clusterSummary).fontSize(12).fontColor('#0F8A74')
+      }.width('100%')
+      Scroll() {
+        Column({ space: 8 }) {
+          ForEach(this.sessions, (session: TabletSession) => {
+            Row({ space: 10 }) {
+              Text(session.title).fontSize(12).fontColor('#16332C').maxLines(1).layoutWeight(1)
+              Text('→').fontColor('#8AA39C')
+              Text('算力中心').fontSize(13).fontColor('#0F8A74').padding(10)
+                .backgroundColor('#E7F6F2').borderRadius(12)
+              Text('→').fontColor('#8AA39C')
+              Text(this.sessionStatus(session.id)).fontSize(12).fontColor('#6B7F79').layoutWeight(1)
+            }.width('100%').padding(8).backgroundColor('#F7FBFA').borderRadius(12)
+          }, (session: TabletSession) => session.id)
+        }.width('100%')
+      }.width('100%').constraintSize({ maxHeight: this.tabletWidth >= 1000 ? 180 : 148 })
+    }.width('100%').padding(16).backgroundColor(Color.White).borderRadius(20)
+  }
+
+  @Builder
+  chatResults() {
       Scroll(this.scroller) {
         Column() {
-          if (this.messages.length === 0) {
+          if (this.visibleMessages().length === 0) {
             Column() {
               Text('向附近的算力提问')
                 .fontSize(16)
@@ -547,7 +868,7 @@ struct Index {
             .justifyContent(FlexAlign.Center)
           }
 
-          ForEach(this.messages, (bubble: ChatBubble) => {
+          ForEach(this.visibleMessages(), (bubble: ChatBubble) => {
             Row() {
               if (bubble.kind === BubbleKind.TASK && bubble.taskProgress !== undefined) {
                 Column() {
@@ -562,7 +883,7 @@ struct Index {
                     .fontSize(14)
                     .fontColor('#6B7F79')
                     .onClick(() => {
-                      this.toggleBubbleExpansion(bubble.id);
+                      this.toggleVisibleBubble(bubble.id);
                     })
                   if (bubble.expanded && bubble.text.length > 0) {
                     Text(bubble.text)
@@ -618,13 +939,18 @@ struct Index {
         }
         .width('100%')
         .constraintSize({ minHeight: '100%' })
-        .justifyContent(this.messages.length === 0 ? FlexAlign.Center : FlexAlign.End)
+        .justifyContent(this.visibleMessages().length === 0 ? FlexAlign.Center : FlexAlign.End)
       }
       .layoutWeight(1)
+      .onAreaChange((_old: Area, area: Area) => { this.updateChatBubbleMeasureWidth(Number(area.width)); })
       .width('100%')
       .align(Alignment.Bottom)
       .scrollBar(BarState.Off)
 
+  }
+
+  @Builder
+  chatComposer() {
       Column() {
         if (this.pendingPath.length > 0) {
           Row() {
@@ -681,7 +1007,7 @@ struct Index {
             .backgroundColor('#E7F6F2')
             .borderRadius(18)
             .padding({ left: 12, right: 12 })
-            .enabled(!this.sending)
+            .enabled(!this.preparingSubmission)
             .onClick(() => {
               this.chooseAttachment();
             })
@@ -695,7 +1021,7 @@ struct Index {
             .padding({ left: 8, right: 4 })
             .margin({ left: 4 })
             .copyOption(CopyOptions.LocalDevice)
-            .enabled(!this.sending)
+            .enabled(!this.preparingSubmission)
             .onChange((value: string) => {
               this.message = value;
             })
@@ -703,9 +1029,13 @@ struct Index {
               this.runAgent();
             })
 
+          Button('清空')
+            .height(40).fontSize(12).fontColor('#6B7F79').backgroundColor('#EEF6F3').borderRadius(14)
+            .enabled(!this.preparingSubmission)
+            .onClick(() => { this.message = ''; this.clearAttachment(); this.attachError = ''; })
           Button() {
-            Text(this.sending ? '■' : '➤')
-              .fontSize(this.sending ? 14 : 18)
+            Text('➤')
+              .fontSize(18)
               .fontColor(Color.White)
           }
           .width(44)
@@ -714,11 +1044,7 @@ struct Index {
           .backgroundColor(this.sendEnabled() ? '#0F8A74' : '#C9D4D0')
           .enabled(this.sendEnabled())
           .onClick(() => {
-            if (this.sending) {
-              this.stopGeneration();
-            } else {
-              this.runAgent();
-            }
+            this.runAgent();
           })
         }
         .width('100%')
@@ -729,11 +1055,6 @@ struct Index {
       .borderRadius(24)
       .backgroundColor(Color.White)
       .shadow({ radius: 28, color: '#1410322A', offsetX: 0, offsetY: 10 })
-    }
-    .width('100%')
-    .height('100%')
-    .padding({ left: 16, right: 16, top: 14, bottom: 16 })
-    .backgroundColor('#EEF6F3')
   }
 
   @Builder
@@ -1300,13 +1621,12 @@ struct Index {
   }
 
   private async runRemoteAgent(task: string, display: string, imagePath: string,
-    imagePayload: string = ''): Promise<void> {
+    imagePayload: string = '', runMode: ChatMode = this.chatMode): Promise<void> {
     if (!this.pageActive || this.sending) { return; }
-    const mode: ChatMode = this.chatMode === 'agent' || this.chatMode === 'chat' ? this.chatMode : 'agent_split';
+    const mode: ChatMode = runMode === 'agent' || runMode === 'chat' ? runMode : 'agent_split';
     const useAgent = mode !== 'chat';
     const generation = ++this.remoteRunGeneration;
     this.stopRequested = false;
-    this.message = '';
     this.sending = true;
     this.setCollaborationKeepScreenOn(true);
     let finalAnswer: string | null = null;
@@ -1605,7 +1925,7 @@ struct Index {
   }
 
   private sendEnabled(): boolean {
-    return this.sending || this.canSend();
+    return this.canSend();
   }
 
   private stopGeneration(): void {
@@ -1808,7 +2128,7 @@ struct Index {
   }
 
   private canSend(): boolean {
-    return !this.sending && (this.message.trim().length > 0 || this.pendingPath.length > 0);
+    return !this.preparingSubmission && (this.message.trim().length > 0 || this.pendingPath.length > 0);
   }
 
   private clearAttachment(): void {
@@ -1854,31 +2174,33 @@ struct Index {
   }
 
   private async runAgent(): Promise<void> {
+    if (!this.pageActive || !this.canSend()) { return; }
+    const sessionId = this.selectedSessionId;
     const text = this.message.trim();
     const hasFile = this.pendingPath.length > 0;
-    if ((text.length === 0 && !hasFile) || this.sending) {
-      return;
-    }
     const task = hasFile ? this.composeAttachmentTask(text) : text;
     const shown = text.length > 0 ? text : (this.pendingKind === 'image' ? '（附图）' : this.pendingName);
     const imagePath = this.pendingKind === 'image' ? this.pendingLocal : '';
-    // 先把图片压成协议可承载的裸 base64 再发送；编码失败就不发请求，保留草稿与附件。
-    let imagePayload = '';
-    if (imagePath.length > 0) {
-      try {
+    const mode = this.chatMode;
+    this.preparingSubmission = true;
+    try {
+      let imagePayload = '';
+      if (imagePath.length > 0) {
         imagePayload = await encodeLocalImageBase64(imagePath);
-      } catch (error) {
-        this.appendLine('Error', error instanceof Error ? error.message : '图片编码失败', BubbleKind.ERROR);
-        return;
+        if (imagePayload.length === 0) { throw new Error('图片编码失败，未发送请求'); }
       }
-      if (imagePayload.length === 0) {
-        this.appendLine('Error', '图片编码失败，未发送请求', BubbleKind.ERROR);
-        return;
-      }
-    }
-    this.message = '';
-    this.clearAttachment();
-    await this.runRemoteAgent(task, shown, imagePath, imagePayload);
+      if (!this.pageActive) { return; }
+      const session = this.sessions.find((item: TabletSession): boolean => item.id === sessionId);
+      if (session === undefined) { return; }
+      if (session.title === '新会话') { session.title = shown.substring(0, 28); }
+      session.draft = ''; session.pendingKind = ''; session.pendingName = ''; session.pendingPath = ''; session.pendingLocal = '';
+      if (this.selectedSessionId === sessionId) { this.message = ''; this.clearAttachment(); }
+      this.taskQueue = [...this.taskQueue, { id: this.nextQueuedTaskId++, sessionId: sessionId, mode: mode,
+        task: task, display: shown, imagePath: imagePath, imagePayload: imagePayload }];
+      this.drainTaskQueue().catch((_error: Error): void => { this.attachError = '任务执行失败，请重试。'; });
+    } catch (error) {
+      this.attachError = error instanceof Error ? error.message : '附件编码失败';
+    } finally { this.preparingSubmission = false; }
   }
   /** Most recent whole exchanges within a fixed budget, oldest dropped first. */
   private buildRemoteConversation(): ConversationContext {
