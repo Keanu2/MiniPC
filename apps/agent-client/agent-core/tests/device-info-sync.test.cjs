@@ -1,0 +1,40 @@
+const assert=require('node:assert/strict'),path=require('node:path'),vm=require('node:vm'),fs=require('node:fs');
+const {transpile}=require('../../../../tests/ets-harness.cjs');
+function load(file,requires={}){const box={exports:{},require:name=>requires[name]||{},Date,Math,Number,Array,Map,Set,JSON,Promise};vm.runInNewContext(transpile(path.resolve(__dirname,'../../entry/src/main/ets/'+file)),box);return box.exports;}
+const {TaskRoutingStore}=load('ui/TaskRoutingStore.ets'),{DeviceInfoPoller}=load('ui/DeviceInfoPoller.ets');
+const hub={id:'hub',deviceUid:'hub',name:'算力设备1',role:'compute',ready:true,slot:1};
+const snapshot=store=>JSON.parse(store.snapshot([],'聊天设备1','chat',true,7,hub));
+(async()=>{
+ const store=new TaskRoutingStore();
+ store.receive({type:'deviceInfo',requestId:'prepare',model:'Qwen-VL',memUsage:62,modelRequests:2,capabilities:['text','vision'],cpuUsage:18},7,hub);
+ let view=snapshot(store),device=view.devices.find(d=>d.id==='hub');
+ assert.equal(device.memUsage,62);assert.equal(device.model,'Qwen-VL');assert.equal(device.jobs,2);assert.deepEqual(device.capabilities,['text','vision']);
+ store.receive({type:'deviceInfo',requestId:'poll',capabilities:[]},7,hub);
+ assert.equal(snapshot(store).devices.find(d=>d.id==='hub').memUsage,62,'an empty poll is not a telemetry update');
+ store.receive({type:'deviceInfoSync',devices:[{id:'hub',role:'self',ready:true,slot:1,capabilities:[]},{id:'worker',role:'compute',ready:true,slot:2,model:'text',memUsage:45}]},7,hub);
+ device=snapshot(store).devices.find(d=>d.id==='hub');assert.equal(device.memUsage,62);assert.equal(device.model,'Qwen-VL');assert.deepEqual(device.capabilities,['text','vision']);
+ store.receive({type:'deviceInfo',modelRequests:0},7,hub);device=snapshot(store).devices.find(d=>d.id==='hub');assert.equal(device.jobs,0);assert.equal(device.memUsage,62);
+ store.receive({type:'deviceInfo',memUsage:70},7,hub);assert.equal(snapshot(store).devices.find(d=>d.id==='hub').memUsage,70);
+ store.receive({type:'deviceInfoSync',devices:[{id:'hub',role:'self',slot:1,ready:true}]},7,hub);
+ assert.equal(snapshot(store).devices.filter(d=>d.role==='compute').length,1,'roster removal must not retain departed workers');
+ store.clear();assert.equal(snapshot(store).devices.find(d=>d.id==='hub').memUsage,undefined,'disconnect clears telemetry');
+ const sent=[];const poller=new DeviceInfoPoller(async(message,epoch)=>{sent.push({message,epoch});return true;});
+ poller.poll(7,100);poller.poll(7,1000);assert.equal(sent.length,1);assert.deepEqual(Array.from(sent[0].message.capabilities),[]);
+ poller.acknowledge({type:'deviceInfo',requestId:sent[0].message.requestId},7);poller.poll(7,2000);assert.equal(sent.length,1,'reply does not remove the rate limit');
+ poller.poll(7,5100);assert.equal(sent.length,2);poller.poll(7,10200);assert.equal(sent.length,3,'missing reply permits a bounded retry');
+ poller.poll(-1,10201);assert.equal(sent.length,3);poller.poll(8,10202);assert.equal(sent.length,4,'reconnect queries immediately');
+ const latest=sent[3].message.requestId;poller.acknowledge({type:'deviceInfo',requestId:latest},7);assert.equal(poller.pendingId,latest,'old epoch cannot acknowledge current query');
+ poller.clear();assert.equal(poller.pendingId,'');
+ const failed=[];const failurePoller=new DeviceInfoPoller(async()=>{failed.push(1);throw new Error('offline');});failurePoller.poll(1,0);for(let i=0;i<5;i++)await Promise.resolve();failurePoller.poll(1,100);assert.equal(failed.length,1);
+ const protocol=load('protocol/ChatProtocol.ets');const wire={protocol:'nearby-chat-v1',type:'deviceInfo',requestId:'info',capabilities:['vision']};
+ assert.equal(protocol.validMessage(wire),true);assert.equal(protocol.validMessage({...wire,capabilities:'vision'}),false);assert.equal(protocol.validMessage({...wire,capabilities:[1]}),false);
+ // Execute the actual label helper: names remain stable after editing the custom text.
+ const src=fs.readFileSync(path.resolve(__dirname,'../../entry/src/main/ets/pages/Index.ets'),'utf8').replace(/\r\n/g,'\n');
+ const start=src.indexOf('  private quickInputLabel('),end=src.indexOf('\n  }',start)+4;
+ const ts=require(process.env.TYPESCRIPT_PATH||'typescript'),box={exports:{}};vm.runInNewContext(ts.transpileModule('class Page {'+src.slice(start,end)+'} exports.Page=Page;', {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
+ const settings=load('model/TabletPreferences.ets',{'@kit.ArkData':{preferences:{getPreferencesSync(){return {getSync(){return JSON.stringify({routingCollapsed:true});}};}}}});
+ assert.equal(settings.loadTabletPreferences({}).routingCollapsed,true);
+ assert.equal(settings.normalizeTabletPreferences({quickInputs:[],sidebarWidth:200}).routingCollapsed,false,'older settings keep routing expanded');
+ const p=new box.exports.Page();p.quickInputs=['任意文本','其他文本','第三段'];assert.equal(p.quickInputLabel(0),'快捷输入1');assert.equal(p.quickInputLabel(1),'快捷输入2');assert.equal(p.quickInputLabel(2),'快捷输入3');
+ console.log('PASS single-device telemetry, compact roster merging, membership removal, bounded polling, reconnect, capability validation and stable shortcut names');
+})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -4,6 +4,7 @@ import { preferences } from '@kit.ArkData';
 export interface TabletPreferences {
   quickInputs: string[];
   sidebarCollapsed: boolean;
+  routingCollapsed: boolean;
   sidebarWidth: number;
 }
 const STORE = 'loop_tablet_settings';
@@ -14,14 +15,14 @@ export function normalizeTabletPreferences(value: TabletPreferences): TabletPref
     inputs.push(Array.isArray(value.quickInputs) && typeof value.quickInputs[i] === 'string' ?
       value.quickInputs[i].substring(0, 4000) : DEFAULT_QUICK_INPUTS[i]);
   }
-  return { quickInputs: inputs, sidebarCollapsed: value.sidebarCollapsed === true,
+  return { quickInputs: inputs, sidebarCollapsed: value.sidebarCollapsed === true, routingCollapsed: value.routingCollapsed === true,
     sidebarWidth: Number.isFinite(value.sidebarWidth) ? Math.max(160, Math.min(300, value.sidebarWidth)) : 200 };
 }
 export function loadTabletPreferences(context: common.Context): TabletPreferences {
   try {
     const store = preferences.getPreferencesSync(context, { name: STORE });
     return normalizeTabletPreferences(JSON.parse(store.getSync('layout', '{}') as string) as TabletPreferences);
-  } catch (_error) { return normalizeTabletPreferences({ quickInputs: DEFAULT_QUICK_INPUTS, sidebarCollapsed: false, sidebarWidth: 200 }); }
+  } catch (_error) { return normalizeTabletPreferences({ quickInputs: DEFAULT_QUICK_INPUTS, sidebarCollapsed: false, sidebarWidth: 200, routingCollapsed: false }); }
 }
 export async function saveTabletPreferences(context: common.Context, value: TabletPreferences): Promise<void> {
   const store = preferences.getPreferencesSync(context, { name: STORE });

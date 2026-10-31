@@ -17,17 +17,60 @@ interface RouteJob {
 }
 interface RoutingEvent { devices: RouteDevice[]; jobs: RouteJob[]; queuedCalls: RouteJob[]; flowCalls: RouteJob[]; }
 
+function mergeDevice(previous: DeviceInfoEntry | undefined, next: DeviceInfoEntry): DeviceInfoEntry {
+  return {
+    id: next.id ?? previous?.id, deviceUid: next.deviceUid ?? previous?.deviceUid,
+    name: next.name || previous?.name, role: next.role ?? previous?.role, slot: next.slot ?? previous?.slot,
+    ready: next.ready ?? previous?.ready, model: next.model ?? previous?.model,
+    memTotal: next.memTotal ?? previous?.memTotal, memAvail: next.memAvail ?? previous?.memAvail,
+    memUsage: next.memUsage ?? previous?.memUsage, thermalLevel: next.thermalLevel ?? previous?.thermalLevel,
+    batteryTemp: next.batteryTemp ?? previous?.batteryTemp, cpuUsage: next.cpuUsage ?? previous?.cpuUsage,
+    modelRequests: next.modelRequests ?? previous?.modelRequests,
+    capabilities: next.capabilities !== undefined && next.capabilities.length > 0 ? next.capabilities :
+      (previous?.capabilities ?? next.capabilities)
+  };
+}
+
 /** Projection of received roster and owned inference calls. Never invent device slots or assignments. */
 export class TaskRoutingStore {
   private roster: DeviceInfoEntry[] = [];
   private flows: Map<string, FlowEntry> = new Map();
   private revisions: Map<string, number> = new Map();
   private epoch: number = -1;
-  receive(message: WireMessage, epoch: number): void {
-    if (message.type !== 'deviceInfoSync') { return; }
-    if (!Array.isArray(message.devices)) { return; }
+  receive(message: WireMessage, epoch: number, connectedHub: DeviceInfoEntry | null = null): void {
+    if (message.type !== 'deviceInfoSync' && message.type !== 'deviceInfo') { return; }
+    if (this.epoch >= 0 && this.epoch !== epoch) { this.clear(); }
+    if (message.type === 'deviceInfoSync') {
+      if (!Array.isArray(message.devices)) { return; }
+      const previous = this.roster;
+      this.epoch = epoch;
+      // A compact roster is authoritative about membership, not absent telemetry.
+      this.roster = message.devices.slice(0, 16).map((device: DeviceInfoEntry): DeviceInfoEntry => {
+        const id = device.deviceUid || device.id;
+        const prior = id === undefined ? undefined : previous.find((item: DeviceInfoEntry): boolean =>
+          (item.deviceUid || item.id) === id);
+        return mergeDevice(prior, device);
+      });
+      return;
+    }
+    // Empty deviceInfo frames are polls, not new telemetry. Do not clear known values.
+    if (connectedHub === null || (message.model === undefined && message.memUsage === undefined &&
+      message.memTotal === undefined && message.memAvail === undefined && message.cpuUsage === undefined &&
+      message.thermalLevel === undefined && message.batteryTemp === undefined && message.modelRequests === undefined &&
+      (message.capabilities === undefined || message.capabilities.length === 0))) { return; }
     this.epoch = epoch;
-    this.roster = message.devices.slice(0, 16);
+    const hubId = connectedHub.deviceUid || connectedHub.id;
+    const prior = this.roster.find((item: DeviceInfoEntry): boolean => (item.deviceUid || item.id) === hubId);
+    const update: DeviceInfoEntry = {
+      id: hubId, deviceUid: connectedHub.deviceUid, name: prior?.name || connectedHub.name || message.name,
+      role: 'compute', ready: true, slot: prior?.slot ?? connectedHub.slot,
+      model: message.model, memUsage: message.memUsage, memTotal: message.memTotal, memAvail: message.memAvail,
+      cpuUsage: message.cpuUsage, thermalLevel: message.thermalLevel, batteryTemp: message.batteryTemp,
+      modelRequests: message.modelRequests, capabilities: message.capabilities
+    };
+    const merged = mergeDevice(prior, update);
+    this.roster = this.roster.filter((item: DeviceInfoEntry): boolean => (item.deviceUid || item.id) !== hubId);
+    this.roster = [merged, ...this.roster].slice(0, 16);
   }
   receiveFlow(message: WireMessage): void {
     let notice: FlowNotice;

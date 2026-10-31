@@ -82,6 +82,7 @@ export interface TaskSnapshot {
 }
 
 export interface WireMessage {
+  capabilities?: string[];
   metrics?: InferenceMetrics;
   protocol?: string;
   type: string;
@@ -177,6 +178,11 @@ function validOptionalNumber(value: number | undefined): boolean {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
+function validOptionalCapabilities(value: string[] | undefined): boolean {
+  return value === undefined || (Array.isArray(value) && value.length <= 8 &&
+    value.every((item: string): boolean => typeof item === 'string' && item.length <= 32));
+}
+
 function validDeviceEntry(entry: DeviceInfoEntry): boolean {
   if (entry === null || typeof entry !== 'object') return false;
   return validOptionalString(entry.id, 128) && validOptionalString(entry.deviceUid, 64) &&
@@ -185,7 +191,7 @@ function validDeviceEntry(entry: DeviceInfoEntry): boolean {
     validOptionalNumber(entry.memTotal) && validOptionalNumber(entry.memAvail) &&
     validOptionalNumber(entry.memUsage) && validOptionalNumber(entry.thermalLevel) &&
     validOptionalNumber(entry.batteryTemp) && validOptionalNumber(entry.cpuUsage) &&
-    validOptionalString(entry.model, 128) &&
+    validOptionalString(entry.model, 128) && validOptionalCapabilities(entry.capabilities) &&
     validOptionalNumber(entry.modelRequests) &&
     (entry.ready === undefined || typeof entry.ready === 'boolean') &&
     (entry.slot === undefined || (Number.isInteger(entry.slot) && entry.slot >= 1 && entry.slot <= 64));
@@ -193,6 +199,7 @@ function validDeviceEntry(entry: DeviceInfoEntry): boolean {
 
 function validDeviceInfo(m: WireMessage): boolean {
   return validOptionalString(m.name, 128) && validOptionalString(m.model, 128) &&
+    validOptionalCapabilities(m.capabilities) &&
     validOptionalNumber(m.memTotal) && validOptionalNumber(m.memAvail) &&
     validOptionalNumber(m.memUsage) && validOptionalNumber(m.thermalLevel) &&
     validOptionalNumber(m.batteryTemp) && validOptionalNumber(m.cpuUsage) &&

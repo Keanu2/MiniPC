@@ -42,6 +42,7 @@ import { TaskReporter } from '../model/TaskReporter';
 import { TaskProgress, TaskProgressPhase, taskProgressActive } from '../model/TaskProgress';
 import { TaskRoutingView } from '../ui/TaskRoutingView';
 import { TaskRoutingStore } from '../ui/TaskRoutingStore';
+import { DeviceInfoPoller } from '../ui/DeviceInfoPoller';
 import { DEFAULT_QUICK_INPUTS, loadTabletPreferences, saveTabletPreferences } from '../model/TabletPreferences';
 import { TaskProgressCard } from '../ui/TaskProgressCard';
 import { RemoteComputeModel } from '../model/RemoteComputeModel';
@@ -272,12 +273,15 @@ struct Index {
   @State tabletSettingsError: string = '';
   @State tabletSettingsMessage: string = '';
   @State sidebarCollapsed: boolean = false;
+  @State routingCollapsed: boolean = false;
   @State sidebarWidth: number = 200;
   @State viewportWidth: number = 720;
   @State viewportHeight: number = 1000;
   private sidebarResizeStart: number = 200;
   @State routingJson: string = '{}';
   private routingStore: TaskRoutingStore = new TaskRoutingStore();
+  private deviceInfoPoller: DeviceInfoPoller = new DeviceInfoPoller(
+    (message: WireMessage, epoch: number): Promise<boolean> => nearbyChannel.send(message, epoch));
   @State sessions: TabletSession[] = [];
   @State selectedSessionId: string = '';
   @State engineSessionId: string = '';
@@ -366,13 +370,14 @@ struct Index {
     this.quickInputs = saved.quickInputs;
     this.quickInputDrafts = saved.quickInputs.slice();
     this.sidebarCollapsed = saved.sidebarCollapsed;
+    this.routingCollapsed = saved.routingCollapsed;
     this.sidebarWidth = saved.sidebarWidth;
   }
 
   private async persistTabletPreferences(): Promise<void> {
     try {
       await saveTabletPreferences(this.getAbilityContext(), { quickInputs: this.quickInputs,
-        sidebarCollapsed: this.sidebarCollapsed, sidebarWidth: this.sidebarWidth });
+        sidebarCollapsed: this.sidebarCollapsed, sidebarWidth: this.sidebarWidth, routingCollapsed: this.routingCollapsed });
       this.tabletSettingsError = '';
     } catch (_error) { this.tabletSettingsError = '设置保存失败，请重试。'; }
   }
@@ -386,19 +391,23 @@ struct Index {
   private async saveQuickInputs(): Promise<void> {
     try {
       await saveTabletPreferences(this.getAbilityContext(), { quickInputs: this.quickInputDrafts,
-        sidebarCollapsed: this.sidebarCollapsed, sidebarWidth: this.sidebarWidth });
+        sidebarCollapsed: this.sidebarCollapsed, sidebarWidth: this.sidebarWidth, routingCollapsed: this.routingCollapsed });
       this.quickInputs = this.quickInputDrafts.slice();
       this.tabletSettingsError = ''; this.tabletSettingsMessage = '快捷输入已保存';
     } catch (_error) { this.tabletSettingsMessage = ''; this.tabletSettingsError = '保存失败，请重试。'; }
   }
 
   private quickInputLabel(index: number): string {
-    const text = this.quickInputs[index].replace(/\s+/g, ' ').trim();
-    return text.length > 0 ? (text.length > 12 ? text.substring(0, 12) + '…' : text) : '快捷输入 ' + (index + 1);
+    return '快捷输入' + (index + 1);
   }
 
   private sidebarIsCompact(): boolean {
     return this.sidebarCollapsed;
+  }
+
+  private toggleRoutingPanel(): void {
+    this.routingCollapsed = !this.routingCollapsed;
+    this.persistTabletPreferences();
   }
 
   private toggleSessionSidebar(): void {
@@ -413,22 +422,25 @@ struct Index {
     });
     nearbyChannel.subscribe((message: WireMessage, epoch: number): void => {
       if (!this.pageActive || epoch !== nearbyChannel.readyEpoch()) { return; }
-      this.routingStore.receive(message, epoch);
+      this.deviceInfoPoller.acknowledge(message, epoch);
+      this.routingStore.receive(message, epoch, nearbyChannel.connectedComputeInfo());
       this.refreshRoutingView();
     }, (connected: boolean, _epoch: number): void => {
-      if (!connected) { this.routingStore.clear(); }
+      if (!connected) { this.routingStore.clear(); this.deviceInfoPoller.clear(); }
       if (this.pageActive) { this.refreshRoutingView(); }
     });
     this.refreshRoutingView();
   }
 
   private stopRoutingView(): void {
+    this.deviceInfoPoller.clear();
     inferenceClient.setRoutingListener(null);
     nearbyChannel.unsubscribe();
     this.routingStore.clear(); this.routingJson = '{}';
   }
 
   private refreshRoutingView(): void {
+    this.deviceInfoPoller.poll(this.pageActive ? nearbyChannel.readyEpoch() : -1);
     this.routingJson = this.routingStore.snapshot(inferenceClient.routingCalls(), nearbyChannel.selfLabel(),
       nearbyChannel.localUid(), nearbyChannel.isConnected(), nearbyChannel.readyEpoch(), nearbyChannel.connectedComputeInfo());
   }
@@ -808,7 +820,7 @@ struct Index {
           ForEach([0, 1, 2], (index: number) => {
             Button(this.quickInputLabel(index)).fontSize(12).height(36).fontColor('#0F8A74').backgroundColor('#E0F1EB')
               .borderRadius(12).layoutWeight(1).enabled(this.quickInputs[index].trim().length > 0 && !this.preparingSubmission)
-              .accessibilityText(this.quickInputs[index])
+              .accessibilityText(this.quickInputLabel(index))
               .onClick(() => { this.message = this.quickInputs[index]; })
           }, (index: number) => index.toString())
         }.width('100%')
@@ -821,10 +833,10 @@ struct Index {
   sessionSidebar() {
     Column({ space: 10 }) {
       if (this.sidebarIsCompact()) {
-        Button('☰').height(36).width('100%').fontColor('#0F8A74').fontSize(13)
+        Button('☰').type(ButtonType.Normal).height(40).width(40).padding(0).fontColor('#0F8A74').fontSize(13)
           .backgroundColor(Color.White).borderRadius(12).accessibilityText('展开会话栏')
           .onClick(() => { this.toggleSessionSidebar(); })
-        Button('＋').height(40).width('100%').fontSize(20).fontColor(Color.White).backgroundColor('#0F8A74')
+        Button('+').type(ButtonType.Normal).height(40).width(40).padding(0).fontSize(24).fontColor(Color.White).backgroundColor('#0F8A74')
           .accessibilityText('新建会话').onClick(() => { this.newSession(); })
       } else {
         Row({ space: 6 }) {
@@ -842,7 +854,7 @@ struct Index {
         Column({ space: 8 }) {
           ForEach(this.sessions, (session: TabletSession, index: number) => {
             if (this.sidebarIsCompact()) {
-              Button((index + 1).toString()).width('100%').height(40).fontSize(13).fontColor('#0F8A74')
+              Button((index + 1).toString()).type(ButtonType.Normal).width(40).height(40).padding(0).fontSize(13).fontColor('#0F8A74')
                 .backgroundColor(session.id === this.selectedSessionId ? '#D8F3EA' : Color.White)
                 .accessibilityText(session.title).onClick(() => { this.selectSession(session.id); })
             } else {
@@ -856,14 +868,16 @@ struct Index {
                 .onClick(() => { this.selectSession(session.id); })
             }
           }, (session: TabletSession) => session.id)
-        }.width('100%')
-      }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
-      Button(this.sidebarIsCompact() ? '×' : '清除待发送任务').height(36).width('100%').fontSize(12)
+        }.width('100%').constraintSize({ minHeight: '100%' }).justifyContent(FlexAlign.Start)
+          .alignItems(this.sidebarIsCompact() ? HorizontalAlign.Center : HorizontalAlign.Start)
+      }.layoutWeight(1).width('100%').scrollable(ScrollDirection.Vertical).align(Alignment.TopStart).scrollBar(BarState.Off)
+      Button(this.sidebarIsCompact() ? '×' : '清除待发送任务').type(ButtonType.Normal).height(40)
+        .width(this.sidebarIsCompact() ? 40 : '100%').padding(this.sidebarIsCompact() ? 0 : 8).fontSize(12)
         .fontColor('#C4473A').backgroundColor(Color.White).enabled(this.taskQueue.length > 0)
         .accessibilityText('清除待发送任务').onClick(() => { this.taskQueue = []; })
-    }.width(this.sidebarIsCompact() ? 56 : Math.min(this.sidebarWidth, this.viewportWidth * 0.32))
-      .height('100%').padding(this.sidebarIsCompact() ? 6 : 10).backgroundColor('#F7FBFA').borderRadius(16)
-      .alignItems(HorizontalAlign.Start)
+    }.width(this.sidebarIsCompact() ? 64 : Math.min(this.sidebarWidth, this.viewportWidth * 0.32))
+      .height('100%').padding(this.sidebarIsCompact() ? 8 : 10).backgroundColor('#F7FBFA').borderRadius(16)
+      .alignItems(this.sidebarIsCompact() ? HorizontalAlign.Center : HorizontalAlign.Start)
   }
 
   @Builder
@@ -888,15 +902,28 @@ struct Index {
   }
 
   @Builder
+  routingHeader() {
+    Row() {
+      Text(this.routingCollapsed ? '▸ 任务路由' : '▾ 任务路由').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
+      Blank()
+      Text(this.clusterSummary).fontSize(11).fontColor('#0F8A74').maxLines(1)
+    }.width('100%').height(28)
+      .accessibilityText(this.routingCollapsed ? '展开任务路由' : '收起任务路由')
+      .onClick(() => { this.toggleRoutingPanel(); })
+  }
+
+  @Builder
   routingPanel() {
-    Column({ space: 8 }) {
-      Row() {
-        Text('任务路由').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#16332C')
-        Blank()
-        Text(this.clusterSummary).fontSize(11).fontColor('#0F8A74').maxLines(1)
-      }.width('100%')
-      TaskRoutingView({ eventJson: this.routingJson }).width('100%').layoutWeight(1)
-    }.width('100%').layoutWeight(5).constraintSize({ minHeight: 120 }).padding(12).backgroundColor(Color.White).borderRadius(16)
+    if (this.routingCollapsed) {
+      Column() {
+        this.routingHeader()
+      }.width('100%').height(52).padding(12).backgroundColor(Color.White).borderRadius(16)
+    } else {
+      Column({ space: 8 }) {
+        this.routingHeader()
+        TaskRoutingView({ eventJson: this.routingJson }).width('100%').layoutWeight(1)
+      }.width('100%').layoutWeight(5).constraintSize({ minHeight: 120 }).padding(12).backgroundColor(Color.White).borderRadius(16)
+    }
   }
 
   @Builder
